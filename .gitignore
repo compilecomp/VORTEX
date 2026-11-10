@@ -1,0 +1,14 @@
+# VORTEX build artifacts
+/target
+**/*.rs.bk
+
+# Local secrets: credentials live OUTSIDE the repository, but if a token ever
+# lands here by accident it must never be committed.
+.secrets/
+*.token
+*_token.txt
+.env
+.env.*
+
+# Tooling
+/cep_lint_report.json

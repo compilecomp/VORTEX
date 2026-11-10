@@ -1,0 +1,12 @@
+[package]
+name = "vortex-nv1"
+description = "NV-1 64-bit NaN-boxed VM value model with GC-colored references"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]

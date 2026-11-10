@@ -1,0 +1,15 @@
+[package]
+name = "vortex-t0"
+description = "T0 interpreter: computed dispatch over UGB, corrected load barrier, epoch capability checks, sampled back-edges, AOSS numeric transitions"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+vortex-nv1 = { path = "../vortex-nv1" }
+vortex-ugb = { path = "../vortex-ugb" }
+vortex-runtime = { path = "../vortex-runtime" }

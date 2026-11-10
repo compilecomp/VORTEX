@@ -1,0 +1,35 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/vortex-nv1",
+    "crates/vortex-ugb",
+    "crates/vortex-runtime",
+    "crates/vortex-t0",
+    "crates/vortex-ir",
+    "crates/vortex-cli",
+    "tools/cep_lint",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+repository = "https://github.com/compilecomp/VORTEX"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+
+# Failure policy note: the engine's error discipline is the typed Trap
+# taxonomy (vortex-runtime::trap) plus documented panics for builder and
+# verifier invariant violations (doc standard 3.5: "Violation of an invariant
+# must result in a panic or a well-defined error state"). `expect`/`unwrap`
+# therefore appear only at those documented sites, so the blanket clippy
+# restrictions are relaxed here and enforced by review and the trap tests.
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+float_cmp = "warn"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1

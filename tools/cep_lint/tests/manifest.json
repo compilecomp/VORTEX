@@ -1,0 +1,292 @@
+{
+  "scenarios": [
+    {
+      "name": "file-header/missing",
+      "rule": "CEP-LINT-FILE-HEADER",
+      "compliant": false,
+      "file": "scenario/violating.rs",
+      "content": "pub fn no_header() {}\n",
+      "expected_findings": 1
+    },
+    {
+      "name": "file-header/present",
+      "rule": "CEP-LINT-FILE-HEADER",
+      "compliant": true,
+      "file": "scenario/compliant.rs",
+      "content": "// CEP:FILE scenario/compliant.rs\n// CEP:WHAT Synthetic scenario source used by the self-test manifest.\n// CEP:WHY Manifest scenarios are the self-verification gate (50.6).\n// CEP:CLASS CEP-2\n// CEP:STATUS complete\n// CEP:FAILURE Reports findings; never panics.\n// CEP:ASSUMES None.\n// CEP:COST O(1).\n// CEP:EVIDENCE cep_lint --self-test\npub fn ok() {}\n",
+      "expected_findings": 0
+    },
+    {
+      "name": "func-block/missing",
+      "rule": "CEP-LINT-FUNC-BLOCK",
+      "compliant": false,
+      "file": "scenario/violating.rs",
+      "content": "// CEP:FILE s\n// CEP:WHAT Synthetic scenario source used by the self-test manifest.\n// CEP:WHY Manifest scenarios are the self-verification gate (50.6).\n// CEP:CLASS CEP-2\n// CEP:STATUS complete\n// CEP:FAILURE Reports findings; never panics.\n// CEP:ASSUMES None.\n// CEP:COST O(1).\n// CEP:EVIDENCE cep_lint --self-test\npub fn big() {\n    x += 1;\n    x += 2;\n    x += 3;\n    x += 4;\n    x += 5;\n}\n",
+      "expected_findings": 1
+    },
+    {
+      "name": "func-block/present",
+      "rule": "CEP-LINT-FUNC-BLOCK",
+      "compliant": true,
+      "file": "scenario/compliant.rs",
+      "content": "// CEP:FILE s\n// CEP:WHAT Synthetic scenario source used by the self-test manifest.\n// CEP:WHY Manifest scenarios are the self-verification gate (50.6).\n// CEP:CLASS CEP-2\n// CEP:STATUS complete\n// CEP:FAILURE Reports findings; never panics.\n// CEP:ASSUMES None.\n// CEP:COST O(1).\n// CEP:EVIDENCE cep_lint --self-test\n\n// CEP:WHAT Adds five constants.\n// CEP:WHY Scenario.\n// CEP:STATUS complete\n// CEP:FAILURE None.\n// CEP:ASSUMES None.\n// CEP:COST O(1).\n// CEP:EVIDENCE self-test\npub fn big() {\n    let mut x = 0;\n    x += 1;\n    x += 2;\n    x += 3;\n    x += 4;\n    x += 5;\n    let _ = x;\n}\n",
+      "expected_findings": 0
+    },
+    {
+      "name": "status-value/bad",
+      "rule": "CEP-LINT-STATUS-VALUE",
+      "compliant": false,
+      "file": "scenario/violating.rs",
+      "content": "// CEP:FILE s\n// CEP:WHAT Synthetic scenario source used by the self-test manifest.\n// CEP:WHY Manifest scenarios are the self-verification gate (50.6).\n// CEP:CLASS CEP-2\n// CEP:STATUS done\n// CEP:FAILURE Reports findings; never panics.\n// CEP:ASSUMES None.\n// CEP:COST O(1).\n// CEP:EVIDENCE cep_lint --self-test\npub fn f() {}\n",
+      "expected_findings": 1
+    },
+    {
+      "name": "status-value/good",
+      "rule": "CEP-LINT-STATUS-VALUE",
+      "compliant": true,
+      "file": "scenario/compliant.rs",
+      "content": "// CEP:FILE s\n// CEP:WHAT Synthetic scenario source used by the self-test manifest.\n// CEP:WHY Manifest scenarios are the self-verification gate (50.6).\n// CEP:CLASS CEP-2\n// CEP:STATUS complete\n// CEP:FAILURE Reports findings; never panics.\n// CEP:ASSUMES None.\n// CEP:COST O(1).\n// CEP:EVIDENCE cep_lint --self-test\npub fn f() {}\n",
+      "expected_findings": 0
+    },
+    {
+      "name": "todo-owner/anonymous",
+      "rule": "CEP-LINT-TODO-OWNER",
+      "compliant": false,
+      "file": "scenario/violating.rs",
+      "content": "// CEP:FILE s\n// CEP:WHAT Synthetic scenario source used by the self-test manifest.\n// CEP:WHY Manifest scenarios are the self-verification gate (50.6).\n// CEP:CLASS CEP-2\n// CEP:STATUS complete\n// CEP:FAILURE Reports findings; never panics.\n// CEP:ASSUMES None.\n// CEP:COST O(1).\n// CEP:EVIDENCE cep_lint --self-test\n// TODO fix this later\npub fn f() {}\n",
+      "expected_findings": 1
+    },
+    {
+      "name": "todo-owner/sanctioned",
+      "rule": "CEP-LINT-TODO-OWNER",
+      "compliant": true,
+      "file": "scenario/compliant.rs",
+      "content": "// CEP:FILE s\n// CEP:WHAT Synthetic scenario source used by the self-test manifest.\n// CEP:WHY Manifest scenarios are the self-verification gate (50.6).\n// CEP:CLASS CEP-2\n// CEP:STATUS complete\n// CEP:FAILURE Reports findings; never panics.\n// CEP:ASSUMES None.\n// CEP:COST O(1).\n// CEP:EVIDENCE cep_lint --self-test\n// CEP:TODO(compilecomp): CEP-7: deferred work\npub fn f() {}\n",
+      "expected_findings": 0
+    },
+    {
+      "name": "stub-decl/unowned",
+      "rule": "CEP-LINT-STUB-DECL",
+      "compliant": false,
+      "file": "scenario/violating.rs",
+      "content": "// CEP:FILE s\n// CEP:WHAT Synthetic scenario source used by the self-test manifest.\n// CEP:WHY Manifest scenarios are the self-verification gate (50.6).\n// CEP:CLASS CEP-2\n// CEP:STATUS stub\n// CEP:FAILURE Reports findings; never panics.\n// CEP:ASSUMES None.\n// CEP:COST O(1).\n// CEP:EVIDENCE cep_lint --self-test\npub fn f() {}\n",
+      "expected_findings": 1
+    },
+    {
+      "name": "stub-decl/owned",
+      "rule": "CEP-LINT-STUB-DECL",
+      "compliant": true,
+      "file": "scenario/compliant.rs",
+      "content": "// CEP:FILE s\n// CEP:WHAT Synthetic scenario source used by the self-test manifest.\n// CEP:WHY Manifest scenarios are the self-verification gate (50.6).\n// CEP:CLASS CEP-2\n// CEP:STATUS stub\n// CEP:OWNER compilecomp\n// CEP:TICKET CEP-9\n// CEP:FAILURE Reports findings; never panics.\n// CEP:ASSUMES None.\n// CEP:COST O(1).\n// CEP:EVIDENCE cep_lint --self-test\npub fn f() {}\n",
+      "expected_findings": 0
+    },
+    {
+      "name": "placeholder-comment/present",
+      "rule": "CEP-LINT-PLACEHOLDER-COMMENT",
+      "compliant": false,
+      "file": "scenario/violating.rs",
+      "content": "// CEP:FILE s\n// CEP:WHAT Synthetic scenario source used by the self-test manifest.\n// CEP:WHY Manifest scenarios are the self-verification gate (50.6).\n// CEP:CLASS CEP-2\n// CEP:STATUS complete\n// CEP:FAILURE Reports findings; never panics.\n// CEP:ASSUMES None.\n// CEP:COST O(1).\n// CEP:EVIDENCE cep_lint --self-test\n// this is not implemented yet\npub fn f() {}\n",
+      "expected_findings": 1
+    },
+    {
+      "name": "placeholder-comment/absent",
+      "rule": "CEP-LINT-PLACEHOLDER-COMMENT",
+      "compliant": true,
+      "file": "scenario/compliant.rs",
+      "content": "// CEP:FILE s\n// CEP:WHAT Synthetic scenario source used by the self-test manifest.\n// CEP:WHY Manifest scenarios are the self-verification gate (50.6).\n// CEP:CLASS CEP-2\n// CEP:STATUS complete\n// CEP:FAILURE Reports findings; never panics.\n// CEP:ASSUMES None.\n// CEP:COST O(1).\n// CEP:EVIDENCE cep_lint --self-test\n// documented behavior\npub fn f() {}\n",
+      "expected_findings": 0
+    },
+    {
+      "name": "placeholder-text/present",
+      "rule": "CEP-LINT-PLACEHOLDER-TEXT",
+      "compliant": false,
+      "file": "scenario/violating.rs",
+      "content": "// CEP:FILE s\n// CEP:WHAT Synthetic scenario source used by the self-test manifest.\n// CEP:WHY Manifest scenarios are the self-verification gate (50.6).\n// CEP:CLASS CEP-2\n// CEP:STATUS complete\n// CEP:FAILURE Reports findings; never panics.\n// CEP:ASSUMES None.\n// CEP:COST O(1).\n// CEP:EVIDENCE cep_lint --self-test\npub fn f() { let s = \"not implemented\"; let _ = s; }\n",
+      "expected_findings": 1
+    },
+    {
+      "name": "placeholder-text/absent",
+      "rule": "CEP-LINT-PLACEHOLDER-TEXT",
+      "compliant": true,
+      "file": "scenario/compliant.rs",
+      "content": "// CEP:FILE s\n// CEP:WHAT Synthetic scenario source used by the self-test manifest.\n// CEP:WHY Manifest scenarios are the self-verification gate (50.6).\n// CEP:CLASS CEP-2\n// CEP:STATUS complete\n// CEP:FAILURE Reports findings; never panics.\n// CEP:ASSUMES None.\n// CEP:COST O(1).\n// CEP:EVIDENCE cep_lint --self-test\npub fn f() { let s = \"ready\"; let _ = s; }\n",
+      "expected_findings": 0
+    },
+    {
+      "name": "magic-number/present",
+      "rule": "CEP-LINT-MAGIC-NUMBER",
+      "compliant": false,
+      "file": "scenario/violating.cpp",
+      "content": "// CEP:FILE s.cpp\n// CEP:WHAT s\n// CEP:WHY s\n// CEP:CLASS CEP-2\n// CEP:STATUS complete\n// CEP:FAILURE s\n// CEP:ASSUMES s\n// CEP:COST s\n// CEP:EVIDENCE s\nint delay() { return 500; }\n",
+      "expected_findings": 1
+    },
+    {
+      "name": "magic-number/const",
+      "rule": "CEP-LINT-MAGIC-NUMBER",
+      "compliant": true,
+      "file": "scenario/compliant.cpp",
+      "content": "// CEP:FILE s.cpp\n// CEP:WHAT s\n// CEP:WHY s\n// CEP:CLASS CEP-2\n// CEP:STATUS complete\n// CEP:FAILURE s\n// CEP:ASSUMES s\n// CEP:COST s\n// CEP:EVIDENCE s\nconst int kDelay = 500;\nint delay() { return kDelay; }\n",
+      "expected_findings": 0
+    },
+    {
+      "name": "macro-prefix/bad",
+      "rule": "CEP-LINT-MACRO-PREFIX",
+      "compliant": false,
+      "file": "scenario/violating.rs",
+      "content": "// CEP:FILE s\n// CEP:WHAT Synthetic scenario source used by the self-test manifest.\n// CEP:WHY Manifest scenarios are the self-verification gate (50.6).\n// CEP:CLASS CEP-2\n// CEP:STATUS complete\n// CEP:FAILURE Reports findings; never panics.\n// CEP:ASSUMES None.\n// CEP:COST O(1).\n// CEP:EVIDENCE cep_lint --self-test\nmacro_rules! helper { () => {} }\n",
+      "expected_findings": 1
+    },
+    {
+      "name": "macro-prefix/prefixed",
+      "rule": "CEP-LINT-MACRO-PREFIX",
+      "compliant": true,
+      "file": "scenario/compliant.rs",
+      "content": "// CEP:FILE s\n// CEP:WHAT Synthetic scenario source used by the self-test manifest.\n// CEP:WHY Manifest scenarios are the self-verification gate (50.6).\n// CEP:CLASS CEP-2\n// CEP:STATUS complete\n// CEP:FAILURE Reports findings; never panics.\n// CEP:ASSUMES None.\n// CEP:COST O(1).\n// CEP:EVIDENCE cep_lint --self-test\nmacro_rules! CEP_helper { () => {} }\n",
+      "expected_findings": 0
+    },
+    {
+      "name": "hot-banned/new-delete",
+      "rule": "CEP-LINT-HOT-BANNED",
+      "compliant": false,
+      "file": "scenario/violating.cpp",
+      "content": "// CEP:FILE s.cpp\n// CEP:WHAT s\n// CEP:WHY s\n// CEP:CLASS CEP-0\n// CEP:STATUS complete\n// CEP:FAILURE s\n// CEP:ASSUMES s\n// CEP:COST s\n// CEP:EVIDENCE s\nvoid f() { auto p = new int(3); delete p; }\n",
+      "expected_findings": 2
+    },
+    {
+      "name": "hot-banned/clean",
+      "rule": "CEP-LINT-HOT-BANNED",
+      "compliant": true,
+      "file": "scenario/compliant.cpp",
+      "content": "// CEP:FILE s.cpp\n// CEP:WHAT s\n// CEP:WHY s\n// CEP:CLASS CEP-0\n// CEP:STATUS complete\n// CEP:FAILURE s\n// CEP:ASSUMES s\n// CEP:COST s\n// CEP:EVIDENCE s\nvoid f() { }\n",
+      "expected_findings": 0
+    },
+    {
+      "name": "stub-body/empty",
+      "rule": "CEP-LINT-STUB-BODY",
+      "compliant": false,
+      "file": "scenario/violating.rs",
+      "content": "// CEP:FILE s\n// CEP:WHAT Synthetic scenario source used by the self-test manifest.\n// CEP:WHY Manifest scenarios are the self-verification gate (50.6).\n// CEP:CLASS CEP-2\n// CEP:STATUS complete\n// CEP:FAILURE Reports findings; never panics.\n// CEP:ASSUMES None.\n// CEP:COST O(1).\n// CEP:EVIDENCE cep_lint --self-test\npub fn empty() {}\n",
+      "expected_findings": 1
+    },
+    {
+      "name": "stub-body/declared",
+      "rule": "CEP-LINT-STUB-BODY",
+      "compliant": true,
+      "file": "scenario/compliant.rs",
+      "content": "// CEP:FILE s\n// CEP:WHAT Synthetic scenario source used by the self-test manifest.\n// CEP:WHY Manifest scenarios are the self-verification gate (50.6).\n// CEP:CLASS CEP-2\n// CEP:STATUS stub\n// CEP:OWNER compilecomp\n// CEP:TICKET CEP-9\n// CEP:FAILURE Reports findings; never panics.\n// CEP:ASSUMES None.\n// CEP:COST O(1).\n// CEP:EVIDENCE cep_lint --self-test\npub fn empty() {}\n",
+      "expected_findings": 0
+    },
+    {
+      "name": "empty-catch/present",
+      "rule": "CEP-LINT-EMPTY-CATCH",
+      "compliant": false,
+      "file": "scenario/violating.cpp",
+      "content": "// CEP:FILE s\n// CEP:WHAT s\n// CEP:WHY s\n// CEP:CLASS CEP-2\n// CEP:STATUS complete\n// CEP:FAILURE s\n// CEP:ASSUMES s\n// CEP:COST s\n// CEP:EVIDENCE s\nvoid f() { try { g(); } catch (...) {} }\n",
+      "expected_findings": 1
+    },
+    {
+      "name": "empty-catch/handled",
+      "rule": "CEP-LINT-EMPTY-CATCH",
+      "compliant": true,
+      "file": "scenario/compliant.cpp",
+      "content": "// CEP:FILE s\n// CEP:WHAT s\n// CEP:WHY s\n// CEP:CLASS CEP-2\n// CEP:STATUS complete\n// CEP:FAILURE s\n// CEP:ASSUMES s\n// CEP:COST s\n// CEP:EVIDENCE s\nvoid f() { try { g(); } catch (...) { log(); } }\n",
+      "expected_findings": 0
+    },
+    {
+      "name": "empty-branch/present",
+      "rule": "CEP-LINT-EMPTY-BRANCH",
+      "compliant": false,
+      "file": "scenario/violating.rs",
+      "content": "// CEP:FILE s\n// CEP:WHAT Synthetic scenario source used by the self-test manifest.\n// CEP:WHY Manifest scenarios are the self-verification gate (50.6).\n// CEP:CLASS CEP-2\n// CEP:STATUS complete\n// CEP:FAILURE Reports findings; never panics.\n// CEP:ASSUMES None.\n// CEP:COST O(1).\n// CEP:EVIDENCE cep_lint --self-test\npub fn f(b: bool) {\n    if b {}\n}\n",
+      "expected_findings": 1
+    },
+    {
+      "name": "empty-branch/absent",
+      "rule": "CEP-LINT-EMPTY-BRANCH",
+      "compliant": true,
+      "file": "scenario/compliant.rs",
+      "content": "// CEP:FILE s\n// CEP:WHAT Synthetic scenario source used by the self-test manifest.\n// CEP:WHY Manifest scenarios are the self-verification gate (50.6).\n// CEP:CLASS CEP-2\n// CEP:STATUS complete\n// CEP:FAILURE Reports findings; never panics.\n// CEP:ASSUMES None.\n// CEP:COST O(1).\n// CEP:EVIDENCE cep_lint --self-test\npub fn f(b: bool) {\n    if b { let _ = 1; }\n}\n",
+      "expected_findings": 0
+    },
+    {
+      "name": "constant-return/present",
+      "rule": "CEP-LINT-CONSTANT-RETURN",
+      "compliant": false,
+      "file": "scenario/violating.cpp",
+      "content": "// CEP:FILE s\n// CEP:WHAT s\n// CEP:WHY s\n// CEP:CLASS CEP-2\n// CEP:STATUS complete\n// CEP:FAILURE s\n// CEP:ASSUMES s\n// CEP:COST s\n// CEP:EVIDENCE s\nbool f(int x) { return true; }\n",
+      "expected_findings": 1
+    },
+    {
+      "name": "constant-return/computed",
+      "rule": "CEP-LINT-CONSTANT-RETURN",
+      "compliant": true,
+      "file": "scenario/compliant.cpp",
+      "content": "// CEP:FILE s\n// CEP:WHAT s\n// CEP:WHY s\n// CEP:CLASS CEP-2\n// CEP:STATUS complete\n// CEP:FAILURE s\n// CEP:ASSUMES s\n// CEP:COST s\n// CEP:EVIDENCE s\nbool f(int x) { return x > 0; }\n",
+      "expected_findings": 0
+    },
+    {
+      "name": "naming-type/bad",
+      "rule": "CEP-LINT-NAMING-TYPE",
+      "compliant": false,
+      "file": "scenario/violating.rs",
+      "content": "// CEP:FILE s\n// CEP:WHAT Synthetic scenario source used by the self-test manifest.\n// CEP:WHY Manifest scenarios are the self-verification gate (50.6).\n// CEP:CLASS CEP-2\n// CEP:STATUS complete\n// CEP:FAILURE Reports findings; never panics.\n// CEP:ASSUMES None.\n// CEP:COST O(1).\n// CEP:EVIDENCE cep_lint --self-test\nstruct bad_type { a: u32 }\n",
+      "expected_findings": 1
+    },
+    {
+      "name": "naming-type/pascal",
+      "rule": "CEP-LINT-NAMING-TYPE",
+      "compliant": true,
+      "file": "scenario/compliant.rs",
+      "content": "// CEP:FILE s\n// CEP:WHAT Synthetic scenario source used by the self-test manifest.\n// CEP:WHY Manifest scenarios are the self-verification gate (50.6).\n// CEP:CLASS CEP-2\n// CEP:STATUS complete\n// CEP:FAILURE Reports findings; never panics.\n// CEP:ASSUMES None.\n// CEP:COST O(1).\n// CEP:EVIDENCE cep_lint --self-test\nstruct GoodType { a: u32 }\n",
+      "expected_findings": 0
+    },
+    {
+      "name": "naming-func/bad",
+      "rule": "CEP-LINT-NAMING-FUNC",
+      "compliant": false,
+      "file": "scenario/violating.rs",
+      "content": "// CEP:FILE s\n// CEP:WHAT Synthetic scenario source used by the self-test manifest.\n// CEP:WHY Manifest scenarios are the self-verification gate (50.6).\n// CEP:CLASS CEP-2\n// CEP:STATUS complete\n// CEP:FAILURE Reports findings; never panics.\n// CEP:ASSUMES None.\n// CEP:COST O(1).\n// CEP:EVIDENCE cep_lint --self-test\npub fn BadName() {}\n",
+      "expected_findings": 1
+    },
+    {
+      "name": "naming-func/snake",
+      "rule": "CEP-LINT-NAMING-FUNC",
+      "compliant": true,
+      "file": "scenario/compliant.rs",
+      "content": "// CEP:FILE s\n// CEP:WHAT Synthetic scenario source used by the self-test manifest.\n// CEP:WHY Manifest scenarios are the self-verification gate (50.6).\n// CEP:CLASS CEP-2\n// CEP:STATUS complete\n// CEP:FAILURE Reports findings; never panics.\n// CEP:ASSUMES None.\n// CEP:COST O(1).\n// CEP:EVIDENCE cep_lint --self-test\npub fn good_name() {}\n",
+      "expected_findings": 0
+    },
+    {
+      "name": "commented-code/present",
+      "rule": "CEP-LINT-COMMENTED-CODE",
+      "compliant": false,
+      "file": "scenario/violating.rs",
+      "content": "// CEP:FILE s\n// CEP:WHAT Synthetic scenario source used by the self-test manifest.\n// CEP:WHY Manifest scenarios are the self-verification gate (50.6).\n// CEP:CLASS CEP-2\n// CEP:STATUS complete\n// CEP:FAILURE Reports findings; never panics.\n// CEP:ASSUMES None.\n// CEP:COST O(1).\n// CEP:EVIDENCE cep_lint --self-test\n// let x = compute();\npub fn f() {}\n",
+      "expected_findings": 1
+    },
+    {
+      "name": "commented-code/absent",
+      "rule": "CEP-LINT-COMMENTED-CODE",
+      "compliant": true,
+      "file": "scenario/compliant.rs",
+      "content": "// CEP:FILE s\n// CEP:WHAT Synthetic scenario source used by the self-test manifest.\n// CEP:WHY Manifest scenarios are the self-verification gate (50.6).\n// CEP:CLASS CEP-2\n// CEP:STATUS complete\n// CEP:FAILURE Reports findings; never panics.\n// CEP:ASSUMES None.\n// CEP:COST O(1).\n// CEP:EVIDENCE cep_lint --self-test\n// compute() was removed; see CEP-11.\npub fn f() {}\n",
+      "expected_findings": 0
+    },
+    {
+      "name": "doc-sync/pipeline-only",
+      "rule": "CEP-LINT-DOC-SYNC",
+      "compliant": false,
+      "file": "scenario/violating.rs",
+      "content": "// CEP:FILE s\n// CEP:WHAT Synthetic scenario source used by the self-test manifest.\n// CEP:WHY Manifest scenarios are the self-verification gate (50.6).\n// CEP:CLASS CEP-2\n// CEP:STATUS complete\n// CEP:FAILURE Reports findings; never panics.\n// CEP:ASSUMES None.\n// CEP:COST O(1).\n// CEP:EVIDENCE cep_lint --self-test\npub fn f() {}\n",
+      "expected_findings": 0
+    },
+    {
+      "name": "doc-sync/pipeline-only-ok",
+      "rule": "CEP-LINT-DOC-SYNC",
+      "compliant": true,
+      "file": "scenario/compliant.rs",
+      "content": "// CEP:FILE s\n// CEP:WHAT Synthetic scenario source used by the self-test manifest.\n// CEP:WHY Manifest scenarios are the self-verification gate (50.6).\n// CEP:CLASS CEP-2\n// CEP:STATUS complete\n// CEP:FAILURE Reports findings; never panics.\n// CEP:ASSUMES None.\n// CEP:COST O(1).\n// CEP:EVIDENCE cep_lint --self-test\npub fn f() {}\n",
+      "expected_findings": 0
+    }
+  ]
+}

@@ -214,15 +214,15 @@ Selected
 
 Unresolved
  = requires further specification.
-Component	Current decision
-VM values	Selected  NaN boxing
-Register model	Selected  Dynamically allocated registers
-Language type system	Selected  None; engine uses UGB
-Memory model	Unresolved
-Garbage collector	Selected  Incremental, concurrent, generational
-Exceptions	Unresolved
-Calls	Unresolved
-Targets	Clarification needed  x86-64, AArch64, R-V5
+Component       Current decision
+VM values       Selected  NaN boxing
+Register model  Selected  Dynamically allocated registers
+Language type system    Selected  None; engine uses UGB
+Memory model    Unresolved
+Garbage collector       Selected  Incremental, concurrent, generational
+Exceptions      Unresolved
+Calls   Unresolved
+Targets Clarification needed  x86-64, AArch64, R-V5
 
 2. Consequences of the selected decisions
 2.1 VM values: NaN boxing
@@ -330,10 +330,10 @@ That decision affects baseline compilation, optimization, register preservation,
 We should not decide it prematurely.
 3. Still unresolved
 These deserve independent design work.
-Area	Decisions needed
-Memory model	Heap organization, object layout, arrays, fields, aliasing, memory ordering
-Exceptions	Exceptional CFG edges, runtime unwinding, handler lookup, deoptimization interaction
-Calls	Direct calls, indirect calls, dynamic dispatch, calling conventions, inline caches
+Area    Decisions needed
+Memory model    Heap organization, object layout, arrays, fields, aliasing, memory ordering
+Exceptions      Exceptional CFG edges, runtime unwinding, handler lookup, deoptimization interaction
+Calls   Direct calls, indirect calls, dynamic dispatch, calling conventions, inline caches
 
 I recommend we treat exceptions and calls as separate architectural subsystems rather than burying them inside ordinary control-flow rules.
 4. Target architectures
@@ -4206,6 +4206,29 @@ ret                        ; Normal return
 
 **INV-FFI-006**: Exception translation must preserve the semantic contract of both languages. A JavaScript exception must not silently become a C success code.
 
+**INV-FFI-007**: Cross-language inlining (Universal Engine 6.1) is permitted only when the SemanticCompatibilityMatrix check (FFI-1 section 5) proves exception visibility, ordering, value semantics, resource discipline, GC visibility, and continuation compatibility for the specific call site. An unproven inline is a specification violation even when mechanically cheap.
+
+---
+
+### 5. The SemanticCompatibilityMatrix (Corrected Addition)
+
+The Universal Engine section (6.1/6.2) and the trampoline architecture establish that mechanical boundary overhead can approach zero. What the 1.0 text lacked is the formal precondition checklist for when cross-language inlining is legal at all (finding FFI-1, resolved). "Near-zero overhead if semantic adapters are eliminable" requires a proof object that says the adapters ARE eliminable. That proof is the SemanticCompatibilityMatrix, and AOSS must consult it before any cross-language inlining is attempted. If the matrix cannot prove semantic equivalence for a boundary, inlining is aborted and the trampoline remains, regardless of how cheap the mechanical marshaling would be.
+
+**Definition.** For an ordered pair of language contexts (caller L1, callee L2), the matrix is the set of compatibility facts the boundary must establish:
+
+| Dimension | Fact required for inlining | Failure action |
+|---|---|---|
+| Exception visibility | Every exception L2 can raise is either caught inside the callee, or L1 has a handler prepared to catch its translated form; the exception-class mapping is total for the callee's raise set | Abort inline; keep the trampoline's exception adapter |
+| Global-state ordering | L2's writes to state observable by L1 (globals, shared objects, FFI-visible memory) respect L1's evaluation-order expectations; no reordering hazard across the inlined body | Abort inline |
+| Value semantics | The argument and return value domains used at the call site have identical concrete semantics in both languages (integer width/wrap policy, float NaN policy per NV-1 section 4, string encoding, reference identity) | Narrow to the proven domain via specialization, or abort |
+| Resource discipline | Capabilities/authorities the callee requires are a subset of what the caller passes; no ambient authority is acquired inside (UGB-INV-01) | Abort inline |
+| GC visibility | Allocation and safepoint behavior of the inlined body remains compatible with the caller's safepoint map; no foreign thread-state transition remains | Rewrite safepoints during inlining, or abort |
+| Continuation | Control never resumes L2 after a throws path that L1 does not model (no finally/ensure halves escaping the inlined region) | Abort inline |
+
+**Mechanics.** The matrix is computed per call site from the callee's summary (raise set, effect summary, value-domain profile) and the caller's context (handlers in scope, evaluation-order constraints). The ForeignCall node (REVISED section 6) carries source_semantics, target_semantics, and exception_adapter fields precisely so this computation has the data it needs. The AOSS check is a pure function: check_matrix(caller_ctx, callee_summary) returns Ok(inline_plan) or Err(reason). The reason is recorded in the compilation log so a rejected inline is diagnosable.
+
+**Rule.** A cross-language inline without a proven matrix entry is a specification violation, even if it appears to work for the tested cases.
+
 ---
 
 ## T2-T5: Optimizing Tier Specification
@@ -4683,12 +4706,12 @@ Python_int_int:
 
 The JavaScript caller is updated to call Python_int_int instead of the generic add.
 
-#### 6.3 Zero-Overhead FFI
+#### 6.3 Near-Zero-Overhead FFI (Corrected)
 
-If both languages are compiled by the same engine (T2-T5), FFI calls can be completely inlined, resulting in zero overhead. The FFI trampoline is only needed when:
+If both languages are compiled by the same engine, cross-language calls can be inlined with the trampoline eliminated, but only when the SemanticCompatibilityMatrix (FFI-1 section 5) proves the boundary's semantic adapters eliminable for that call site. The previous unqualified claim of "zero overhead" is retracted; the defensible contract is: mechanical overhead approaches zero when, and only when, the matrix proof succeeds. The trampoline remains when:
 - The foreign function is not compiled by this engine (e.g., a native C library).
 - The foreign function is too large or complex to inline.
-- The languages have incompatible semantics (e.g., different exception models).
+- The SemanticCompatibilityMatrix check fails (exception models, evaluation-order hazards, value-domain mismatches, resource discipline, GC visibility, or continuation compatibility).
 
 ### 7. Summary: The Complete Tier Structure
 
@@ -4890,6 +4913,17 @@ That means:
 - no O(N) graph translation just to change terminology.
 
 The compiler can expose a VSDG view for analysis/debugging, but the physical node storage is shared.
+
+**Overlay mutation API (required definition).** The overlay's operational vagueness is resolved here (finding VSDG-OVERLAY, resolved). The contract between the base graph and the overlay is:
+
+1. **Single-writer transactional mutation.** All base-graph mutations occur inside an explicit transaction: Graph::edit(|tx| ...). Outside a transaction the graph and every attached overlay are immutable. There is no side-channel mutation path.
+2. **Overlay reads are illegal inside transactions.** During Graph::edit, overlay queries return Err(OverlayLocked) and assert in debug builds. A pass that needs overlay facts must read them before entering the transaction or re-read after commit. No pass can act on overlay state while that state is stale mid-mutation.
+3. **Event log, not callbacks, during mutation.** The transaction records primitive events (NodeInserted, NodeReplaced, EdgeDeleted, EdgeRetargeted, GuardAdded, RegionSplit) with their operands. It does not invoke overlay logic reentrantly.
+4. **Commit-time synchronization.** On tx.commit(), the graph applies events to registered overlays in event order. Each overlay implements on_event(&Event) and reports is_stale(). An overlay that cannot maintain an invariant incrementally marks itself stale and is rebuilt from the base graph on next read. The overlay is a cache; the base graph is the truth.
+5. **Read-only overlay by default during SoN passes.** Optimization passes (GVN, PRE, LICM, guard fusion) run against the base graph and treat overlays as read-only side facts. A pass that invalidates an overlay fact (e.g., GVN redirects an edge) performs the mutation inside a transaction; commit refreshes the overlay. A pass may also explicitly detach an overlay before a long restructuring phase and re-attach afterwards.
+6. **Versioning.** Both graph and overlay carry monotonic revision counters. overlay.revision() == graph.revision() implies the overlay reflects the current graph. Any consumer verifies freshness in O(1) before trusting overlay facts.
+
+Under this contract, GVN operates on the base graph; overlay facts it consumes are re-validated by revision after its transactions commit. An edge deletion in the base graph is delivered to the overlay as an EdgeDeleted event at commit, so the overlay is never silently out of date across a transaction boundary.
 
 ### 2. Layout Hashes Cannot Be Raw Correctness Identities
 
@@ -5430,7 +5464,7 @@ OSR allows the engine to transfer execution from a lower tier (T0/T1) to a highe
 
 #### 1.1 OSR Trigger Points
 - **T0 (Interpreter)**: Back-edge counters (for loops) and call-site counters. When a threshold is crossed, the interpreter invokes the OSR trampoline.
-- **T1 (Stencil Baseline)**: T1 stencils for loop back-edges include a lightweight counter. If tripped, T1 jumps to an OSR stub.
+- **T1 (Stencil Baseline)**: T1 stencils contain a relative jump from each loop back-edge to the CodeBlob's single shared OSR Trampoline Stub (see OSR-1 section 6). The stub, not the stencil, owns the counter, which lives in the Metadata Pool. If tripped, the stub invokes trigger_osr.
 - **T2/T3**: Generally do not trigger OSR to higher tiers; they rely on standard method-entry tier-ups or trace recording (T4).
 
 #### 1.2 The OSR Target
@@ -5521,15 +5555,20 @@ In MIR, the `OSR_ENTRY` block becomes a physical **OSR Stub** in the code cache.
 ### 6. T1 Stencil OSR Mechanism
 T1 uses Copy-and-Patch stencils, so it doesn't have a graph to insert `OSR_ENTRY` blocks into. How does T1 do OSR?
 
-#### 6.1 The T1 OSR Trampoline
-1. T1 stencils for loop back-edges include a 32-bit counter in the code stream.
-2. When the counter trips, the stencil jumps to a **T1 OSR Trampoline** (a small, pre-compiled runtime stub).
-3. The trampoline saves the physical registers, sets up the arguments, and calls the runtime function `trigger_osr(method_id, bytecode_pc, vm_frame_ptr)`.
-4. The runtime compiles the method to T2, generates the T2 OSR Stub, and **patches the T1 back-edge** to jump directly to the T2 OSR Stub.
-5. The trampoline restores registers and jumps to the newly patched T2 stub.
-*Result: The transition is seamless, and subsequent loop iterations execute T2 code directly.*
+#### 6.1 The T1 OSR Trampoline (Corrected: Stencil Purity)
 
----
+The 1.0 mechanism embedded a 32-bit counter inside the T1 stencil code stream. That causes a stencil-pool explosion and is corrected here (finding T1-OSR, resolved).
+
+A counter in the code stream requires pre-compiled "stencil-with-counter" variants for every register mapping and spill state that a back-edge can occur in. The Stencil Pool grows combinatorially with the fixed physical map width, destroying the memory footprint and startup advantages of copy-and-patch.
+
+The corrected mechanism keeps stencils pure and moves the counter outside them:
+
+1. **Pure stencils**: a stencil contains no counters and no counter increment code. Its back-edge terminator is a relative jump to the CodeBlob's OSR Trampoline Stub. Stencil selection remains a pure function of the bytecode operand locations.
+2. **Shared OSR Trampoline Stub**: each T1 CodeBlob carries exactly one OSR Trampoline Stub at its end, emitted once per blob during T1 assembly, not per stencil instance. The stub saves caller-saved physical registers, loads the back-edge counter from the method's Metadata Pool entry, decrements it, and, on trip, calls trigger_osr(method_id, bytecode_pc, vm_frame_ptr) with the metadata-supplied PC. On non-trip, it restores registers and jumps back to the loop head through a patchable back-link.
+3. **Counter in the Metadata Pool**: the counter is a writable 32-bit slot in the Metadata Pool, addressed by the stub. It is thread-local (PROF-1 section 3.1) and needs no atomicity.
+4. **Post-OSR patching**: after T2 emits the OSR Stub, the runtime patches the T1 back-edge jump to target the T2 OSR Stub directly. The T1 trampoline and its metadata counter become cold and are reclaimed by the Code Cache sweeper (CODE-1 section 7).
+
+Pool accounting: stencils per bytecode opcode remain O(operand-location variants). The OSR mechanism adds one stub per CodeBlob and one metadata slot per loop, both O(methods), not O(variants).
 
 ### 7. Deoptimization from OSR Code
 If the optimized (OSR-compiled) code hits a failing guard *inside* the loop, it must deoptimize back to T0.
@@ -5551,6 +5590,7 @@ To guarantee correctness, the following invariants must hold:
 | **OSR-INV-03** | **Representation Safety**: If ARS selects an unboxed representation for an OSR live variable, a type-check guard must be emitted in the `OSR_ENTRY` block. Mismatches must deoptimize, never corrupt. |
 | **OSR-INV-04** | **Deopt Reversibility**: The safepoint map for any PC reachable from an `OSR_ENTRY` block must accurately map physical unboxed registers back to tagged VM frame slots. |
 | **OSR-INV-05** | **No Infinite OSR Loops**: If an OSR transition immediately deoptimizes due to a representation/guard mismatch at the entry block, the runtime must mark the method/PC as "OSR-unstable" and prevent further OSR attempts for that specific profile. |
+| **OSR-INV-06** | **Stencil Purity**: T1 stencils must not contain profiling counters, OSR state, or per-method writable data. All counters live in the Metadata Pool and are accessed only through shared stubs. A stencil variant created solely to host a counter is a specification violation. |
 
 ---
 
@@ -5594,11 +5634,22 @@ T0 (Interpreter) and T1 (Stencil Baseline) use explicit instrumentation.
 - **Flushing**: At safepoints (or via a periodic timer interrupt), the TLB is flushed and merged into the global `MethodProfile`.
 - **T1 Stencil Integration**: T1 stencils for back-edges include a `INCREMENT_TLB(offset)` instruction. Because it's a thread-local memory write, it is extremely cheap (1-2 cycles).
 
-#### 3.2 T2/T3: Inline Caches (ICs) & Sampling
-Once code reaches T2/T3, **we stop instrumenting edge counters**. The overhead is unacceptable for peak performance. Instead, we rely on:
-- **Inline Caches (ICs)**: The primary source of type/shape feedback. Compiled code checks an IC stub. On a miss, it transitions to a "Miss Stub" which updates the global profile and patches the IC.
-- **Hardware Sampling (PMU)**: For control-flow and memory access patterns in T3, we use hardware Performance Monitoring Units (e.g., Intel PEBS, ARM SPE) or OS-level PC sampling. This provides statistical profiles with *zero* mutator overhead.
-- **T0/T1 Profile Inheritance**: T2/T3 initialization reads the accumulated T0/T1 profile to make initial optimization decisions.
+#### 3.2 T2/T3: Inline Caches, Sampled Back-Edge Counters & PMU
+
+Once code reaches T2/T3, full instrumentation of every edge is gone. The 1.0 text stated that edge counters are stopped entirely and that control-flow feedback comes from Inline Caches plus hardware sampling. That is insufficient, and it is corrected here (finding PROF-1, resolved).
+
+T4 (the trace compiler) requires an accurate signal for which loops are hot enough to justify trace recording. PMU/PEBS sampling gives statistical PC histograms whose skew is too large to reliably identify short, tight loops: a 3-instruction loop and a 30-instruction loop with equal iteration counts produce very different sample densities, and low-frequency sampling routinely misses tight loops entirely. Inline cache misses say nothing about loop iteration counts. Both signals are retained for type feedback and code layout, but neither is a back-edge counter.
+
+The corrected contract: T2/T3 retain a lightweight, sampled back-edge counter per loop:
+
+- **Emission**: the optimizing backend emits, on each loop back-edge, a decrement of a dedicated register preloaded from the loop's profile slot and a predicted-not-taken branch to the sample handler every N iterations (sampling mask, e.g. N=64). The steady-state cost is one decrement and one not-taken branch per iteration, which is 1-2 cycles and does not use atomics (PROF-INV-01 preserved: the counter is thread-local, so no LOCK prefix is involved).
+- **Sample handler**: reloads the register from the profile slot for the next window, folds the window count into the thread-local profile buffer, and, when the accumulated count crosses the T4 trigger threshold, enqueues a trace-recording request for that loop header.
+- **Register pressure**: the counter occupies one dedicated scratch register. If register pressure in a loop is extreme, the register allocator may spill exactly this counter across the loop; spilling a value touched once per N iterations is acceptable, and the fallback is to sample via the loop's existing safepoint instead.
+- **What is NOT retained**: per-edge instrumentation, branch-outcome counters, and call-site counting in T2/T3 code. Those remain IC- and PMU-derived.
+
+Tier-up consumers of the sampled counters:
+- T4 trace recording requests (primary consumer).
+- T2 to T3 promotion corroboration when execution-time sampling is ambiguous.
 
 ### 4. Profile Storage & Architecture
 The profile data is structured hierarchically to support both online JIT and offline T5 PGO.
@@ -5668,6 +5719,8 @@ To guarantee correctness and performance, the following invariants must hold:
 | **PROF-INV-04** | **IC Consistency**: The IC Stub Array must be updated atomically with respect to the mutator. A mutator must never see a partially updated IC state. |
 | **PROF-INV-05** | **Profile Completeness**: The T0/T1 profile must capture all live virtual registers' types at safepoints to ensure T2/T3 ARS has complete information. |
 | **PROF-INV-06** | **T5 Serialization Safety**: The global profile can be serialized for T5 without stopping the world, using a copy-on-write or double-buffering mechanism. |
+| **PROF-INV-07** | **Back-Edge Sampling Presence**: Every T2/T3-compiled loop must carry the sampled back-edge counter (section 3.2). A T2/T3 code path with uncounted loop back-edges is incorrect, because T4 trace recording cannot discover hot loops from PMU sampling or IC misses alone. |
+| **PROF-INV-08** | **Sampling Budget**: The sampled counter may cost at most one decrement and one not-taken branch per iteration. It must not introduce atomics, locks, or store traffic to shared memory on the steady-state path. |
 ---
 
 ## CODE-1: Code Cache & Executable Memory Management
@@ -5823,7 +5876,7 @@ During a GC safepoint, the GC and JIT coordinate:
 ---
 
 ## CONC-1: Concurrency & Lock-Free Compiler Structures
-**Version 1.0 · Core Execution Contract**
+**Version 1.1 · Adds the dependency add-vs-invalidate handshake**
 
 ### 1. Fundamental Design Philosophy
 In a multi-tier JIT with a concurrent GC, compiler threads (T2/T3/T4) and mutator threads must operate concurrently without blocking each other. Global mutexes on the compilation or execution hot paths are strictly forbidden. We achieve this through **lock-free data structures**, **Read-Copy-Update (RCU)** patterns, and **Epoch-Based Reclamation (EBR)** tied to the GC's safepoint protocol.
@@ -5835,6 +5888,18 @@ The DependencyMap tracks which compiled Regions depend on which `CanonicalLayout
 - **Read Path (Compilers/Invalidators)**: Reads are completely lock-free. We use an RCU (Read-Copy-Update) linked-list or hash-map per layout. Compilers traverse the list without acquiring locks.
 - **Write Path (Mutators/Shape Transitions)**: When a new dependency is added, the compiler allocates a new node, copies the existing list, and atomically swaps the head pointer using `memory_order_release`.
 - **Reclamation**: Old list nodes are not freed immediately. They are placed in a thread-local retirement queue. The concurrent GC's epoch-based reclamation (triggered at safepoints) safely frees these nodes once all compiler threads have passed the current epoch.
+
+#### 2.1.1 The Add-vs-Invalidate Handshake (Corrected Addition)
+
+The 1.0 RCU description leaves one race unspecified (finding CONC-1, resolved): a compiler thread adding a dependency to a layout's list while the runtime invalidates that layout. If the invalidator's traversal misses the concurrently added dependency, compiled code survives with an assumption the shape transition already violated. Missing the dependency is not a performance defect; it is unsoundness.
+
+The corrected protocol publishes additions through a per-layout seqlock and bounds invalidation by a retry loop, with a safepoint handshake as the escalation path:
+
+- **Per-layout sequence lock**: each CanonicalLayoutHandle's dependency list carries an even/odd sequence counter. A compiler thread adding a dependency: (1) reads the counter; (2) if odd, spins with a cpu-relax hint (an invalidation traversal or another publish is in progress); (3) installs the new node by Copy-on-Write of the list it observed; (4) publishes with a release increment of the counter to the next even value.
+- **Invalidator traversal**: the invalidator (shape transition handler) reads the counter (must be even, else spins briefly), records it, traverses the published list, and re-reads the counter. If the counter changed, the traversal overlapped a publication window and is retried. Because publishes use release ordering and the re-check uses acquire ordering, any dependency published before the invalidator's final re-read is visible to a completed traversal.
+- **Publication bound (soundness argument)**: a shape transition must not complete its invalidation step until one traversal finishes with an unchanged sequence counter. An add that started before the transition either published before the successful traversal (and is seen) or is still mid-publish (counter odd; invalidator spins or retries). An add that starts after the successful traversal targets the new layout generation and is rejected by the install-time generation check.
+- **Generation check on install**: a dependency records the layout generation it was compiled against. If the generation advanced between the compiler's read and its publish, the dependency is stale on arrival; the compiler discards it and re-derives from current state.
+- **Escalation to safepoint handshake (rare)**: if a layout's sequence counter is contended beyond a bounded spin count, the invalidator escalates to the thread-local handshake (section 3): compiler threads pause at their next safepoint flag check, the invalidator traverses quiescent lists, and compilers resume. This path is expected to be rare; its existence removes reliance on unbounded live-lock behavior.
 
 #### 2.2 Inline Cache (IC) Stub Array (Atomic Pointers)
 ICs are shared across different compiled versions of a method.
@@ -5864,6 +5929,8 @@ Compiler threads cannot be ignored by the GC. If a compiler thread is allocating
 | **CONC-INV-03** | **Epoch-Based Reclamation**: Memory retired from lock-free structures (DependencyMap, ICs) must only be freed after a full GC epoch/safepoint has passed. |
 | **CONC-INV-04** | **Compiler Safepoint Compliance**: Compiler threads must respond to thread-local handshake requests and pause at safepoints when allocating GC-managed metadata. |
 | **CONC-INV-05** | **Lock-Free Code Allocation**: Code Pool TLAB exhaustion must be resolved via a lock-free global free-list, not a mutex. |
+| **CONC-INV-06** | **Invalidation Completeness**: A shape transition must not complete its invalidation step until one dependency traversal has finished with an unchanged per-layout sequence counter. A dependency installed before the transition started must either be visible to that traversal or force a retry. |
+| **CONC-INV-07** | **Stale Install Rejection**: A dependency publication that observes an advanced layout generation must be discarded by the compiler, never installed. |
 
 ---
 
@@ -5912,11 +5979,12 @@ Profilers need to map physical PCs to method names and source lines.
 ---
 
 ## SIMD-1: Vectorization Strategy for Tagged Values
-**Version 1.0 · Core Execution Contract**
+**Version 1.1 · Retcon of SIMD-INV-01 and homogeneity-gated Strategy B**
 
 ### 1. Fundamental Design Philosophy
-NaN-boxing is inherently hostile to SIMD. You cannot load an array of mixed `TAGGED` values into AVX/NEON registers and perform arithmetic, because the tags will corrupt the math, and mixed types will break lane alignment. 
-Therefore, **SIMD vectorization in this architecture strictly requires structural specialization (unboxed arrays) or strict runtime guards.** We do not attempt to "SIMD process" tagged values directly; we eliminate the tags before vectorizing.
+NaN-boxing is hostile to SIMD **for mixed or integer-tagged data**. The 1.0 philosophy ("we do not attempt to SIMD process tagged values directly") was too absolute, and it is retconned here (finding SIMD-RETCON, resolved; see also NUM-1).
+
+The decisive fact: NV-1 floating-point values are stored as **native IEEE-754 binary64 bits**. A float is not boxed in any sense that SIMD arithmetic can observe; its tag is its value. Consequently, homogeneous tagged-float SIMD arithmetic is bit-exact with unboxed SIMD arithmetic, subject only to reserved-space collision canonicalization (section 4). Direct SIMD math on **homogeneous tagged-float lanes** is therefore legal. Direct SIMD math on **integer lanes** is legal only through masked payload arithmetic with explicit overflow fallback (section 3.2), because the 0xFFFC tag occupies bits that participate in wrap-around. Direct SIMD math on **mixed or unknown** lanes remains prohibited.
 
 ### 2. The NV-1 Float Advantage
 Recall from NV-1 that floating-point values are stored as **direct binary64 representations**. The "tag" for a float is simply its native IEEE-754 bits. The reserved tag space (`0xFFFC...`) is only used for integers, references, and special values.
@@ -5931,21 +5999,67 @@ Driven by AOSS and the Profiler (PROF-1), the compiler proves an array is homoge
 - **Vectorization**: Standard Auto-Vectorization and SLP apply. The compiler emits `vmovupd` (x86) or `ldr q0` (AArch64) to load 4x/2x elements, performs SIMD math, and stores them back.
 - **Profitability**: This is the fastest path. It yields native C/C++ SIMD performance.
 
-#### 3.2 Strategy B: Guarded SIMD on Tagged Arrays (Fallback Path)
-If the array remains `Array<TAGGED>`, but we want to vectorize a loop (e.g., we couldn't prove homogeneity, but profiling says it's 99.9% floats):
-- **Float Vectorization**: 
-  1. Load 4x 64-bit values into a SIMD register (e.g., YMM0).
-  2. **Guard**: Emit a SIMD comparison to ensure the upper 16 bits of *all* 4 elements are NOT in the reserved tag space (`0xFFFC - 0xFFFF`). 
-  3. If the guard passes, the 64-bit lanes are already valid binary64 floats. Execute SIMD float math.
-  4. If the guard fails, deoptimize to scalar T2/T3 code.
-- **Integer Vectorization**: 
-  - NV-1 integers require shifting/masking to extract the 48-bit payload. Doing this in SIMD for 4 lanes simultaneously destroys Instruction-Level Parallelism (ILP) and is rarely profitable. 
-  - **Rule**: Integer arrays *must* use Strategy A (Structural Specialization) to be vectorized.
+#### 3.2 Strategy B: Direct Tagged SIMD (Retconned: Floats Free, Integers Masked)
+
+If the array remains `Array<TAGGED>`, SIMD is still available, with different rules per element kind.
+
+**B-F: Float lanes (zero-cost vectorization).** Because tagged floats are raw binary64 bits, a PACKED_TAGGED load (vmovupd of 4x64 into YMM, or 8x64 into ZMM) followed directly by vaddpd / vmulpd / vfmadd computes correct results for every non-colliding lane. The upper 16 bits of a valid float can never equal a reserved tag: an IEEE-754 value with an all-ones exponent is a NaN, and NV-1 canonicalizes colliding NaN patterns at the value boundary (NUM-1 section 1). After the math, if any lane's result bit pattern falls in the reserved tag region 0xFFFC-0xFFFF, a single masked blend replaces those lanes with the canonical NaN:
+
+```asm
+; YMM0, YMM1 = 4x tagged-f64 operands
+vaddpd      YMM2, YMM0, YMM1     ; Direct math on tagged float bits
+; Collision canonicalization (elidable when provably collision-free, section 4):
+vpsrld      YMM3, YMM2, 48       ; per-lane top 16 bits, replicated in dword view
+vpcmpud     k1, YMM3, [tag_hi_bounds], 5   ; k1 = lanes whose top16 is in 0xFFFC..0xFFFF
+vmovdqu32   YMM2{k1}, [canonical_nan_broadcast] ; blend canonical NaN into colliding lanes
+```
+(AArch64 uses cmhi + bsl; RV64 vector uses vmsltu + vmerge. The canonicalization is one compare and one masked blend.)
+
+**B-I: Integer lanes (AVX-512 masked payload arithmetic).** Tagged integers are 0xFFFC + signed 48-bit payload. 8x64-bit tagged integers fit one ZMM register. The sequence is:
+
+1. **Load**: vmovupd 8x tagged words into ZMM0.
+2. **Extract**: vpandq ZMM1, ZMM0, [payload_mask] isolates the 48-bit payloads.
+3. **Compute**: vpaddq / vpsubq / vpmullq on the payloads.
+4. **Overflow check**: vpcmpq against the sign-extension pattern of bit 47 produces a mask of overflowed lanes; kortestw branches to the scalar boxing fallback for the whole vector if any lane overflowed.
+5. **Re-tag**: vporq ZMM0, ZMM1, [tag_0xFFFC_broadcast] re-applies 0xFFFC to all 8 lanes simultaneously.
+
+Cost: for add/subtract, the extract and re-tag are two extra 64-bit lane ops per vector plus one fused compare-branch. This is profitable only under the gating rules of section 3.4.
+
+**B-X: Mixed or unknown lanes are prohibited.** If profiling cannot establish homogeneity (section 3.4), Strategy B is not applied. There is no mixed-lane tagged SIMD.
+
+#### 3.2.1 PACKED_TAGGED as a First-Class Representation
+
+To let the register allocator keep tagged vectors in SIMD registers across loop iterations without scalar unboxing, PACKED_TAGGED is added as a first-class register representation in LLIR/MIR, alongside TAGGED, I64, F64, REF_OFF, REF_RAW:
+
+| Property | Value |
+|---|---|
+| Width | 128/256/512 bits (2/4/8 NV-1 lanes) |
+| Register class | Vector (XMM/YMM/ZMM) |
+| Lane domain | Homogeneous F64 or homogeneous I64 payloads; never mixed |
+| GC interaction | No references may live in a PACKED_TAGGED value; safepoint maps describe it as non-rooted |
+| Spill | Full vector spill/reload; no lane splitting |
+| Legal ops | Lane-wise FP/int arithmetic, blends, shuffles, lane extract/insert |
+| Illegal ops | Anything requiring per-lane tag interpretation (e.g. LOAD_FIELD on a lane) |
+
+ARS may promote TAGGED scalars into PACKED_TAGGED lanes when the SLP pass (section 3.3) proves lane homogeneity; demotion back to scalar TAGGED at observable boundaries applies the same canonicalization rules as scalar boxing.
 
 #### 3.3 Strategy C: Superword Level Parallelism (SLP)
 SLP packs independent scalar operations within a single basic block into SIMD instructions.
 - **Mechanism**: If ARS has unboxed scalars into FPRs/GPRs (e.g., `a = x + y; b = z + w;`), the MIR instruction scheduler and SLP pass pack `x, y, z, w` into a SIMD register, perform the adds, and unpack.
 - **Constraint**: SLP only operates on values that ARS has already committed to unboxed representations (I64, F64). It does not operate on TAGGED values.
+
+#### 3.4 Strategy B Profitability Gating (Required)
+
+Strategy B's guard and mask overhead is only amortized by real vector work. Ungated, it is slower than scalar execution on short loops (finding SIMD-1, resolved). Strategy B on Array<TAGGED> may be selected only when all of the following hold:
+
+1. **Trip count**: the loop's profiled iteration count (PROF-1 section 2, Memory/Vector domain) exceeds SIMD_TAGGED_MIN_TRIP (default 64), or the trip count is statically provable to exceed it.
+2. **Homogeneity**: the element profile for the accessed array proves at least 99.99% homogeneous lane domain (float or integer) across the profile window, with zero observed foreign-tag stores in the current window.
+3. **Body width**: the loop body contains at least two vectorizable lane operations, so guard overhead amortizes.
+4. **No interior serialization**: the loop must not contain per-element layout guards that would serialize the vector.
+
+Otherwise the compiler falls back to Strategy A (if AOSS can transition the layout) or to scalar unboxed loops (ARS). The gating decision and its inputs are recorded in region metadata so deopt reasoning can cite them.
+
+Strategy A (structural Array<F64>/Array<I64> specialization, NUM-1 section 3) has no such gate beyond standard vectorization profitability, because it carries no per-access tag cost.
 
 ### 4. NaN Canonicalization in SIMD
 When SIMD floating-point math produces a NaN, the hardware may generate a NaN payload that collides with our reserved NV-1 tag space.
@@ -5966,10 +6080,13 @@ When SIMD floating-point math produces a NaN, the hardware may generate a NaN pa
 ### 5. SIMD-1 Invariants
 | ID | Invariant |
 |---|---|
-| **SIMD-INV-01** | **No Direct Tagged SIMD Math**: SIMD arithmetic instructions must never operate directly on mixed `TAGGED` values without explicit structural specialization or strict runtime guards. |
-| **SIMD-INV-02** | **Structural Specialization Required for Integers**: Integer arrays must be structurally specialized to `Array<I64>` (unboxed) to be vectorized. Tagged integer SIMD is prohibited due to ILP destruction. |
+| **SIMD-INV-01** | **No Direct Tagged SIMD Math on Mixed or Unknown Lanes** (retconned): SIMD arithmetic must not operate on lanes of mixed or unproven tag domain. Homogeneous tagged-float SIMD math is legal (lanes are raw binary64 bits), subject to collision canonicalization. Tagged-integer SIMD math is legal only via masked payload arithmetic with explicit 48-bit overflow fallback. |
+| **SIMD-INV-02** | **Integer Overflow Fallback**: Tagged-integer vector math must detect any 48-bit payload overflow per vector and fall back to scalar boxing for the whole vector. Silent wrap-through of the tag bits is a correctness violation. |
 | **SIMD-INV-03** | **NaN Canonicalization**: SIMD floating-point results that cross into a `TAGGED` observable boundary must be normalized to the VM canonical NaN (`0x7FF8000000000000`) if they collide with the reserved tag space. |
 | **SIMD-INV-04** | **Guard Deoptimization**: Guarded SIMD paths on `Array<TAGGED>` must deoptimize to scalar code if the SIMD type-check guard fails. They must not silently produce incorrect results. |
+| **SIMD-INV-05** | **Profitability Gating**: Strategy B on tagged arrays requires the section 3.4 gate (trip count, homogeneity, body width). Ungated tagged-array vectorization is a specification violation. |
+| **SIMD-INV-06** | **PACKED_TAGGED Purity**: A PACKED_TAGGED value must never contain heap references. Safepoint maps must classify it as non-rooted. |
+| **SIMD-INV-07** | **Canonicalization Elision Proof**: Eliding the NaN collision canonicalization requires a compiler proof that no lane can produce a reserved-space bit pattern; the proof is recorded in region metadata. |
 
 
 Defining the exception handling, inline cache evolution, memory model mapping, and barrier fast-paths completes the physical execution and runtime integration contract. These subsystems are where the theoretical elegance of the IR meets the harsh realities of OS unwinders, megamorphic workloads, hardware memory models, and GC concurrency.
@@ -6134,7 +6251,8 @@ Hardware uses bits in the instruction encoding or explicit fences.
 ---
 
 ## BARRIER-1 (Revised): Fully Concurrent Load Barriers
-**Version 1.1 · Correcting the Fully Concurrent GC Contract**
+**Version 1.2 · Correcting the Fully Concurrent GC Contract**
+**1.2 change: the fast path now verifies the reference tag before testing GC color bits. The 1.1 fast path false-triggered on tagged integers (finding BARRIER-1, resolved). See §2.0.**
 
 ### 1. The Mathematical Trick: 3 Free Bits from Alignment
 Recall from **HEAP-1** that all heap entities are strictly **8-byte aligned**. 
@@ -6154,23 +6272,36 @@ When the GC concurrently moves an object, it updates the object's header with a 
 ### 2. The Load Barrier Fast-Path
 Because the colors are embedded in the lower 3 bits of the NV-1 word, the Load Barrier is incredibly cheap. It requires exactly **one `TEST` instruction and one conditional branch**.
 
+#### 2.0 Tag Precedence: The Barrier Classifies Before It Tests (Correctness Correction)
+
+The 1.1 fast path executed `test al, 0x07` on the loaded 64-bit word without first verifying that the word is a heap reference. That is operationally broken, and the flaw is corrected here (finding BARRIER-1, resolved).
+
+NV-1 encodes immediate integers as `0xFFFC` in bits 63-48 with a signed 48-bit payload in bits 47-0. The integer `5` is the word `0xFFFC000000000005`. Its lower three bits are `101`, so `test al, 0x07` sets ZF=0 and branches to the slow path. Every odd integer, and many even integers whose payload low bits are set, false-triggers the barrier. The CPU does not know that the value is "supposed to be a reference"; it only sees bits. On integer-heavy workloads this is a systematic slow-path storm, not a statistical accident.
+
+The corrected fast path performs tag classification before the color test. A word is color-tested only when its 16-bit tag equals `0xFFFD` (heap reference). Integers, special immediates, and floating-point values never reach the color test because their tags differ. The slow path is therefore entered only when a genuine reference carries an unresolved GC color.
+
 #### 2.1 x86-64 Assembly (The Fast Path)
 ```asm
-; RAX contains the loaded 64-bit NV-1 reference from memory
-; The GC colors are in bits 0, 1, and 2.
+; RAX contains the loaded 64-bit NV-1 word from memory.
+; Bits 63-48: tag. For references the tag is 0xFFFD and bits 2-0 carry GC colors.
 
-; 1. Check if any GC color bits are set
-test al, 0x07          ; Test the lower 3 bits
-jnz .load_barrier_slow ; If ANY bit is set, take the slow path
+; 1. Classify: is this word a heap reference at all?
+mov r8, rax
+shr r8, 48                  ; Extract the 16-bit tag
+cmp r8, 0xFFFD              ; Heap reference?
+jne .fast_path_clean        ; No (int, float, special): no GC color exists. Fast exit.
 
-; 2. FAST PATH: The reference is clean and valid.
-; The lower 3 bits are already 0, so RAX holds the pure 48-bit offset 
-; (with the 0xFFFD tag in the upper 16 bits).
-; We can immediately reconstruct the native pointer and load the field.
-lea rbx, [heap_base + rax] ; (Ignoring the tag extraction for a moment)
-mov rcx, [rbx + offset]
+; 2. It is a reference. Now, and only now, test the color bits.
+test al, 0x07               ; Test the 3 GC color bits
+jnz .load_barrier_slow      ; Any color set: resolve via slow path
+
+; 3. FAST PATH: clean reference. The lower 3 bits are 0, so RAX holds the
+; pure (0xFFFD << 48) | 48-bit offset. Reconstruct and load.
+and rax, 0x0000FFFFFFFFFFFF ; Clear the tag, keep the offset
+lea rbx, [heap_base + rax]  ; Reconstruct the native address
+mov rcx, [rbx + field_offset]
 ```
-**Cost:** 1 `TEST`, 1 `JNZ`. On the happy path (no concurrent relocation/marking interference), this is practically free and perfectly predicts as "not taken".
+**Cost:** 1 `MOV`, 1 `SHR`, 1 `CMP`, 1 `JNE`, then 1 `TEST` and 1 `JNZ` on the reference path only. The non-reference exit is a highly predictable not-taken branch for reference-typed loads, and the color test remains exactly as cheap as in 1.1 for genuine references. The added shift-and-compare pair occupies 2-3 cycles on the reference fast path and overlaps with the load latency. This is the correct price for eliminating a slow-path storm on every tagged non-reference word.
 
 #### 2.2 The Load Barrier Slow-Path
 If the `Remapped` bit (or marking bits) is set, the mutator must resolve the true location of the object.
@@ -6217,6 +6348,9 @@ The Load Barrier handles *reads* of moving objects. The Write Barrier (defined p
 | **BARRIER-INV-03** | **Alignment Guarantee**: The Load Barrier relies on the invariant that all heap objects are 8-byte aligned, guaranteeing the lower 3 bits of the offset are available for GC colors. |
 | **BARRIER-INV-04** | **No Raw Pointers Across Barriers**: A `REF_RAW` (native pointer) must never be materialized or used for memory access until the Load Barrier has verified the underlying `REF_OFF` is clean (no `Remapped` bit set). |
 | **BARRIER-INV-05** | **Elision Safety**: The Load Barrier can only be elided by the compiler if it mathematically proves the object is thread-local, newly allocated in the current TLAB, and cannot possibly be seen or moved by the concurrent GC. |
+| **BARRIER-INV-06** | **Tag Precedence**: The color test (`test al, 0x07`) may only execute on words whose 16-bit tag equals `0xFFFD`. A non-reference word must exit the barrier on the fast path without a color test. A barrier implementation that color-tests arbitrary NV-1 words is incorrect. |
+| **BARRIER-INV-07** | **Slow-Path Classification**: The load barrier slow path is entered only for words already classified as references (invariant 06). Resolution logic may assume a genuine heap reference. |
+| **BARRIER-INV-08** | **Numeric Array Load Elision**: Loads from `Layout_NumericArray_F64` or `Layout_NumericArray_I64` payloads (NUM-1) contain no references and take no load barrier. The layout check that selects the raw-load path substitutes for the barrier. |
 ---
 
 ## SNAP-1: Native Image & Snapshot Specification
@@ -6430,11 +6564,19 @@ After startup, new allocations follow the normal GC protocol:
 - Write barriers track young-to-old references.
 - The GC runs concurrently as usual.
 
-#### 6.3 Snapshot Heap Compaction
-If the GC needs to compact the snapshot heap (e.g., due to fragmentation), it can do so:
-- The GC treats the snapshot heap like any other old-generation heap.
-- Objects are relocated, and references are updated (using the NV-1 offset mechanism).
-- The AOSS dependency map is updated if object layouts change.
+#### 6.3 Snapshot Heap Compaction (Corrected: Non-Relocatable by Contract)
+
+The 1.0 text stated that the GC treats the snapshot heap like any other old-generation heap and relocates objects with reference updates. That is contradictory and unsafe, and it is corrected here (finding SNAP-1, resolved).
+
+A shared base snapshot is mapped `PROT_READ` across processes. Relocating an object requires writing a forwarding pointer into read-only memory, which faults. If the OS resolves such faults by Copy-on-Write, every faulting process silently privatizes the shared pages, which destroys exactly the memory-sharing benefit the shared snapshot exists to provide. There is no configuration in which moving snapshot objects is correct.
+
+Therefore, snapshot heap memory is strictly non-relocatable:
+
+- **Pinning by page descriptor**: every page belonging to a snapshot heap image is marked `PINNED | IMMORTAL` in its page descriptor at map time. The evacuation candidate selector never selects pinned pages. This is selection-time exclusion, not fault-time discovery.
+- **Marking still traces snapshot pages**: reachability analysis must traverse snapshot objects, because snapshot objects can reference runtime-allocated objects and runtime objects can reference snapshot objects. Marking never mutates snapshot object payloads or headers. Mark bits for snapshot pages live in the GC side tables (HEAP-1 side metadata), which are runtime-private, writable, and per-process.
+- **Fragmentation is absorbed, not compacted**: fragmentation inside the snapshot image is permanent by design. Dead snapshot objects are not reclaimed by the running GC. The remedy for a fragmented or stale base snapshot is snapshot rebuilding (§6.4), an offline operation, not a GC compaction phase.
+- **Snapshot-to-young references use an external remembered set**: snapshot pages are read-only, so no card mark can be stored into a snapshot card table. References from snapshot objects into the mutable heap are tracked in a runtime-private, per-process snapshot remembered set allocated in normal memory. It is populated by the write barrier when a mutator stores a snapshot-derived reference into a mutable object, and it is scanned as a root source during young-generation collection.
+- **Write barrier obligation on snapshot targets is removed**: a mutator can never store into a snapshot object; a store whose target page is a snapshot page traps (Snapshot Violation, SNAP-INV-09). The only snapshot-related barrier obligation on the fast path is the remembered-set barrier for stores of snapshot-derived references into mutable objects, which the generational barrier already performs.
 
 #### 6.4 Snapshot Rebuilding
 If the application runs for a long time and the snapshot heap becomes fragmented or outdated, we can rebuild the snapshot:
@@ -6506,10 +6648,10 @@ This allows fast iteration during development (rebuild only the changed parts).
 #### 9.2 Shared Snapshots
 - Multiple applications can share a common base snapshot (e.g., the JavaScript runtime, common libraries).
 - Each application has its own delta snapshot (application-specific code and data).
-- The base snapshot is mapped read-only (shared across processes).
+- The base snapshot is mapped read-only (shared across processes) and is pinned and non-relocatable per 6.3 and SNAP-INV-08/09/10.
 - The delta snapshot is mapped read-write (private to each process).
 
-This reduces memory usage and startup time for multi-tenant environments.
+This reduces memory usage and startup time for multi-tenant environments. Sharing remains beneficial only if the shared pages are never written; the non-relocatability contract is what keeps that true for the process lifetime. References from the shared base into per-process delta heaps are prohibited at snapshot-construction time (the base must be self-contained or reference only other shared bases), which removes the need for a shared cross-process remembered set entirely.
 
 ---
 
@@ -6524,6 +6666,9 @@ This reduces memory usage and startup time for multi-tenant environments.
 | **SNAP-INV-05** | **Dynamic Loading Fallback**: If a class/method is not in the snapshot, the runtime falls back to normal JIT compilation. |
 | **SNAP-INV-06** | **Incremental Compatibility**: Delta snapshots can be applied to base snapshots without corruption. |
 | **SNAP-INV-07** | **Debug Integration**: The debug image provides complete DWARF info for all snapshot code. |
+| **SNAP-INV-08** | **Snapshot Non-Relocatability**: No GC phase may select a snapshot page as an evacuation or compaction candidate. Snapshot pages are pinned and immortal for the lifetime of the mapping. A GC that relocates a snapshot object is incorrect by definition. |
+| **SNAP-INV-09** | **Shared Immutability**: A base snapshot mapped for sharing is mapped read-only. Mutator stores whose target page is a snapshot page trap (Snapshot Violation). The engine must not rely on Copy-on-Write to handle such stores. |
+| **SNAP-INV-10** | **External Snapshot Remembered Set**: Card marks and remembered references for snapshot pages reside in runtime-private memory outside the snapshot image. No GC or barrier protocol may write GC state into shared read-only snapshot pages. |
 ---
 
 ## UGB-1: Universal Guest Bytecode Specification
@@ -6772,6 +6917,25 @@ If JS calls Python, and both are compiled by T3:
 
 ---
 
+#### 6.3 Capability Version Epochs: Cheap T0 Enforcement (Corrected Addition)
+
+Section 6.1 covers JIT tiers, where AOSS guards eliminate per-call CAP_CHECK cost. It does not cover T0, where no specialization exists. The 1.0 text left T0 enforcing revocation through full authority-mask validation on every privileged operation, which is slow, or not enforcing it at all, which violates UGB-INV-01. Both outcomes are unacceptable, and the fix is the Capability Version Epoch (finding UGB-1, resolved).
+
+**Object model.** The Capability object's auxiliary header word (revised HEAP-1 128-bit header) reserves 16 bits as the version_epoch, plus 1 bit as the revoked flag. The epoch is a saturating up-counter.
+
+**Runtime model.** The runtime's capability table stores, per capability: authority_mask, resource_handle, epoch (atomic u16), revoked (atomic flag), and a delegation link to its parent. CAP_REVOKE and CAP_SEAL are the only operations that mutate epoch or flag: revocation increments the epoch (saturating at 0xFFFF, where the capability becomes permanently invalid) and sets revoked. Delegation creates a child whose revocation propagates by incrementing every ancestor's epoch.
+
+**T0 fast path.** Each UGB CAP_CHECK / CAP_INVOKE / FFI_* site in a method owns a one-slot epoch cache in the method's metadata (not in the frame, so it is shared across activations of the same method). The interpreter check is:
+
+1. Load the site's cached epoch (thread-local metadata read).
+2. Load the capability's current epoch (single 16-bit load) and its revoked flag.
+3. If equal and not revoked: proceed. Total cost: two loads, one compare, one predicted branch.
+4. On mismatch: slow path. Re-read the full authority table. If the capability moved to a new epoch with the required authority still present, update the cache and proceed. If it was revoked (or authority is insufficient), throw SecurityError (UGB section 5.7).
+
+A stale cache can only cause a slow path, never a security hole: the authoritative state is the capability object's epoch, and the cache is validated against it on every check. Revocation therefore costs one increment, and every T0 site observes it on its next check with no broadcast, no code patching, and no full-mask evaluation.
+
+**JIT tiers.** T2/T3 keep the AOSS guard model of section 6.1. The epoch is folded into the guard: GuardEpoch(cap, epoch_at_compile) is GVN'd with the layout guard, and CAP_REVOKE's epoch increment invalidates dependent regions through the AOSS DependencyMap exactly like a layout transition (CONC-1 publication rules apply).
+
 ### 7. UGB Invariants
 
 | ID | Invariant |
@@ -6782,5 +6946,128 @@ If JS calls Python, and both are compiled by T3:
 | **UGB-INV-04** | **Exception Safety**: Every `TRY_BEGIN` must have a matching `TRY_END`. Unwinding must correctly restore the capability environment and virtual register state. |
 | **UGB-INV-05** | **Safepoint Coverage**: Every loop back-edge and function call must contain or be dominated by a `SAFEPOINT` or implicit safepoint, ensuring the concurrent GC can make progress. |
 | **UGB-INV-06** | **Semantic Preservation**: The JIT must never optimize away a `CAP_CHECK` unless it has mathematically proven the capability's validity and authority via AOSS. |
+| **UGB-INV-07** | **Epoch Cache Safety**: A cached capability epoch may only ever cause a slow path, never a bypass. Every capability-consuming site must validate its cached epoch against the capability object's current epoch before the privileged operation executes. Revocation must be observable to all tiers within one check of the next privileged use. |
 
 ---
+
+
+---
+
+## NUM-1: Numeric Execution Contract (The Numeric Retcon)
+**Version 1.0 · Adds PACKED_TAGGED, AOSS Numeric Array Specialization, barrier elision, stride-aware ABCE, ARS live-range splitting, CAP_FAST_MATH**
+
+### 1. Purpose and Scope
+
+This section consolidates the numeric-execution contract of the engine. It retcons the SIMD-INV-01 prohibition (SIMD-1 section 1, version 1.1), specifies the unboxed numeric array layouts inside AOSS, and defines the elision and loop optimizations that together let numeric kernels run at native memory-bandwidth and compute throughput. The engine's numeric targets are scalar numeric code, tight loops, physics simulation, and array processing. Dense linear algebra libraries (BLAS/LAPACK) are explicitly out of scope: the auto-vectorizer on numeric arrays is the supported path for such kernels.
+
+### 2. The Value-Model Facts the Retcon Rests On
+
+1. **Floats are transparent.** An NV-1 float is a native IEEE-754 binary64 bit pattern. SIMD float arithmetic on lanes drawn from a float-homogeneous tagged array requires no unboxing; the tag is the value. The only obligation is collision canonicalization when a result lane lands in the reserved tag region (SIMD-1 section 3.2 B-F).
+2. **Integers are opaque.** An NV-1 integer is 0xFFFC plus a signed 48-bit payload. SIMD integer arithmetic must mask to the payload, compute, range-check, and re-tag (SIMD-1 section 3.2 B-I), with a whole-vector scalar fallback on 48-bit overflow.
+3. **References are invisible to numeric lanes.** A numeric lane context never contains references (SIMD-INV-06), so numeric SIMD values impose no GC obligations.
+
+### 3. AOSS Numeric Array Layout Transition
+
+#### 3.1 Layout_NumericArray_F64 and Layout_NumericArray_I64
+
+When AOSS observes that an array is populated exclusively with numbers (no references, no null, no undefined, no mixed domains), it triggers a layout transition:
+
+- **New canonical layouts**: `Layout_NumericArray_F64` and `Layout_NumericArray_I64`, interned in the Layout Registry like any other canonical layout handle (REVISED section 2: hash-assisted lookup, canonical handle identity).
+- **Physical layout**: the array header carries the numeric element kind; the payload is a contiguous block of raw 64-bit unboxed values with no NV-1 tags. Element i is at `header_end + 8*i`, preserving the HEAP-1 alignment contract.
+- **Transition protocol**: the transition runs at a safepoint. The payload is converted from tagged to raw form (floats bit-copied; integers sign-extended from their 48-bit payloads and stored as i64; any stored value outside the i64-preserving domain keeps the array in tagged form). The array's layout handle is swapped atomically, and the AOSS DependencyMap is published through the CONC-1 section 2.1.1 handshake.
+- **Reverse transition**: a store of a non-numeric value (reference, null, undefined, boxed object) into a numeric array converts the array back to the tagged array layout. The check on the store fast path is one tag compare against the expected numeric domain; the slow path performs the reverse migration. This preserves language semantics: numeric arrays are an optimization, never an observable type.
+
+#### 3.2 GC Contract
+
+- **Payload non-tracing**: the GC's mark phase consults the layout handle. For `Layout_NumericArray_F64` and `Layout_NumericArray_I64`, the payload is raw data and is never scanned as references. A raw float bit pattern or i64 can never be misinterpreted as a heap reference, which removes a whole class of conservative-scanning hazards.
+- **Header tracing**: the header and any reference-bearing metadata are traced as usual.
+- **Snapshot interaction**: numeric arrays may live inside snapshot images; their payload bytes are serialized raw, and the non-relocatability contract (SNAP-INV-08) applies unchanged.
+
+### 4. Barrier Elision for Numeric Kernels
+
+- **Write barrier elimination**: a `Layout_NumericArray_*` payload contains zero heap references, so a store into its payload cannot create a young-to-old or old-to-young pointer. When LLIR lowers `STORE_INDEX` whose target layout is a numeric array, the Write Barrier Elision pass deletes the barrier instruction outright. The generated store sequence is a raw `vmovupd`/`movq` with no GC side effects.
+- **Load barrier elimination**: loads from a numeric array payload take no load barrier (BARRIER-INV-08). Where escape analysis (VSDG domain) additionally proves the array is thread-local and newly allocated, the layout pre-check is hoisted out of the loop entirely, reducing steady-state element access to a single unboxed load.
+- **What is never elided**: the bounds checks subject to section 6, and the store fast-path tag check of section 3.1 (reverse-transition safety).
+
+### 5. PACKED_TAGGED and the Unboxed Loop Body
+
+For a loop over a numeric array, the JIT (T2/T3) emits:
+
+1. Direct unboxed SIMD loads (`vmovupd`) into `F64`/`PACKED_TAGGED` vector registers.
+2. Lane arithmetic without tag manipulation (floats) or with the masked-payload sequence (integers).
+3. Boxing back to `TAGGED` only when a value flows into a generic variable, an observable boundary, or a non-numeric context.
+
+ARS live ranges keep values unboxed across the loop (NV-1 section 5.3 hybrid model); the conversion-amortization argument (NV-1 section 7.1) applies with n = iterations.
+
+### 6. Stride-Aware ABCE
+
+Bounds checks inside tight loops destroy instruction-level parallelism. The SoN induction-variable analysis detects canonical counted loops (`i = start; i < len; i += step`) and, when the following conditions hold, hoists a single range proof to the loop pre-header and emits the body's `LOAD_INDEX`/`STORE_INDEX` without per-iteration bounds checks:
+
+1. The induction variable is monotone with a stride provably not crossing zero between iterations.
+2. The accessed index is an affine function of the induction variable: `idx = c0 + c1 * i`.
+3. The pre-header proof `min(idx) >= 0 and max(idx) < len` is established once (`if len > 0` style guard, or the degenerate empty-range skip).
+4. The array reference is loop-invariant and no intervening store can resize the array (length is immutable per allocation in this engine; a resize is a new object, which changes the layout handle and invalidates the region).
+
+The proof and its preconditions are recorded in region metadata. Any violated precondition falls back to per-access checks. This is the standard ABCE pass assigned to the LLIR domain (T2/T3 section: LLIR "Safety Elision"), with the stride-aware induction extension defined here.
+
+### 7. ARS Live-Range Splitting
+
+A value used as an object in one region and as a number in another must not be pinned to `TAGGED` in a GPR across both. ARS implements live-range splitting:
+
+- If value `v` is used for object manipulation in block A and for arithmetic in block B, ARS splits the live range: `v` stays `TAGGED` in a GPR for A, and a single `UNBOX` emits an unboxed `F64`/`I64` copy at B's entry.
+- GVN ensures the unbox is not duplicated when B is reached on multiple paths; PRE hoists it when partially redundant.
+- Deopt maps record both fragments, so deoptimization reconstructs the tagged value from whichever fragment is live (OSR-1 section 7 state-reconstruction rules apply unchanged).
+
+### 8. CAP_FAST_MATH
+
+IEEE-754 strictness (NV-1 section 4.3) forbids reassociation, FMA contraction, and denormal flushing by default. UGB introduces the `CAP_FAST_MATH` capability bit in the authority mask space. When a function is invoked under a capability carrying `CAP_FAST_MATH`, the JIT is permitted, within that function's regions:
+
+1. Reassociation of floating-point operations (algebraic identities that hold over the reals, e.g. `(a+b)+c` to `a+(b+c)`).
+2. FMA contraction: `vfmadd` replacing separate multiply-then-add pairs.
+3. Denormal flush-to-zero (DAZ/FTZ mode around the region).
+4. Non-preservation of NaN payloads beyond the NV-1 canonicalization contract.
+
+The capability is explicitly delegated (UGB section 2) and revoked like any other: revocation increments the epoch (UGB-1 section 6.3) and invalidates dependent regions through AOSS. Without this capability, the default remains strict IEEE-754 semantics with canonical NaN results. The fast-math authorization is recorded per region; a deopt out of a fast-math region re-executes the remaining computation under strict semantics from the deopt point.
+
+### 9. Updated Numeric Contract
+
+| Metric | Previous architecture | Contract after NUM-1 |
+|---|---|---|
+| Scalar float math | Tagged with per-op unbox/box | Unboxed across live ranges via ARS splitting (section 7); near-native |
+| Scalar int math | 48-bit immediate, boxing on overflow | Unboxed I64 live ranges with 48-bit range check at boundaries; boxed only on overflow |
+| Tagged array processing | Prohibited (SIMD-INV-01 1.0) | Float lanes free (B-F), integer lanes masked (B-I), both gated by section 3.4 of SIMD-1 |
+| Unboxed array processing | Not specified | `Layout_NumericArray_F64/I64` (section 3): raw payload, native SIMD |
+| GC overhead in numeric loops | Write + load barriers per access | Zero: payload non-tracing (3.2) plus barrier elision (section 4) |
+| Bounds checks | Per access | Hoisted by stride-aware ABCE (section 6) |
+| FMA / reassociation | Banned | Enabled under `CAP_FAST_MATH` (section 8), default remains strict |
+
+### 10. NUM-1 Invariants
+
+| ID | Invariant |
+|---|---|
+| **NUM-INV-01** | A `Layout_NumericArray_*` payload is never scanned, traced, or interpreted as references by any GC phase. |
+| **NUM-INV-02** | A store into a numeric array of a value outside its numeric domain triggers the reverse layout transition (or the store traps in a frozen context); it never corrupts the payload domain. |
+| **NUM-INV-03** | Write barriers are elided on numeric-array stores only when the target layout is proven `Layout_NumericArray_*` by the store's layout guard; the guard is not optional. |
+| **NUM-INV-04** | Stride-aware ABCE may remove a bounds check only when the section 6 preconditions are proven and recorded in region metadata. |
+| **NUM-INV-05** | `CAP_FAST_MATH` transformations apply only inside regions invoked under a valid, unrevoked capability carrying the bit; strict semantics are the default everywhere else. |
+
+---
+
+## REVIEW RESOLUTIONS REGISTER
+**Version 1.0 · Maps the external architecture review findings to their resolutions**
+
+| Finding | Severity claimed | Resolution location | Status |
+|---|---|---|---|
+| BARRIER-1: load barrier color-test false positives on tagged integers | Critical correctness | BARRIER-1 sections 2.0/2.1 (tag precedence fast path); BARRIER-INV-06/07/08 | RESOLVED |
+| SNAP-1: shared read-only snapshot vs. relocating GC | Critical correctness | SNAP-1 section 6.3 (non-relocatable snapshot pages, external remembered set); SNAP-INV-08/09/10 | RESOLVED |
+| PROF-1: missing T2/T3 back-edge counting starves T4 trace selection | Critical correctness | PROF-1 section 3.2 (sampled back-edge counter); PROF-INV-07/08 | RESOLVED |
+| UGB-1: T0 capability revocation cost (full mask check vs. no check) | Suboptimal | UGB-1 section 6.3 (16-bit capability version epoch, site epoch cache); UGB-INV-07 | RESOLVED |
+| T1-OSR: 32-bit OSR counter inside stencils explodes the Stencil Pool | Suboptimal | OSR-1 section 6.1 (shared OSR Trampoline Stub, Metadata Pool counters); OSR-INV-06 | RESOLVED |
+| SIMD-1: Strategy B guard cost exceeds benefit on short loops | Suboptimal | SIMD-1 section 3.4 (profitability gating); SIMD-INV-05 | RESOLVED |
+| SIMD-RETCON: direct tagged SIMD math prohibition is unnecessary for floats | Retcon | SIMD-1 version 1.1 sections 1/3.2/3.2.1 (B-F, B-I, PACKED_TAGGED); SIMD-INV-01/02 retconned; NUM-1 section 2 | RESOLVED |
+| VSDG-OVERLAY: overlay interaction with base-graph passes undefined | Ambiguity | REVISED section 1 (transaction API, event log, commit-time sync, revision counters) | RESOLVED |
+| CONC-1: dependency add vs. invalidation traversal race in the RCU map | Ambiguity / race | CONC-1 section 2.1.1 (seqlock publish, retry bound, generation check, handshake escalation); CONC-INV-06/07 | RESOLVED |
+| FFI-1: cross-language inlining preconditions unproven | Ambiguity | FFI-1 section 5 (SemanticCompatibilityMatrix); INV-FFI-007; Universal Engine 6.3 retraction | RESOLVED |
+| NUM-1: numeric performance contract (AOSS numeric arrays, barrier elision, stride-aware ABCE, ARS splitting, CAP_FAST_MATH) | Enhancement | NUM-1 sections 3-9; NUM-INV-01..05 | SPECIFIED |
+
+Every resolution above is enforced by the reference implementation in this repository where the subsystem is implemented (see README.md for the implemented-subsystem map), and is otherwise a binding specification for implementations of this design.
