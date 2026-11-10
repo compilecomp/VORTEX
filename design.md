@@ -5820,5 +5820,967 @@ During a GC safepoint, the GC and JIT coordinate:
 | **CODE-INV-04** | **Safepoint Patching**: Instruction patching for Region Deopt only occurs during a global safepoint. Mutators never observe a partially patched instruction stream. |
 | **CODE-INV-05** | **Zombie Safety**: A CodeBlob's executable memory is never reclaimed until a full safepoint has occurred *after* its invalidation, guaranteeing no thread holds a stale return address. |
 | **CODE-INV-06** | **Lock-Free Allocation**: Compiler threads allocate Code Pool memory via TLABs without acquiring global mutexes. |
+---
+
+## CONC-1: Concurrency & Lock-Free Compiler Structures
+**Version 1.0 · Core Execution Contract**
+
+### 1. Fundamental Design Philosophy
+In a multi-tier JIT with a concurrent GC, compiler threads (T2/T3/T4) and mutator threads must operate concurrently without blocking each other. Global mutexes on the compilation or execution hot paths are strictly forbidden. We achieve this through **lock-free data structures**, **Read-Copy-Update (RCU)** patterns, and **Epoch-Based Reclamation (EBR)** tied to the GC's safepoint protocol.
+
+### 2. Core Lock-Free Data Structures
+
+#### 2.1 AOSS DependencyMap (RCU-Based)
+The DependencyMap tracks which compiled Regions depend on which `CanonicalLayoutHandle`s. 
+- **Read Path (Compilers/Invalidators)**: Reads are completely lock-free. We use an RCU (Read-Copy-Update) linked-list or hash-map per layout. Compilers traverse the list without acquiring locks.
+- **Write Path (Mutators/Shape Transitions)**: When a new dependency is added, the compiler allocates a new node, copies the existing list, and atomically swaps the head pointer using `memory_order_release`.
+- **Reclamation**: Old list nodes are not freed immediately. They are placed in a thread-local retirement queue. The concurrent GC's epoch-based reclamation (triggered at safepoints) safely frees these nodes once all compiler threads have passed the current epoch.
+
+#### 2.2 Inline Cache (IC) Stub Array (Atomic Pointers)
+ICs are shared across different compiled versions of a method.
+- **Structure**: The IC Stub Array holds atomic pointers to the current fast-path stub.
+- **Update Protocol**: When a mutator thread experiences an IC miss, it constructs a new stub in the Stub Pool. It then publishes the new stub using an atomic store (`atomic_store_explicit(..., memory_order_release)`). 
+- **Read Protocol**: Compiled code loads the stub pointer using `atomic_load_explicit(..., memory_order_acquire)`. This guarantees that mutators never see a partially constructed stub, and no locks are held during execution.
+
+#### 2.3 Layout Registry (Sharded Concurrent Hash Table)
+The registry interns layout descriptors to produce `CanonicalLayoutHandle`s.
+- **Mechanism**: A sharded lock-free hash table. The shard is selected by hashing the layout description. 
+- **Collision Resolution**: If two threads attempt to intern the same layout simultaneously, one wins the atomic CAS (Compare-And-Swap) on the shard bucket. The loser discards its duplicate descriptor and uses the winner's handle.
+
+#### 2.4 Code Cache Global Allocator (TLABs + Lock-Free Stack)
+- **Thread-Local Allocation Buffers (TLABs)**: Compiler threads allocate code bytes locally within their TLABs without any synchronization.
+- **Global Free-List**: When a TLAB is exhausted, the compiler thread requests a new large chunk (e.g., 256KB) from the global free-list. The free-list is implemented as a lock-free Treiber stack. Push and pop operations use atomic CAS, ensuring sub-microsecond allocation latency.
+
+### 3. Thread-Local Handshake & Safepoints
+Compiler threads cannot be ignored by the GC. If a compiler thread is allocating GC-managed metadata (like IC stubs), it must respect safepoints.
+- **Handshake Mechanism**: We use a thread-local flag (e.g., `ThreadLocalHandshake::requested`). The GC sets this flag globally. Compiler threads check this flag at safe points (e.g., between compiling methods, or after allocating large metadata blocks).
+- **Action**: If requested, the compiler thread pauses its work, flushes its local allocation buffers, and waits at a safepoint barrier until the GC finishes its phase.
+
+### 4. CONC-1 Invariants
+| ID | Invariant |
+|---|---|
+| **CONC-INV-01** | **No Global Mutexes on Hot Paths**: Neither mutator execution nor compiler IR traversal may acquire a global mutex. |
+| **CONC-INV-02** | **Atomic IC Publication**: IC stub pointers must be updated and read using atomic operations with appropriate memory ordering (release/acquire). |
+| **CONC-INV-03** | **Epoch-Based Reclamation**: Memory retired from lock-free structures (DependencyMap, ICs) must only be freed after a full GC epoch/safepoint has passed. |
+| **CONC-INV-04** | **Compiler Safepoint Compliance**: Compiler threads must respond to thread-local handshake requests and pause at safepoints when allocating GC-managed metadata. |
+| **CONC-INV-05** | **Lock-Free Code Allocation**: Code Pool TLAB exhaustion must be resolved via a lock-free global free-list, not a mutex. |
+
+---
+
+## DEBUG-1: Debugging & Profiling Tooling Interface (DWARF)
+**Version 1.0 · Core Execution Contract**
+
+### 1. Fundamental Design Philosophy
+With Adaptive Representation Selection (ARS), Region-Based Deoptimization, and Stencil T1, the physical state of the program diverges wildly from the source-level semantics. The JIT must dynamically generate and expose **DWARF 5** debug information and **JIT profiling markers** so that debuggers (GDB/LLDB) and profilers (perf, VTune) can function correctly without knowing the JIT's internal architecture.
+
+### 2. DWARF Generation Strategy
+DWARF is not written to disk; it is generated in memory and exposed via the GDB JIT Interface (`__jit_debug_descriptor`).
+
+#### 2.1 T0 (Interpreter)
+Standard, static DWARF is emitted for the interpreter loop. Virtual registers are mapped to the VM stack frame.
+
+#### 2.2 T1 (Stencil Baseline)
+Because T1 uses a fixed physical map (or simple location allocation), the mapping from VM registers to physical registers/stack slots is deterministic based on the stencil selected.
+- **Pre-computed Fragments**: At VM startup, we pre-compile DWARF `.debug_info` and `.debug_line` fragments for every stencil variant.
+- **Stitching**: When T1 emits code, it copies the corresponding DWARF fragments into the in-memory debug section, patching the PC ranges to match the generated code.
+
+#### 2.3 T2/T3 (Optimizing Tiers)
+The compiler generates DWARF dynamically during MIR emission.
+- **DWARF 5 Location Lists**: This is mandatory for ARS. A variable's physical location and representation change over its live range. 
+  - *Example*: Variable `v` is in `RAX` (I64) from PC `0x100-0x110`, then spilled to `[RSP+16]` (TAGGED) from `0x110-0x120`. The Location List explicitly maps these PC ranges to the physical locations and representations.
+- **DWARF Expressions**: For complex ARS transitions (e.g., a value that must be unboxed on the fly for the debugger), we emit DWARF expressions (e.g., `DW_OP_breg0`, `DW_OP_lit16`, `DW_OP_shr`, `DW_OP_stack_value`) that instruct the debugger how to reconstruct the source-level value from the physical state.
+
+### 3. Region-Based Deopt & DWARF
+When a Region's entry is patched with a `JMP deopt_stub`, the original physical bytes remain in the Code Pool.
+- **Original Code**: The DWARF for the original bytes remains perfectly valid. If a debugger sets a breakpoint inside the patched region, it will hit the `JMP`, deopt, and resume in T0.
+- **Deopt Stubs**: Deopt stubs are marked in DWARF as compiler-generated (no source line mapping). If the debugger steps into a deopt stub, it sees the runtime state reconstruction logic.
+
+### 4. Profiler Integration (perf / VTune)
+Profilers need to map physical PCs to method names and source lines.
+- **perf (Linux)**: The JIT maintains a `/tmp/perf-<pid>.map` file. Every time a `CodeBlob` is published, the JIT appends a line: `<start_addr> <size> <method_name>`.
+- **VTune (Intel)**: The JIT uses the Intel JIT Profiling API (`iJIT_NotifyEvent`) to register the method name, start address, size, and line number table upon publication.
+- **Invariant**: A profiler must never see an "unknown" PC for JIT-compiled code. All executable bytes must be registered.
+
+### 5. DEBUG-1 Invariants
+| ID | Invariant |
+|---|---|
+| **DEBUG-INV-01** | **Complete PC Coverage**: Every physical byte of executable code must have a valid DWARF mapping to a source location, or be explicitly marked as compiler-generated (e.g., deopt stubs, trampolines). |
+| **DEBUG-INV-02** | **ARS Location Accuracy**: DWARF Location Lists must accurately reflect the physical register/stack location and representation (TAGGED, I64, F64, REF_OFF) of every variable at every safepoint. |
+| **DEBUG-INV-03** | **Dynamic Registration**: All published CodeBlobs must be immediately registered with OS-level profiler interfaces (perf map, VTune API, GDB JIT descriptor). |
+| **DEBUG-INV-04** | **Deopt Transparency**: Breakpoints set in optimized code must safely trigger deoptimization and resume execution in T0 without corrupting the debugger's state. |
+
+---
+
+## SIMD-1: Vectorization Strategy for Tagged Values
+**Version 1.0 · Core Execution Contract**
+
+### 1. Fundamental Design Philosophy
+NaN-boxing is inherently hostile to SIMD. You cannot load an array of mixed `TAGGED` values into AVX/NEON registers and perform arithmetic, because the tags will corrupt the math, and mixed types will break lane alignment. 
+Therefore, **SIMD vectorization in this architecture strictly requires structural specialization (unboxed arrays) or strict runtime guards.** We do not attempt to "SIMD process" tagged values directly; we eliminate the tags before vectorizing.
+
+### 2. The NV-1 Float Advantage
+Recall from NV-1 that floating-point values are stored as **direct binary64 representations**. The "tag" for a float is simply its native IEEE-754 bits. The reserved tag space (`0xFFFC...`) is only used for integers, references, and special values.
+- **Crucial Insight**: If an array contains *only* floats, a SIMD load of 4x F64 (or 2x F64 on RV64) works natively. The bits are already in the correct format for the FPU. No unboxing is required for the float bits themselves!
+
+### 3. Vectorization Strategies
+
+#### 3.1 Strategy A: Structural Array Specialization (Primary Path)
+Driven by AOSS and the Profiler (PROF-1), the compiler proves an array is homogeneous.
+- **Mechanism**: The array's `CanonicalLayoutHandle` transitions from `Array<TAGGED>` to `Array<F64>` or `Array<I64>`.
+- **Physical Layout**: Elements are stored natively (8 bytes each, no tags). 
+- **Vectorization**: Standard Auto-Vectorization and SLP apply. The compiler emits `vmovupd` (x86) or `ldr q0` (AArch64) to load 4x/2x elements, performs SIMD math, and stores them back.
+- **Profitability**: This is the fastest path. It yields native C/C++ SIMD performance.
+
+#### 3.2 Strategy B: Guarded SIMD on Tagged Arrays (Fallback Path)
+If the array remains `Array<TAGGED>`, but we want to vectorize a loop (e.g., we couldn't prove homogeneity, but profiling says it's 99.9% floats):
+- **Float Vectorization**: 
+  1. Load 4x 64-bit values into a SIMD register (e.g., YMM0).
+  2. **Guard**: Emit a SIMD comparison to ensure the upper 16 bits of *all* 4 elements are NOT in the reserved tag space (`0xFFFC - 0xFFFF`). 
+  3. If the guard passes, the 64-bit lanes are already valid binary64 floats. Execute SIMD float math.
+  4. If the guard fails, deoptimize to scalar T2/T3 code.
+- **Integer Vectorization**: 
+  - NV-1 integers require shifting/masking to extract the 48-bit payload. Doing this in SIMD for 4 lanes simultaneously destroys Instruction-Level Parallelism (ILP) and is rarely profitable. 
+  - **Rule**: Integer arrays *must* use Strategy A (Structural Specialization) to be vectorized.
+
+#### 3.3 Strategy C: Superword Level Parallelism (SLP)
+SLP packs independent scalar operations within a single basic block into SIMD instructions.
+- **Mechanism**: If ARS has unboxed scalars into FPRs/GPRs (e.g., `a = x + y; b = z + w;`), the MIR instruction scheduler and SLP pass pack `x, y, z, w` into a SIMD register, perform the adds, and unpack.
+- **Constraint**: SLP only operates on values that ARS has already committed to unboxed representations (I64, F64). It does not operate on TAGGED values.
+
+### 4. NaN Canonicalization in SIMD
+When SIMD floating-point math produces a NaN, the hardware may generate a NaN payload that collides with our reserved NV-1 tag space.
+- **Normalization Step**: Before storing a SIMD float result back to a `TAGGED` context (or an `Array<TAGGED>`), the compiler must emit a normalization sequence.
+- **x86-64 Implementation**:
+  ```asm
+  ; YMM0 contains 4x F64 results
+  vpcmpeqd YMM1, YMM0, [reserved_tag_mask] ; Check for reserved NaN patterns
+  vptest   YMM1, YMM1                      ; Test if any lane collided
+  jz       .no_collision                    ; If zero, no collision, skip
+  ; Slow path: blend with canonical NaN 0x7FF8000000000000
+  vblendvpd YMM0, YMM0, [canonical_nan], YMM1
+  .no_collision:
+  vmovupd  [mem], YMM0
+  ```
+- **Optimization**: If the result is stored directly into an `Array<F64>` (Strategy A), and the array is never read as `TAGGED`, the normalization can be deferred or elided entirely, relying on the VM's deferred normalization rules.
+
+### 5. SIMD-1 Invariants
+| ID | Invariant |
+|---|---|
+| **SIMD-INV-01** | **No Direct Tagged SIMD Math**: SIMD arithmetic instructions must never operate directly on mixed `TAGGED` values without explicit structural specialization or strict runtime guards. |
+| **SIMD-INV-02** | **Structural Specialization Required for Integers**: Integer arrays must be structurally specialized to `Array<I64>` (unboxed) to be vectorized. Tagged integer SIMD is prohibited due to ILP destruction. |
+| **SIMD-INV-03** | **NaN Canonicalization**: SIMD floating-point results that cross into a `TAGGED` observable boundary must be normalized to the VM canonical NaN (`0x7FF8000000000000`) if they collide with the reserved tag space. |
+| **SIMD-INV-04** | **Guard Deoptimization**: Guarded SIMD paths on `Array<TAGGED>` must deoptimize to scalar code if the SIMD type-check guard fails. They must not silently produce incorrect results. |
+
+
+Defining the exception handling, inline cache evolution, memory model mapping, and barrier fast-paths completes the physical execution and runtime integration contract. These subsystems are where the theoretical elegance of the IR meets the harsh realities of OS unwinders, megamorphic workloads, hardware memory models, and GC concurrency.
+
+Here is the formal, exhaustive specification for **EXC-1**, **IC-1**, **MEM-1**, and **BARRIER-1**.
+
+---
+
+## EXC-1: Zero-Cost Exception Handling & Unwind Tables
+**Version 1.0 · Core Execution Contract**
+
+### 1. Fundamental Design Philosophy
+Exceptions are rare; the happy path must have **absolute zero overhead**. We do not use setjmp/longjmp or explicit exception state threading in the IR. Instead, we rely entirely on **table-driven unwinding** provided by the OS, using dynamically generated metadata that maps physical PCs to catch handlers and deoptimization targets.
+
+### 2. Unwind Table Generation & Registration
+The JIT must generate standard OS unwind metadata so that when a native exception (or a JIT-thrown exception) unwinds through JIT code, the OS can correctly restore the stack pointer and frame pointer.
+
+#### 2.1 Target-Specific Unwind Formats
+- **Linux/ELF (x86-64, AArch64, RV64)**: Generate **DWARF Call Frame Information (CFI)** (`.eh_frame`).
+- **Windows/PE (x86-64)**: Generate **`.pdata` and `.xdata`** (RUNTIME_FUNCTION and UNWIND_INFO structures).
+
+#### 2.2 Tier-Specific Unwind Strategies
+- **T0 (Interpreter)**: The interpreter loop has a single, static, pre-compiled unwind descriptor registered at VM startup.
+- **T1 (Stencil Baseline)**: Because T1 enforces a strict, uniform frame layout (the Fixed Physical Map), **all T1 code shares a single, static unwind descriptor**. When a T1 CodeBlob is published, we do not generate new unwind info; we just register the existing T1 descriptor for the new code range.
+- **T2/T3 (Optimizing Tiers)**: The MIR emitter dynamically generates DWARF CFI / `.pdata` records alongside the machine code. 
+  - *Prologue*: Emits CFI directives for stack allocation and callee-saved register pushes.
+  - *Safepoints/Deopts*: Emits CFI directives to reconstruct the virtual frame if unwinding stops at a safepoint.
+
+#### 2.3 Dynamic Registration Protocol
+When a CodeBlob is published to the Code Pool (RX view):
+1. The JIT allocates the unwind metadata in the Metadata Pool (RW).
+2. The JIT calls the OS-specific registration API:
+   - Linux: `__register_frame(unwind_info_ptr)`
+   - Windows: `RtlAddFunctionTable(pdata_ptr, count, base_addr)`
+3. When the CodeBlob is reclaimed by the Sweeper, the JIT calls the corresponding unregistration API.
+
+### 3. Exception Dispatch & The Exception Table
+When a JIT-compiled method throws an exception, it does not call a generic runtime function. It jumps to a **Throw Stub**.
+
+#### 3.1 The Throw Stub
+1. The Throw Stub captures the current physical PC and stack pointer.
+2. It queries the **Exception Table** in the current `CodeBlobHeader`.
+3. The Exception Table is a sorted array of `(PC_Start, PC_End, Handler_Offset, Deopt_ID)` tuples.
+4. The runtime performs a binary search to find the innermost enclosing `try-catch` or `try-finally` block.
+5. If a handler is found, the stack is unwound to that frame, and execution jumps to the handler.
+6. If no handler is found in the current CodeBlob, the OS unwinder takes over, using the DWARF/`.pdata` metadata to walk up the stack to the caller.
+
+#### 3.2 Interaction with Region-Based Deoptimization
+If an exception is thrown, and the PC falls inside a **Deopt Stub** (because the region was invalidated):
+- The Deopt Stub is marked in the Exception Table with a special `Deopt_ID`.
+- The runtime recognizes this, reconstructs the T0 interpreter frame, and **transfers the pending exception into the T0 exception state**.
+- T0 then resumes execution and handles the exception using the interpreter's standard exception dispatch.
+
+### 4. EXC-1 Invariants
+| ID | Invariant |
+|---|---|
+| **EXC-INV-01** | **Zero Happy-Path Cost**: No instructions are executed on the happy path to maintain exception state. All mapping is done via out-of-band tables. |
+| **EXC-INV-02** | **Complete PC Coverage**: Every executable byte in the Code Pool must be covered by a valid unwind descriptor. |
+| **EXC-INV-03** | **Atomic Registration**: Unwind tables must be registered with the OS *before* the CodeBlob's RX pointer is published to mutators. |
+| **EXC-INV-04** | **Deopt-Exception Safety**: If unwinding hits a deopt stub, the runtime must correctly reconstruct the T0 frame and preserve the exception object. |
+
+---
+
+## IC-1: Megamorphic Fallback & Inline Cache Evolution
+**Version 1.0 · Core Execution Contract**
+
+### 1. Fundamental Design Philosophy
+Inline Caches (ICs) must evolve gracefully from monomorphic to megamorphic without causing unbounded memory growth, infinite deopt storms, or catastrophic performance cliffs. The IC state machine is strictly bounded, and megamorphic execution relies on optimized generic stubs, not unbounded polymorphic switches.
+
+### 2. The IC State Machine
+Every property access and call site maintains a state machine driven by the Profiler (PROF-1).
+
+| State | Condition | T0/T1 Execution | T2/T3 Compilation Strategy |
+|---|---|---|---|
+| **Uninitialized** | Never executed | Generic runtime lookup | N/A |
+| **Monomorphic** | 1 unique LayoutID observed | 1-tap IC check | Emit single `GuardLayout` + direct offset load. |
+| **Polymorphic** | 2 to $N$ LayoutIDs (e.g., $N=4$) | Linear scan of $N$ entries | Emit a switch statement of $N$ `GuardLayout` checks. |
+| **Megamorphic** | $> N$ LayoutIDs observed | Hash-table or generic lookup | **Stop specializing.** Emit a "Generic Region" using dictionary lookups. |
+
+### 3. Megamorphic Execution Strategy
+When a site becomes megamorphic, T3 **must not** compile a 50-way switch statement. Instead, it compiles a **Generic Region**.
+
+#### 3.1 The Generic Region
+- The Generic Region abandons AOSS shape specialization for this specific site.
+- It emits a call to a highly optimized, JIT-compiled **Megamorphic Stub**.
+- The Megamorphic Stub uses a fast, lock-free hash table (keyed by LayoutID) to resolve the field offset or call target.
+- *Alternative*: If the language semantics permit, the Generic Region can use a "dictionary object" layout where properties are stored in a hash map attached to the object, and the JIT emits direct hash-table lookup instructions.
+
+#### 3.2 Preventing Deopt Storms
+If a site is marked Megamorphic, the AOSS DependencyMap **stops tracking** shape transitions for that specific site. 
+- If the object's shape changes, the Generic Region does not deopt. It simply performs the dictionary lookup and continues.
+- This breaks the "compile $\rightarrow$ deopt $\rightarrow$ compile" loop.
+
+### 4. IC Memory Management
+IC state is not embedded in the executable code (which would bloat the Code Pool and complicate patching). It is stored in the **IC Side-Table** in the Metadata Pool.
+- The compiled code contains a `LOAD_IC_STUB(index)` instruction.
+- The IC Side-Table holds the current state and the pointer to the active fast-path stub.
+- When a CodeBlob is reclaimed, its associated IC Side-Table entries are freed.
+
+### 5. IC-1 Invariants
+| ID | Invariant |
+|---|---|
+| **IC-INV-01** | **Bounded Polymorphism**: The compiler will never emit a polymorphic guard chain longer than $N$ entries. It must transition to Megamorphic execution. |
+| **IC-INV-02** | **Megamorphic Stability**: Once a site is marked Megamorphic, it cannot be reverted to Monomorphic/Polymorphic, and it does not trigger deoptimization on shape changes. |
+| **IC-INV-03** | **Side-Table Separation**: IC state must reside in the RW Metadata Pool, not the RX Code Pool. |
+| **IC-INV-04** | **Atomic IC Updates**: Updates to the IC Side-Table must be atomic with respect to mutator threads. |
+
+---
+
+## MEM-1: Hardware Memory Model Mapping
+**Version 1.0 · Core Execution Contract**
+
+### 1. Fundamental Design Philosophy
+UGB defines the source-level memory model (assumed to be at least as strong as C11/Java: acquire/release semantics for synchronization, sequential consistency for volatile). The JIT must map these abstract semantics to hardware-specific fences (x86-TSO, ARM-Weak, RVWMO) without over-synchronizing, while strictly preventing the optimizer from reordering operations in violation of the model.
+
+### 2. IR Representation of Memory Order
+In VSDG and SoN, memory operations and fences carry an explicit `MemoryOrder` tag:
+- **Relaxed**: No ordering guarantees.
+- **Acquire**: Subsequent loads/stores cannot be reordered before this operation.
+- **Release**: Preceding loads/stores cannot be reordered after this operation.
+- **AcqRel**: Both Acquire and Release.
+- **SeqCst**: Acts as Release + Acquire, and prevents all Store-Load reordering globally.
+
+### 3. Optimization Rules (SoN / LLIR)
+The optimizer must respect the following hard constraints when reordering memory operations:
+1. **Acquire Load**: Cannot be moved *up* (before) any preceding memory operation. Can be moved *down* past other loads, but not past stores.
+2. **Release Store**: Cannot be moved *down* (after) any succeeding memory operation. Can be moved *up* past other stores, but not past loads.
+3. **SeqCst**: Cannot be reordered with *any* other memory operation across the fence.
+4. **Relaxed**: Can be freely reordered by the optimizer, subject only to data dependencies.
+
+### 4. Target-Specific Lowering (MIR)
+The MIR instruction selector maps the abstract `MemoryOrder` to hardware instructions.
+
+#### 4.1 x86-64 (TSO - Total Store Order)
+Hardware already guarantees Acquire/Release semantics for normal loads/stores.
+- **Relaxed / Acquire / Release**: Normal `MOV` instructions. (Zero overhead).
+- **SeqCst**: Requires a `MFENCE` instruction, OR using a `LOCK` prefix on the store (e.g., `LOCK XCHG`).
+- **Atomic RMW**: `LOCK XADD`, `LOCK CMPXCHG` inherently provide SeqCst.
+
+#### 4.2 AArch64 (Weak Memory Model)
+Hardware requires explicit instructions for ordering.
+- **Relaxed**: `LDR` / `STR`
+- **Acquire**: `LDAR` (Load-Acquire)
+- **Release**: `STLR` (Store-Release)
+- **AcqRel**: `LDAR` / `STLR`
+- **SeqCst**: `LDR` / `STR` followed by `DMB ISH` (Data Memory Barrier, Inner Shareable).
+
+#### 4.3 RV64 (RVWMO)
+Hardware uses bits in the instruction encoding or explicit fences.
+- **Relaxed**: `LW` / `SW`
+- **Acquire**: `LW` with `.aq` bit set.
+- **Release**: `SW` with `.rl` bit set.
+- **SeqCst**: `FENCE RW, RW` instruction.
+
+### 5. MEM-1 Invariants
+| ID | Invariant |
+|---|---|
+| **MEM-INV-01** | **Semantic Preservation**: The optimizer must never reorder an Acquire load before a preceding store, or a Release store after a succeeding load. |
+| **MEM-INV-02** | **Target Correctness**: The MIR emitter must emit the exact hardware instructions required to satisfy the `MemoryOrder` tag for the target ISA. |
+| **MEM-INV-03** | **No Redundant Fences**: The optimizer must eliminate redundant fences (e.g., an Acquire load immediately followed by a SeqCst fence). |
+
+---
+
+## BARRIER-1 (Revised): Fully Concurrent Load Barriers
+**Version 1.1 · Correcting the Fully Concurrent GC Contract**
+
+### 1. The Mathematical Trick: 3 Free Bits from Alignment
+Recall from **HEAP-1** that all heap entities are strictly **8-byte aligned**. 
+Because the NV-1 reference payload is a 48-bit byte offset, and the offset is always a multiple of 8, the **lower 3 bits of the payload are always `000`**.
+
+We can hijack these 3 zero-bits to store **Concurrent GC Colors** directly inside the NV-1 reference itself. This gives us a ZGC-style colored pointer mechanism without expanding the 64-bit word or shrinking the 256 TiB heap (since $2^{45} \text{ offsets} \times 8 \text{ bytes} = 256 \text{ TiB}$).
+
+#### 1.1 The 3-Bit Color Allocation
+| Bit | Name | Meaning |
+|-----|------|---------|
+| 0 | `Marked0` | Part of concurrent marking cycle 0 |
+| 1 | `Marked1` | Part of concurrent marking cycle 1 |
+| 2 | `Remapped` | Object has been relocated; offset needs resolution |
+
+When the GC concurrently moves an object, it updates the object's header with a forwarding offset and changes the color bits in the heap. When a mutator loads a reference, it checks these bits.
+
+### 2. The Load Barrier Fast-Path
+Because the colors are embedded in the lower 3 bits of the NV-1 word, the Load Barrier is incredibly cheap. It requires exactly **one `TEST` instruction and one conditional branch**.
+
+#### 2.1 x86-64 Assembly (The Fast Path)
+```asm
+; RAX contains the loaded 64-bit NV-1 reference from memory
+; The GC colors are in bits 0, 1, and 2.
+
+; 1. Check if any GC color bits are set
+test al, 0x07          ; Test the lower 3 bits
+jnz .load_barrier_slow ; If ANY bit is set, take the slow path
+
+; 2. FAST PATH: The reference is clean and valid.
+; The lower 3 bits are already 0, so RAX holds the pure 48-bit offset 
+; (with the 0xFFFD tag in the upper 16 bits).
+; We can immediately reconstruct the native pointer and load the field.
+lea rbx, [heap_base + rax] ; (Ignoring the tag extraction for a moment)
+mov rcx, [rbx + offset]
+```
+**Cost:** 1 `TEST`, 1 `JNZ`. On the happy path (no concurrent relocation/marking interference), this is practically free and perfectly predicts as "not taken".
+
+#### 2.2 The Load Barrier Slow-Path
+If the `Remapped` bit (or marking bits) is set, the mutator must resolve the true location of the object.
+
+```asm
+.load_barrier_slow:
+; 1. Extract the 48-bit offset (mask out the tag and the color bits)
+mov r8, rax
+and r8, 0x0000FFFFFFF8   ; Clear lower 3 bits (colors) and upper 16 bits (tag)
+
+; 2. Reconstruct the native pointer to the object header
+lea r9, [heap_base + r8]
+
+; 3. Read the object header to find the forwarding offset or true state
+mov r10, [r9]            ; Load the 128-bit header (first 64 bits)
+
+; 4. Call the runtime Load Barrier Resolver
+; The resolver checks the header, finds the new offset, updates the 
+; mutator's local register/stack slot with the clean offset, and 
+; returns the corrected NV-1 reference in RAX.
+call rt_load_barrier_resolve
+jmp .resume_fast_path
+```
+
+### 3. Interaction with NV-1 and ARS (Adaptive Representation Selection)
+How does this affect the compiler's unboxed live ranges?
+
+1. **Tagged References (`TAGGED`)**: The Load Barrier operates directly on the 64-bit NV-1 word. The 3 color bits are checked, and if clean, the value is used as-is.
+2. **Unboxed Offsets (`REF_OFF`)**: If ARS decides to keep a reference as an unboxed 48-bit offset in a GPR to avoid repeated tag extraction, the Load Barrier still applies. The compiler simply emits the `TEST` on the raw offset register.
+3. **Raw Pointers (`REF_RAW`)**: If ARS reconstructs a raw native pointer (`heap_base + offset`), the Load Barrier **must** execute *before* the pointer is reconstructed. You cannot safely use a raw pointer if the object is concurrently moving. 
+   - **INV-BARRIER-NEW**: `REF_RAW` values must never be materialized until the Load Barrier has verified the `REF_OFF` is clean.
+
+### 4. GC Write Barrier Synergy (SATB / Generational)
+The Load Barrier handles *reads* of moving objects. The Write Barrier (defined previously) handles *writes* for the concurrent marker and generational remembered sets.
+- **Concurrent Marking**: If the GC is doing concurrent marking (e.g., SATB or COLORED), the Load Barrier ensures the mutator never reads a stale object. If the mutator *writes* a reference, the Write Barrier logs the old value or marks the card.
+- **No Read-Barrier for Non-Moving**: If the engine ever runs in a mode where the GC is *not* moving (e.g., a non-moving concurrent marker), the `Remapped` bit is never set, and the Load Barrier fast-path remains exactly the same (just checking marking bits if required, or elided entirely if the GC design permits).
+
+### 5. Updated BARRIER-1 Invariants
+
+| ID | Invariant |
+|---|---|
+| **BARRIER-INV-01** | **Fast-Path Purity (Write)**: The write barrier fast-path must not execute memory writes unless the slow-path is taken. |
+| **BARRIER-INV-02** | **Load Barrier Presence**: Because the GC is fully concurrent and moving, every heap reference load must pass through the Load Barrier fast-path (checking the 3 alignment bits). |
+| **BARRIER-INV-03** | **Alignment Guarantee**: The Load Barrier relies on the invariant that all heap objects are 8-byte aligned, guaranteeing the lower 3 bits of the offset are available for GC colors. |
+| **BARRIER-INV-04** | **No Raw Pointers Across Barriers**: A `REF_RAW` (native pointer) must never be materialized or used for memory access until the Load Barrier has verified the underlying `REF_OFF` is clean (no `Remapped` bit set). |
+| **BARRIER-INV-05** | **Elision Safety**: The Load Barrier can only be elided by the compiler if it mathematically proves the object is thread-local, newly allocated in the current TLAB, and cannot possibly be seen or moved by the concurrent GC. |
+---
+
+## SNAP-1: Native Image & Snapshot Specification
+**Version 1.0 · Core Execution Contract**
+
+### 1. Fundamental Design Philosophy
+A Native Image is a complete, self-contained executable that includes:
+- Pre-compiled machine code (all tiers)
+- A serialized heap snapshot (pre-allocated objects)
+- All metadata (AOSS dependencies, IC stubs, layout registry, profiling data)
+- Debug and profiling information (DWARF, perf maps)
+
+The goal is **near-zero startup**: the application begins execution with all hot code already compiled, all inline caches already populated, and all objects already allocated. The only remaining work is runtime initialization (thread-local state, GC setup, assumption validation).
+
+**Key Insight**: Our NV-1 48-bit heap-relative offsets are already position-independent. This eliminates the biggest pain point of traditional native images (pointer relocation). We only need to set `heap_base` correctly on startup, and all references in the snapshot are automatically valid.
+
+---
+
+### 2. Snapshot Composition
+A snapshot file (`.snap`) contains five distinct sections:
+
+| Section | Contents | Position-Independent? |
+|---------|----------|----------------------|
+| **Code Image** | All CodeBlobs (T1/T2/T3/T4), stencils, deopt stubs, unwind tables | Partially (requires relocation for absolute addresses) |
+| **Heap Image** | Serialized heap objects (classes, prototypes, constants, closures, strings) | Yes (uses NV-1 48-bit offsets) |
+| **Metadata Image** | AOSS dependency maps, IC stub arrays, layout registry, type profiles | Partially (contains pointers to code/heap) |
+| **Debug Image** | DWARF info, perf maps, source line tables | Yes (uses relative offsets) |
+| **Header** | Version, checksum, entry point, relocation table, assumption list | N/A |
+
+#### 2.1 Code Image
+The code image contains all compiled methods, organized by tier:
+- **T1 Stencils**: Pre-assembled stencil templates (shared across all instances).
+- **T2/T3 CodeBlobs**: Optimized machine code with embedded region metadata, safepoint maps, and deopt stubs.
+- **T4 Trace Code**: Specialized trace code with guard metadata.
+- **FFI Trampolines**: Pre-generated trampolines for known foreign function calls.
+
+**Relocation Requirements**:
+- Branch targets (relative offsets) are already position-independent.
+- Absolute addresses (e.g., `heap_base`, external symbols) require relocation.
+- We emit a relocation table that lists all absolute addresses and their fixup types.
+
+#### 2.2 Heap Image
+The heap image is a serialized dump of the VM heap at a safepoint:
+- **Object Layout**: Each object is serialized as `[Header (128-bit)][Payload...]`.
+- **References**: All heap references are NV-1 48-bit offsets, which are already position-independent.
+- **Special Objects**: Classes, prototypes, interned strings, and pre-allocated constants are included.
+
+**GC State**:
+- The entire snapshot heap is treated as **old generation** on startup (already promoted).
+- The mark bitmap is initialized to "all marked" (no need to re-trace).
+- The card table is initialized to "clean" (no young-to-old references to scan).
+- If the snapshot includes young objects (e.g., pre-allocated for performance), they are explicitly marked in the header.
+
+#### 2.3 Metadata Image
+The metadata image contains all runtime metadata:
+- **AOSS DependencyMap**: Maps `CanonicalLayoutHandle` to lists of dependent regions.
+- **IC Stub Arrays**: Pre-populated inline caches with monomorphic/polymorphic stubs.
+- **Layout Registry**: Interned layout descriptors with their canonical handles.
+- **Type Profiles**: Pre-collected profiling data (type frequencies, call site counts).
+
+**Relocation Requirements**:
+- Pointers to CodeBlobs and heap objects require relocation.
+- We use the same relocation table as the code image.
+
+#### 2.4 Debug Image
+The debug image contains all debugging and profiling information:
+- **DWARF 5**: Complete debug info for all CodeBlobs, including ARS location lists.
+- **Perf Maps**: `/tmp/perf-<pid>.map` entries for all methods.
+- **VTune JIT API**: Registration data for Intel VTune.
+
+This is already position-independent (uses relative offsets).
+
+#### 2.5 Header
+The snapshot header contains:
+- **Magic Number**: Identifies the file as a snapshot.
+- **Version**: Snapshot format version (for compatibility checking).
+- **Checksum**: Integrity verification.
+- **Entry Point**: The bytecode PC or method ID to start execution.
+- **Relocation Table**: List of absolute addresses to fix up.
+- **Assumption List**: List of assumptions that must be validated on startup (e.g., "class X exists", "method Y has signature Z").
+- **Heap Base Offset**: The offset of the heap image within the snapshot file.
+
+---
+
+### 3. Serialization Protocol
+The snapshot is generated by T5 (or a dedicated snapshot tool) after the application has reached a stable state (e.g., after warm-up).
+
+#### 3.1 Serialization Steps
+1. **Reach a Global Safepoint**: Pause all mutator threads.
+2. **Freeze the Heap**: No further mutations are allowed.
+3. **Serialize the Heap Image**:
+   - Traverse all live objects (using the GC's mark bitmap).
+   - For each object, serialize the header and payload.
+   - Record the object's offset within the heap image.
+4. **Serialize the Code Image**:
+   - Collect all active CodeBlobs from the code cache.
+   - Emit the machine code and metadata.
+   - Generate the relocation table.
+5. **Serialize the Metadata Image**:
+   - Serialize the AOSS dependency map, IC stubs, layout registry, etc.
+   - Generate relocations for pointers to code/heap.
+6. **Serialize the Debug Image**:
+   - Emit DWARF info, perf maps, etc.
+7. **Write the Header**:
+   - Compute the checksum.
+   - Write the entry point, relocation table, assumption list, etc.
+8. **Resume Execution**: The application can continue running (the snapshot is now complete).
+
+#### 3.2 Incremental Serialization
+For large applications, we support incremental snapshots:
+- **Base Snapshot**: Contains the core runtime and common libraries.
+- **Delta Snapshot**: Contains only the changes since the base snapshot (new classes, new methods, modified objects).
+- On startup, we load the base snapshot, then apply the delta.
+
+This allows fast iteration during development (rebuild only the changed parts).
+
+---
+
+### 4. Startup / Deserialization Protocol
+When the native image is executed, the runtime performs the following steps:
+
+#### 4.1 Startup Steps
+1. **Map the Snapshot File**:
+   - Use `mmap` (or equivalent) to map the snapshot file into memory.
+   - The code image is mapped as executable (RX).
+   - The heap and metadata images are mapped as read-write (RW).
+
+2. **Apply Relocations**:
+   - Parse the relocation table from the header.
+   - For each relocation, fix up the absolute address:
+     - `heap_base` is set to the start of the heap image.
+     - External symbols (e.g., libc functions) are resolved via the dynamic linker.
+   - This step can be parallelized across multiple threads.
+
+3. **Initialize the Runtime**:
+   - Set up thread-local state (GC buffers, safepoint flags, etc.).
+   - Initialize the GC (mark bitmap, card table, remembered sets).
+   - Initialize the AOSS subsystem (load the dependency map).
+   - Initialize the IC subsystem (load the stub arrays).
+
+4. **Validate Assumptions**:
+   - Parse the assumption list from the header.
+   - For each assumption, check that it still holds:
+     - "Class X exists" → Check the class registry.
+     - "Method Y has signature Z" → Check the method descriptor.
+     - "Layout L has field F at offset O" → Check the layout registry.
+   - If any assumption fails, **abort snapshot loading** and fall back to normal startup (discard the snapshot, start from bytecode).
+
+5. **Jump to Entry Point**:
+   - If all assumptions are valid, jump to the entry point (a pre-compiled T3 method or a trace).
+   - The application begins execution with near-zero startup overhead.
+
+#### 4.2 Startup Time Breakdown
+| Step | Estimated Time |
+|------|----------------|
+| Map snapshot file | ~1 ms |
+| Apply relocations | ~5-10 ms (parallelized) |
+| Initialize runtime | ~2-5 ms |
+| Validate assumptions | ~1-2 ms |
+| **Total** | **~10-20 ms** |
+
+This is "near zero" compared to traditional JIT startup (which can take seconds for large applications).
+
+---
+
+### 5. Relocation and Position Independence
+The key to a robust native image is minimizing relocation work. Our architecture has several advantages:
+
+#### 5.1 NV-1 Heap References
+All heap references are 48-bit offsets from `heap_base`. These are already position-independent:
+- No relocation needed for heap references.
+- Just set `heap_base` correctly on startup.
+
+#### 5.2 Position-Independent Code (PIC)
+The code image uses PIC wherever possible:
+- Branch targets use relative offsets (already position-independent).
+- Data references use RIP-relative addressing (x86-64) or ADRP (AArch64).
+- Only absolute addresses (e.g., external symbols) require relocation.
+
+#### 5.3 Relocation Table
+The relocation table lists all absolute addresses that need fixup:
+```
+RelocationEntry {
+    offset: u64,          // Offset within the code/metadata image
+    type: enum {
+        HEAP_BASE,        // Fix up to heap_base
+        EXTERNAL_SYMBOL,  // Fix up to external symbol (resolved by dynamic linker)
+        CODE_BLOB,        // Fix up to another CodeBlob
+        HEAP_OBJECT,      // Fix up to a heap object (should be rare, use offsets instead)
+    },
+    symbol_name: string,  // For EXTERNAL_SYMBOL
+}
+```
+
+On startup, we iterate through the relocation table and apply the fixups. This is a simple, fast process.
+
+---
+
+### 6. GC Integration
+The snapshot must integrate seamlessly with our concurrent, generational GC.
+
+#### 6.1 Heap State on Startup
+- The entire snapshot heap is treated as **old generation**.
+- The mark bitmap is initialized to "all marked" (no need to re-trace).
+- The card table is initialized to "clean" (no young-to-old references to scan).
+- The remembered set is empty (no old-to-young references).
+
+#### 6.2 New Allocations
+After startup, new allocations follow the normal GC protocol:
+- New objects are allocated in the young generation.
+- Write barriers track young-to-old references.
+- The GC runs concurrently as usual.
+
+#### 6.3 Snapshot Heap Compaction
+If the GC needs to compact the snapshot heap (e.g., due to fragmentation), it can do so:
+- The GC treats the snapshot heap like any other old-generation heap.
+- Objects are relocated, and references are updated (using the NV-1 offset mechanism).
+- The AOSS dependency map is updated if object layouts change.
+
+#### 6.4 Snapshot Rebuilding
+If the application runs for a long time and the snapshot heap becomes fragmented or outdated, we can rebuild the snapshot:
+- Serialize the current heap state.
+- Re-compile hot methods with updated profiling data.
+- Write a new snapshot file.
+
+This can be done offline (e.g., during a maintenance window).
+
+---
+
+### 7. Dynamic Code and Class Loading
+If the application loads new classes or code at runtime (e.g., via `eval`, dynamic class loading, or plugin systems), the snapshot cannot contain them.
+
+#### 7.1 Fallback to JIT
+- The runtime detects that a class/method is not in the snapshot.
+- It falls back to normal JIT compilation (T0 → T1 → T2 → T3).
+- The newly compiled code is added to the code cache as usual.
+
+#### 7.2 Assumption Invalidation
+- If a dynamically loaded class invalidates an assumption in the snapshot (e.g., adds a new subclass that breaks a devirtualization), the AOSS dependency map triggers region-based deopt.
+- The affected regions are re-compiled with the new information.
+
+#### 7.3 Closed-World vs. Open-World
+- **Closed-World**: The snapshot contains all possible code and classes. No dynamic loading is allowed. This is the fastest startup, but least flexible.
+- **Open-World**: The snapshot contains the core application, but allows dynamic loading. This is more flexible, but may require more deopts.
+
+We support both modes, depending on the application's needs.
+
+---
+
+### 8. Assumption Validation
+The snapshot was built with certain assumptions (e.g., "class X has layout Y"). If the runtime environment differs (e.g., different library versions), these assumptions may be invalid.
+
+#### 8.1 Assumption Types
+| Assumption Type | Example | Validation Method |
+|-----------------|---------|-------------------|
+| Class Existence | "Class X exists" | Check the class registry |
+| Method Signature | "Method Y has signature Z" | Check the method descriptor |
+| Layout Stability | "Layout L has field F at offset O" | Check the layout registry |
+| Call Target | "Call site C targets method M" | Check the method registry |
+| Type Profile | "Variable V is always type T" | Check the type profile (optional, can be re-validated lazily) |
+
+#### 8.2 Validation Protocol
+On startup, we iterate through the assumption list and validate each one:
+- If all assumptions are valid, proceed with snapshot loading.
+- If any assumption fails, abort snapshot loading and fall back to normal startup.
+
+#### 8.3 Lazy Validation
+For performance-critical assumptions (e.g., type profiles), we can defer validation:
+- On startup, we skip the validation.
+- When the assumption is first used (e.g., a guard check), we validate it.
+- If the validation fails, we deopt and re-compile.
+
+This reduces startup time at the cost of potential deopts later.
+
+---
+
+### 9. Incremental and Shared Snapshots
+For large applications or multi-tenant environments, we support incremental and shared snapshots.
+
+#### 9.1 Incremental Snapshots
+- **Base Snapshot**: Contains the core runtime and common libraries.
+- **Delta Snapshot**: Contains only the changes since the base snapshot (new classes, new methods, modified objects).
+- On startup, we load the base snapshot, then apply the delta.
+
+This allows fast iteration during development (rebuild only the changed parts).
+
+#### 9.2 Shared Snapshots
+- Multiple applications can share a common base snapshot (e.g., the JavaScript runtime, common libraries).
+- Each application has its own delta snapshot (application-specific code and data).
+- The base snapshot is mapped read-only (shared across processes).
+- The delta snapshot is mapped read-write (private to each process).
+
+This reduces memory usage and startup time for multi-tenant environments.
+
+---
+
+### 10. SNAP-1 Invariants
+
+| ID | Invariant |
+|----|-----------|
+| **SNAP-INV-01** | **Position Independence**: All heap references in the snapshot use NV-1 48-bit offsets, requiring no relocation. |
+| **SNAP-INV-02** | **Relocation Completeness**: All absolute addresses in the code and metadata images are listed in the relocation table. |
+| **SNAP-INV-03** | **Assumption Validation**: All assumptions in the snapshot are validated on startup. If any fail, the snapshot is discarded. |
+| **SNAP-INV-04** | **GC Consistency**: The snapshot heap is in a consistent GC state (all objects marked, no young-to-old references). |
+| **SNAP-INV-05** | **Dynamic Loading Fallback**: If a class/method is not in the snapshot, the runtime falls back to normal JIT compilation. |
+| **SNAP-INV-06** | **Incremental Compatibility**: Delta snapshots can be applied to base snapshots without corruption. |
+| **SNAP-INV-07** | **Debug Integration**: The debug image provides complete DWARF info for all snapshot code. |
+---
+
+## UGB-1: Universal Guest Bytecode Specification
+**Version 1.0 · Core Execution Contract**
+
+### 1. Fundamental Design Philosophy
+UGB is designed around three non-negotiable pillars:
+1. **Universal Representation**: It must be expressive enough to map the semantics of JS, Python, Ruby, Lua, and custom DSLs without losing fidelity.
+2. **Capability-Based Security**: There is zero ambient authority. All access to resources (I/O, FFI, memory mapping, network) requires a first-class Capability object.
+3. **Register-Based Execution**: It operates on a register-based VM model, dynamically allocating virtual registers per method, perfectly aligning with the NV-1 64-bit value model and the JIT's Adaptive Representation Selection (ARS).
+
+### 2. The Capability Security Model (Polyglot Isolation)
+In a polyglot engine, if Python code can access the filesystem, and JS code shares the same global namespace or runtime environment, a malicious JS script could exploit the Python runtime to escape its sandbox. UGB prevents this via **Object Capabilities**.
+
+#### 2.1 How Capabilities Work
+- A Capability is a standard heap object (with a specific `LayoutID`, e.g., `Layout_Capability`).
+- It contains an **Authority Mask** (e.g., `AUTH_FILE_READ`, `AUTH_FFI`, `AUTH_NETWORK`) and a **Resource Handle** (e.g., a file descriptor, a socket, a C function pointer).
+- **No Global Functions**: There is no global `open_file()` or `ffi_call()`. To open a file, you must invoke a method on a `FileSystem` capability.
+- **Delegation**: A host (the C++/Rust embedder) creates capabilities and passes them to the entry point of a script. The script can delegate (pass) these capabilities to child functions or other languages, but it cannot forge them.
+
+#### 2.2 Polyglot Boundary Security
+When JS calls Python:
+1. The JS code must explicitly pass a Capability to the Python entry point if the Python code needs to do anything privileged.
+2. The Python code runs in an isolated lexical scope. It cannot "reach out" to grab ambient authority.
+3. If the Python code attempts an FFI call without an `FFI_Capability`, the UGB `CAP_CHECK` opcode throws a `SecurityError`.
+
+### 3. Execution State & Frame Layout
+UGB is register-based. Every method invocation creates a **Frame**.
+
+#### 3.1 Frame Structure
+```text
+[ Frame Header ]
+  - Method ID
+  - Return Address (PC in caller)
+  - Caller Frame Pointer
+  - Capability Environment Pointer (Lexical scope of authorities)
+[ Virtual Registers ]
+  - Reg_0 to Reg_N (Each is a 64-bit NV-1 slot)
+  - Includes Arguments, Locals, and Temporaries
+[ Upvalue Pointers ]
+  - Pointers to closed-over variables from enclosing scopes
+```
+
+#### 3.2 Register Allocation
+- The method header declares `arg_count` and `register_count`.
+- The interpreter allocates `register_count * 8` bytes on the VM stack.
+- All virtual registers are initially treated as `TAGGED` (NV-1) values. The JIT (T2/T3) will later apply ARS to keep them unboxed in physical CPU registers where profitable.
+
+### 4. Instruction Encoding
+To balance L1 I-cache density with the need for large methods, UGB uses a **Hybrid Variable-Length Encoding**.
+
+- **Standard Instruction (95% of code)**: 
+  `[ 1-byte Opcode ] [ 1-byte Reg A ] [ 1-byte Reg B ] ...`
+  Supports up to 256 virtual registers per method. Extremely compact.
+- **Extended Instruction (Prefix 0xFF)**: 
+  `[ 0xFF ] [ 1-byte Opcode ] [ 2-byte Reg A ] [ 2-byte Reg B ] ...`
+  Supports up to 65,536 virtual registers. Used for massive methods or complex FFI calls.
+
+### 5. The Opcode Taxonomy (116 Opcodes)
+UGB defines exactly 116 opcodes, grouped into 12 functional domains.
+
+#### 5.1 Constants & Literals (10)
+| Opcode | Name | Operands | Semantics |
+|--------|------|----------|-----------|
+| `0x00` | `LOAD_NULL` | `dst` | `dst = Null` |
+| `0x01` | `LOAD_UNDEF` | `dst` | `dst = Undefined` |
+| `0x02` | `LOAD_TRUE` | `dst` | `dst = True` |
+| `0x03` | `LOAD_FALSE` | `dst` | `dst = False` |
+| `0x04` | `LOAD_INT8` | `dst, imm8` | `dst = SignExtend(imm8)` |
+| `0x05` | `LOAD_INT16` | `dst, imm16` | `dst = SignExtend(imm16)` |
+| `0x06` | `LOAD_INT32` | `dst, imm32` | `dst = SignExtend(imm32)` |
+| `0x07` | `LOAD_INT64` | `dst, imm64` | `dst = imm64` (Requires extended encoding) |
+| `0x08` | `LOAD_FLOAT` | `dst, imm64` | `dst = binary64(imm64)` |
+| `0x09` | `LOAD_CONST` | `dst, pool_idx` | `dst = ConstantPool[pool_idx]` |
+
+#### 5.2 Registers & Variables (12)
+| Opcode | Name | Operands | Semantics |
+|--------|------|----------|-----------|
+| `0x10` | `MOVE` | `dst, src` | `dst = src` |
+| `0x11` | `LOAD_LOCAL` | `dst, local_idx` | `dst = Frame[local_idx]` |
+| `0x12` | `STORE_LOCAL` | `local_idx, src` | `Frame[local_idx] = src` |
+| `0x13` | `LOAD_UPVALUE` | `dst, upval_idx` | `dst = *UpvaluePtr[upval_idx]` |
+| `0x14` | `STORE_UPVALUE` | `upval_idx, src` | `*UpvaluePtr[upval_idx] = src` |
+| `0x15` | `LOAD_GLOBAL` | `dst, name_idx` | `dst = GlobalEnv[name_idx]` |
+| `0x16` | `STORE_GLOBAL` | `name_idx, src` | `GlobalEnv[name_idx] = src` |
+| `0x17` | `LOAD_ARG` | `dst, arg_idx` | `dst = Args[arg_idx]` |
+| `0x18` | `STORE_ARG` | `arg_idx, src` | `Args[arg_idx] = src` |
+| `0x19` | `LOAD_THIS` | `dst` | `dst = ThisBinding` |
+| `0x1A` | `STORE_THIS` | `src` | `ThisBinding = src` |
+| `0x1B` | `LOAD_ENV` | `dst, env_idx` | `dst = CapabilityEnv[env_idx]` |
+
+#### 5.3 Arithmetic & Bitwise (16)
+*All operate on NV-1 TAGGED values. The JIT unboxes them to I64/F64 if ARS proves it is safe.*
+| Opcode | Name | Operands | Semantics |
+|--------|------|----------|-----------|
+| `0x20` | `ADD` | `dst, a, b` | `dst = a + b` (Handles int/float/string concat) |
+| `0x21` | `SUB` | `dst, a, b` | `dst = a - b` |
+| `0x22` | `MUL` | `dst, a, b` | `dst = a * b` |
+| `0x23` | `DIV` | `dst, a, b` | `dst = a / b` |
+| `0x24` | `MOD` | `dst, a, b` | `dst = a % b` |
+| `0x25` | `POW` | `dst, a, b` | `dst = a ** b` |
+| `0x26` | `NEG` | `dst, a` | `dst = -a` |
+| `0x27` | `ABS` | `dst, a` | `dst = |a|` |
+| `0x28` | `MIN` | `dst, a, b` | `dst = min(a, b)` |
+| `0x29` | `MAX` | `dst, a, b` | `dst = max(a, b)` |
+| `0x2A` | `BIT_AND` | `dst, a, b` | `dst = a & b` |
+| `0x2B` | `BIT_OR` | `dst, a, b` | `dst = a | b` |
+| `0x2C` | `BIT_XOR` | `dst, a, b` | `dst = a ^ b` |
+| `0x2D` | `BIT_SHL` | `dst, a, b` | `dst = a << b` |
+| `0x2E` | `BIT_SHR` | `dst, a, b` | `dst = a >>> b` (Logical) |
+| `0x2F` | `BIT_SAR` | `dst, a, b` | `dst = a >> b` (Arithmetic) |
+
+#### 5.4 Comparison & Logic (8)
+| Opcode | Name | Operands | Semantics |
+|--------|------|----------|-----------|
+| `0x30` | `EQ` | `dst, a, b` | `dst = (a == b)` (Abstract equality) |
+| `0x31` | `NE` | `dst, a, b` | `dst = (a != b)` |
+| `0x32` | `LT` | `dst, a, b` | `dst = (a < b)` |
+| `0x33` | `LE` | `dst, a, b` | `dst = (a <= b)` |
+| `0x34` | `GT` | `dst, a, b` | `dst = (a > b)` |
+| `0x35` | `GE` | `dst, a, b` | `dst = (a >= b)` |
+| `0x36` | `IS_NULL` | `dst, a` | `dst = (a == Null)` |
+| `0x37` | `IS_UNDEF` | `dst, a` | `dst = (a == Undefined)` |
+
+#### 5.5 Control Flow (10)
+| Opcode | Name | Operands | Semantics |
+|--------|------|----------|-----------|
+| `0x40` | `JUMP` | `offset` | `PC += offset` |
+| `0x41` | `JUMP_TRUE` | `cond, offset` | `if (cond) PC += offset` |
+| `0x42` | `JUMP_FALSE` | `cond, offset` | `if (!cond) PC += offset` |
+| `0x43` | `JUMP_NULL` | `val, offset` | `if (val == Null) PC += offset` |
+| `0x44` | `JUMP_NOT_NULL`| `val, offset` | `if (val != Null) PC += offset` |
+| `0x45` | `SWITCH_TABLE` | `val, table_idx` | Jump via dense jump table |
+| `0x46` | `SWITCH_SPARSE` | `val, table_idx` | Jump via sparse hash/map |
+| `0x47` | `CALL` | `dst, target, argc` | `dst = target(args...)` |
+| `0x48` | `TAIL_CALL` | `target, argc` | Tail-recursive call |
+| `0x49` | `RETURN` | `val` | Return `val` to caller |
+
+#### 5.6 Objects & Arrays (14)
+| Opcode | Name | Operands | Semantics |
+|--------|------|----------|-----------|
+| `0x50` | `ALLOC_OBJ` | `dst, layout_id` | Allocate object with given layout |
+| `0x51` | `ALLOC_ARRAY` | `dst, len` | Allocate array of length `len` |
+| `0x52` | `ALLOC_STRING` | `dst, len, enc` | Allocate string (Latin-1/UTF-16) |
+| `0x53` | `ALLOC_CLOSURE`| `dst, func_id` | Allocate closure (upvalues bound later) |
+| `0x54` | `LOAD_FIELD` | `dst, obj, offset` | `dst = obj[offset]` |
+| `0x55` | `STORE_FIELD` | `obj, offset, val` | `obj[offset] = val` |
+| `0x56` | `LOAD_INDEX` | `dst, arr, idx` | `dst = arr[idx]` (Bounds checked) |
+| `0x57` | `STORE_INDEX` | `arr, idx, val` | `arr[idx] = val` (Bounds checked) |
+| `0x58` | `LOAD_LENGTH` | `dst, obj` | `dst = obj.length` |
+| `0x59` | `HAS_FIELD` | `dst, obj, name` | `dst = obj.hasOwnProperty(name)` |
+| `0x5A` | `DELETE_FIELD` | `obj, name` | `delete obj[name]` |
+| `0x5B` | `ITER_NEXT` | `dst, iter` | `dst = iter.next()` |
+| `0x5C` | `ITER_DONE` | `dst, iter` | `dst = iter.done` |
+| `0x5D` | `ALLOC_ITER` | `dst, obj` | `dst = obj[Symbol.iterator]()` |
+
+#### 5.7 Capabilities & Security (10)
+*The core of the polyglot security model.*
+| Opcode | Name | Operands | Semantics |
+|--------|------|----------|-----------|
+| `0x60` | `CAP_CREATE` | `dst, auth, handle`| Create new capability with authority mask |
+| `0x61` | `CAP_CHECK` | `cap, req_auth` | Throws `SecurityError` if `cap` lacks `req_auth` |
+| `0x62` | `CAP_DELEGATE` | `dst, cap, sub_auth`| Create a derived capability with reduced authority |
+| `0x63` | `CAP_REVOKE` | `cap` | Revokes the capability and all its delegates |
+| `0x64` | `CAP_INVOKE` | `dst, cap, method` | Invoke a method on the capability's resource |
+| `0x65` | `CAP_SEAL` | `cap` | Prevents further delegation of this capability |
+| `0x66` | `CAP_GET_AUTH` | `dst, cap` | `dst = cap.authority_mask` |
+| `0x67` | `CAP_DROP` | `cap` | Explicitly drop a capability (helps GC) |
+| `0x68` | `CAP_WRAP` | `dst, obj, auth` | Wrap a raw object in a capability envelope |
+| `0x69` | `CAP_UNWRAP` | `dst, cap` | Extract the raw object (requires authority check) |
+
+#### 5.8 Exceptions & Unwinding (6)
+| Opcode | Name | Operands | Semantics |
+|--------|------|----------|-----------|
+| `0x70` | `THROW` | `val` | Throw exception `val` |
+| `0x71` | `TRY_BEGIN` | `catch_offset` | Push exception handler to `catch_offset` |
+| `0x72` | `TRY_END` | | Pop exception handler |
+| `0x73` | `CATCH` | `dst` | `dst = thrown_exception` |
+| `0x74` | `FINALLY_BEGIN`| | Mark start of finally block |
+| `0x75` | `FINALLY_END` | | Mark end of finally block |
+
+#### 5.9 Closures & Environments (6)
+| Opcode | Name | Operands | Semantics |
+|--------|------|----------|-----------|
+| `0x80` | `MAKE_CLOSURE`| `dst, func, upvals`| Bind upvalues to closure |
+| `0x81` | `CLOSE_UPVALUES`| `reg` | Close all upvalues pointing to `reg` |
+| `0x82` | `OPEN_UPVALUE` | `dst, reg` | Create open upvalue for `reg` |
+| `0x83` | `LOAD_ENV` | `dst, env_idx` | Load from capability environment |
+| `0x84` | `STORE_ENV` | `env_idx, src` | Store to capability environment |
+| `0x85` | `CLONE_ENV` | `dst, src` | Clone a capability environment scope |
+
+#### 5.10 FFI & Foreign Interop (8)
+*All FFI operations require an `FFI_Capability`.*
+| Opcode | Name | Operands | Semantics |
+|--------|------|----------|-----------|
+| `0x90` | `FFI_LOAD_LIB` | `dst, cap, name` | Load foreign library (Requires `AUTH_FFI`) |
+| `0x91` | `FFI_LOOKUP` | `dst, cap, lib, sym`| Lookup symbol in library |
+| `0x92` | `FFI_CALL` | `dst, cap, ptr, args`| Call foreign function pointer |
+| `0x93` | `FFI_CAST` | `dst, cap, val, type`| Cast value to foreign type |
+| `0x94` | `FFI_PIN` | `cap, obj` | Pin object in memory (prevents GC move) |
+| `0x95` | `FFI_UNPIN` | `cap, obj` | Unpin object |
+| `0x96` | `FFI_CALLBACK` | `dst, cap, func` | Create a callable foreign callback |
+| `0x97` | `FFI_SYSCALL` | `dst, cap, num, args`| Direct OS syscall (Requires `AUTH_SYSCALL`) |
+
+#### 5.11 Type & Reflection (8)
+| Opcode | Name | Operands | Semantics |
+|--------|------|----------|-----------|
+| `0xA0` | `TYPE_OF` | `dst, val` | `dst = typeof(val)` |
+| `0xA1` | `INSTANCE_OF` | `dst, val, type` | `dst = val instanceof type` |
+| `0xA2` | `IS_TYPE` | `dst, val, tag` | `dst = (NV1_TAG(val) == tag)` |
+| `0xA3` | `AS_TYPE` | `dst, val, tag` | Cast/Coerce `val` to `tag`, throws on failure |
+| `0xA4` | `GET_PROTOTYPE` | `dst, obj` | `dst = obj.__proto__` |
+| `0xA5` | `SET_PROTOTYPE` | `obj, proto` | `obj.__proto__ = proto` |
+| `0xA6` | `GET_OWN_PROP` | `dst, obj, name` | Get property descriptor |
+| `0xA7` | `ENUM_PROPS` | `dst, obj` | `dst = Object.keys(obj)` |
+
+#### 5.12 GC, Safepoints & Meta (8)
+| Opcode | Name | Operands | Semantics |
+|--------|------|----------|-----------|
+| `0xB0` | `SAFEPOINT` | | Explicit GC yield point (used in long loops) |
+| `0xB1` | `WRITE_BARRIER`| `obj, val` | Explicit GC write barrier (JIT may elide) |
+| `0xB2` | `GC_ALLOC` | `dst, size` | Raw allocation (bypasses standard alloc) |
+| `0xB3` | `YIELD` | `val` | Yield to coroutine/scheduler |
+| `0xB4` | `DEBUG_BREAK` | | Trigger debugger breakpoint |
+| `0xB5` | `NOP` | | No operation |
+| `0xB6` | `HALT` | | Halt execution immediately |
+| `0xB7` | `SOURCE_MAP` | `line, col` | Debugging metadata (ignored in execution) |
+
+---
+
+### 6. JIT Integration & Capability Optimization
+How does the JIT (T2/T3/T4) handle UGB, especially the capability overhead?
+
+#### 6.1 Capability Elision via AOSS
+The `CAP_CHECK` opcode is a potential performance bottleneck if executed on every FFI call. 
+- **AOSS Integration**: When a function receives a `FileSystem` capability, AOSS tracks it as a `SPECIALIZED` value. 
+- **Guard Insertion**: The JIT inserts a single `GuardLayout(cap, Layout_Capability)` and a `GuardAuth(cap, AUTH_FILE_READ)` at the function entry.
+- **Elision**: Inside the function body, all subsequent `CAP_CHECK` opcodes for that same capability are **eliminated** by Sea of Nodes' GVN (Global Value Numbering). The JIT replaces the UGB `CAP_INVOKE` with a direct native call, completely bypassing the runtime check.
+- **Invalidation**: If the capability is revoked (`CAP_REVOKE`), the AOSS DependencyMap invalidates the specialized region, forcing a deopt to the generic, checked path.
+
+#### 6.2 Polyglot Inlining
+If JS calls Python, and both are compiled by T3:
+- The FFI trampoline is analyzed. If the semantic adapters (exception translation, type conversion) are proven to be no-ops (e.g., both languages use NV-1 integers), the trampoline is **inlined**.
+- The Python function body is directly embedded in the JS method's SoN graph.
+- Result: Cross-language calls execute at native, intra-module speeds.
+
+---
+
+### 7. UGB Invariants
+
+| ID | Invariant |
+|---|---|
+| **UGB-INV-01** | **Capability Completeness**: No privileged operation (FFI, I/O, Syscall) can be executed without a valid, unrevoked capability passed explicitly as an operand. |
+| **UGB-INV-02** | **Value Uniformity**: All virtual registers hold exactly one 64-bit NV-1 value. There are no "hidden" types or unboxed values at the UGB level. |
+| **UGB-INV-03** | **Control Flow Safety**: All jumps and branches must target valid bytecode offsets. The interpreter and JIT must verify CFG integrity before execution. |
+| **UGB-INV-04** | **Exception Safety**: Every `TRY_BEGIN` must have a matching `TRY_END`. Unwinding must correctly restore the capability environment and virtual register state. |
+| **UGB-INV-05** | **Safepoint Coverage**: Every loop back-edge and function call must contain or be dominated by a `SAFEPOINT` or implicit safepoint, ensuring the concurrent GC can make progress. |
+| **UGB-INV-06** | **Semantic Preservation**: The JIT must never optimize away a `CAP_CHECK` unless it has mathematically proven the capability's validity and authority via AOSS. |
 
 ---
