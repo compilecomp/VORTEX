@@ -5420,4 +5420,405 @@ But the architecture can be made much more competitive by making these changes:
 7. Treat polyglot FFI as semantic adaptation, not just ABI marshaling.
 8. Make T5 powerful but bounded.
 
-The good ideas are still good. The overclaims needed to be removed.
+---
+
+## OSR-1: On-Stack Replacement Protocol Specification
+**Version 1.0 · Core Execution Contract**
+
+### 1. Fundamental Model & Triggers
+OSR allows the engine to transfer execution from a lower tier (T0/T1) to a higher tier (T2/T3/T4) *while a method is actively executing*, without waiting for the method to return.
+
+#### 1.1 OSR Trigger Points
+- **T0 (Interpreter)**: Back-edge counters (for loops) and call-site counters. When a threshold is crossed, the interpreter invokes the OSR trampoline.
+- **T1 (Stencil Baseline)**: T1 stencils for loop back-edges include a lightweight counter. If tripped, T1 jumps to an OSR stub.
+- **T2/T3**: Generally do not trigger OSR to higher tiers; they rely on standard method-entry tier-ups or trace recording (T4).
+
+#### 1.2 The OSR Target
+The target of an OSR transition is a specific **Bytecode PC** (usually a loop header or a hot call site). The compiler must generate a specialized entry point that accepts the interpreter's state and transitions it into the optimized graph's state.
+
+---
+
+### 2. The OSR Entry Node (Unified Graph IR)
+In the Unified Graph IR, OSR is not a magical runtime hack; it is a first-class control-flow construct.
+
+#### 2.1 The `OSR_ENTRY` Block
+For every bytecode PC that is a valid OSR target, the compiler generates a special basic block: `OSR_ENTRY_<pc>`.
+- **Inputs**: A single pointer to the current VM frame (`vm_frame_ptr`).
+- **Outputs**: The initial values for all variables that are **live** at the target bytecode PC.
+- **Control Flow**: It acts as a predecessor to the target block (e.g., the loop header).
+
+#### 2.2 Integration with Loop Phis
+When OSR-ing into a loop, the loop header contains Phi nodes (φ) merging values from the pre-header and the loop back-edge. 
+The `OSR_ENTRY` block acts as a "virtual pre-header." It extracts the current values from the VM frame and feeds them directly into the loop's Phi nodes, initializing the loop's state for the optimized code.
+
+---
+
+### 3. State Mapping & ARS Integration (The Hard Part)
+This is where OSR interacts with Adaptive Representation Selection (ARS). T0 stores everything as 64-bit `TAGGED` (NaN-boxed) values. T2/T3 may expect unboxed `I64`, `F64`, or `REF_OFF` values.
+
+#### 3.1 Extraction and Conversion
+The `OSR_ENTRY` block must emit instructions to load the VM frame slots and convert them to the representations expected by the optimized graph.
+```text
+; Example: T3 expects an unboxed float (F64) for variable v1
+v1_tagged = LOAD_VM_FRAME(vm_frame_ptr, offset_0)
+v1_f64 = TAG_TO_F64(v1_tagged)  ; Extract binary64
+```
+
+#### 3.2 Representation Mismatch Guards
+What if T3 assumed `v1` is always a float, but at the exact moment of OSR, the VM frame holds an integer? 
+We cannot silently corrupt the execution. The `OSR_ENTRY` block must emit a **Guard**:
+```text
+v1_tagged = LOAD_VM_FRAME(vm_frame_ptr, offset_0)
+v1_is_float = CHECK_TAG(v1_tagged, FLOAT_TAG)
+GUARD(v1_is_float, deopt_osr_mismatch) ; Deopt if assumption fails
+v1_f64 = TAG_TO_F64(v1_tagged)
+```
+If the guard fails, execution deoptimizes back to T0. T0 will resume interpretation. (The engine must track "OSR deopt failures" to prevent infinite recompilation loops).
+
+---
+
+### 4. Guard Handling & Control Flow at OSR Entry
+When we OSR into the middle of a method, we bypass the method's normal entry point. This means we bypass the **Region Entry Guards** (e.g., `obj.layout == X`).
+
+#### 4.1 The Dominator Guard Injection
+We cannot execute specialized operations (like direct field loads) without verifying their assumptions. 
+During the VSDG/SoN lowering phase, the compiler queries the graph: *"What guards dominate the OSR target block?"*
+The compiler then **injects those exact guards** into the `OSR_ENTRY` block.
+
+```text
+OSR_ENTRY_loop_header:
+  ; 1. Extract state & check representations (ARS)
+  obj_tagged = LOAD_VM_FRAME(...)
+  GUARD_TAG(obj_tagged, REF_TAG, deopt_mismatch)
+  obj_off = TAG_TO_REF(obj_tagged)
+  
+  ; 2. Re-execute dominating region guards
+  obj_ptr = REF_OFF_TO_RAW(obj_off)
+  layout_id = LOAD(obj_ptr)
+  GUARD(layout_id == 0x4A, deopt_layout_changed) ; Re-check layout!
+  
+  ; 3. Jump to the actual loop header
+  JUMP loop_header
+```
+This ensures that even though we entered via the side door, all semantic assumptions remain mathematically proven.
+
+---
+
+### 5. LLIR & MIR Lowering
+#### 5.1 LLIR Lowering
+In LLIR, the `OSR_ENTRY` block is lowered into explicit memory loads from the VM frame, explicit conversion instructions (`UNBOX_*`, `TAG_TO_*`), and explicit guard branches. 
+- **Invariant OSR-LLIR-01**: Every live variable at the OSR PC must have a corresponding `LOAD_VM_FRAME` and conversion sequence in the `OSR_ENTRY` block.
+- **Invariant OSR-LLIR-02**: The `OSR_ENTRY` block must end with a jump to the target block or its immediate dominator.
+
+#### 5.2 MIR Lowering & The OSR Stub
+In MIR, the `OSR_ENTRY` block becomes a physical **OSR Stub** in the code cache.
+- The Register Allocator treats the `OSR_ENTRY` block as a root. It allocates physical registers for the unboxed values.
+- The stub ends with a jump to the optimized loop's physical address.
+- **Safepoint Metadata**: The OSR stub itself is a safepoint. If a GC happens exactly while the OSR stub is executing (rare, but possible), the GC must know how to scan the VM frame.
+
+---
+
+### 6. T1 Stencil OSR Mechanism
+T1 uses Copy-and-Patch stencils, so it doesn't have a graph to insert `OSR_ENTRY` blocks into. How does T1 do OSR?
+
+#### 6.1 The T1 OSR Trampoline
+1. T1 stencils for loop back-edges include a 32-bit counter in the code stream.
+2. When the counter trips, the stencil jumps to a **T1 OSR Trampoline** (a small, pre-compiled runtime stub).
+3. The trampoline saves the physical registers, sets up the arguments, and calls the runtime function `trigger_osr(method_id, bytecode_pc, vm_frame_ptr)`.
+4. The runtime compiles the method to T2, generates the T2 OSR Stub, and **patches the T1 back-edge** to jump directly to the T2 OSR Stub.
+5. The trampoline restores registers and jumps to the newly patched T2 stub.
+*Result: The transition is seamless, and subsequent loop iterations execute T2 code directly.*
+
+---
+
+### 7. Deoptimization from OSR Code
+If the optimized (OSR-compiled) code hits a failing guard *inside* the loop, it must deoptimize back to T0.
+
+#### 7.1 State Reconstruction
+The deoptimization mechanism is identical to standard deopt, but with one caveat: the physical registers now hold **unboxed** values (e.g., `F64`), while T0 expects **tagged** values (`TAGGED`).
+- The Safepoint Map (generated in LLIR) explicitly records the representation of every physical register at the deopt PC.
+- The Deopt Stub reads the map, sees that `FPR_F0` holds an `F64`, and emits the boxing logic (`F64_TO_TAG`) before writing the value back to the T0 VM frame.
+
+---
+
+### 8. OSR Invariants
+To guarantee correctness, the following invariants must hold:
+
+| ID | Invariant |
+|---|---|
+| **OSR-INV-01** | **State Completeness**: The `OSR_ENTRY` block must extract and convert *every* variable that is live at the target bytecode PC. No live VM value may be left uninitialized. |
+| **OSR-INV-02** | **Guard Dominance**: The `OSR_ENTRY` block must re-evaluate all guards that dominate the target PC in the optimized graph. Specialized operations must never execute without their assumptions being verified post-OSR. |
+| **OSR-INV-03** | **Representation Safety**: If ARS selects an unboxed representation for an OSR live variable, a type-check guard must be emitted in the `OSR_ENTRY` block. Mismatches must deoptimize, never corrupt. |
+| **OSR-INV-04** | **Deopt Reversibility**: The safepoint map for any PC reachable from an `OSR_ENTRY` block must accurately map physical unboxed registers back to tagged VM frame slots. |
+| **OSR-INV-05** | **No Infinite OSR Loops**: If an OSR transition immediately deoptimizes due to a representation/guard mismatch at the entry block, the runtime must mark the method/PC as "OSR-unstable" and prevent further OSR attempts for that specific profile. |
+
+---
+
+### Summary of the OSR Flow
+1. **T0 Interpreter** hits a back-edge counter.
+2. **T0** calls `trigger_osr`.
+3. **T2 Compiler** builds the Unified Graph, identifies the loop, and generates an `OSR_ENTRY` block.
+4. **ARS** decides loop variables should be unboxed. `OSR_ENTRY` emits unboxing logic and type guards.
+5. **Graph Optimizer** identifies dominating layout guards and injects them into `OSR_ENTRY`.
+6. **MIR** emits the physical OSR Stub and patches the T0/T1 back-edge.
+7. **Execution** seamlessly jumps into the optimized loop, fully unboxed and guarded.
+8. If a guard fails inside the loop, **Deopt** boxes the values back to `TAGGED` and resumes T0.
+---
+
+## PROF-1: Continuous Profiling & PGO Infrastructure
+**Version 1.0 · Core Execution Contract**
+
+### 1. Fundamental Design Philosophy
+The profiling infrastructure must satisfy three competing constraints:
+1. **Near-Zero Mutator Overhead**: Profiling must not degrade the performance of T2/T3 hot code. Atomic counter increments on every loop iteration cause severe cache-line bouncing and pipeline stalls.
+2. **High-Fidelity Feedback**: The compiler needs accurate type, shape, and control-flow data to drive AOSS specialization, ARS (Adaptive Representation Selection), and guard insertion.
+3. **Decoupled Collection and Analysis**: Mutator threads collect raw data asynchronously. Compiler threads analyze aggregated data. They never block each other.
+
+### 2. Profile Data Taxonomy
+We categorize profile data into five distinct domains. Each domain requires different collection strategies.
+
+| Domain | Data Collected | Primary Consumer |
+| :--- | :--- | :--- |
+| **Control Flow** | Back-edge counts, call-site counts, branch outcomes (taken/not-taken). | Tier-up triggers, T5 code layout, T5 loop unrolling. |
+| **Type & Shape (AOSS)** | Receiver types, LayoutIDs, property access shapes, call targets. | AOSS specialization, ARS unboxing, Guard insertion. |
+| **Allocation** | Allocation sites, object sizes, escape hints (thread-local vs. global). | T2/T3 Escape Analysis, Write Barrier elision, T5 allocation hoisting. |
+| **Deoptimization** | Deopt reasons, frequencies, penalty counters per region/guard. | Preventing deopt storms, adjusting speculation confidence. |
+| **Memory/Vector** | Array access strides, alignment, element homogeneity. | T3 Auto-vectorization, SLP, Array unboxing. |
+
+### 3. Collection Mechanisms (Minimizing Overhead)
+We do not use a single mechanism for all tiers. The collection strategy evolves as code gets hotter.
+
+#### 3.1 T0/T1: Instrumentation (Thread-Local Counters)
+T0 (Interpreter) and T1 (Stencil Baseline) use explicit instrumentation.
+- **Thread-Local Buffers (TLB)**: Each thread maintains a local array of counters. Mutators increment their local TLB. This avoids atomic operations and cache-line contention entirely.
+- **Flushing**: At safepoints (or via a periodic timer interrupt), the TLB is flushed and merged into the global `MethodProfile`.
+- **T1 Stencil Integration**: T1 stencils for back-edges include a `INCREMENT_TLB(offset)` instruction. Because it's a thread-local memory write, it is extremely cheap (1-2 cycles).
+
+#### 3.2 T2/T3: Inline Caches (ICs) & Sampling
+Once code reaches T2/T3, **we stop instrumenting edge counters**. The overhead is unacceptable for peak performance. Instead, we rely on:
+- **Inline Caches (ICs)**: The primary source of type/shape feedback. Compiled code checks an IC stub. On a miss, it transitions to a "Miss Stub" which updates the global profile and patches the IC.
+- **Hardware Sampling (PMU)**: For control-flow and memory access patterns in T3, we use hardware Performance Monitoring Units (e.g., Intel PEBS, ARM SPE) or OS-level PC sampling. This provides statistical profiles with *zero* mutator overhead.
+- **T0/T1 Profile Inheritance**: T2/T3 initialization reads the accumulated T0/T1 profile to make initial optimization decisions.
+
+### 4. Profile Storage & Architecture
+The profile data is structured hierarchically to support both online JIT and offline T5 PGO.
+
+#### 4.1 Method-Level Profile
+Attached to the `MethodDescriptor`. Contains:
+- **Counters**: Aggregated back-edge and call-site counts.
+- **IC History**: A ring buffer of the last $N$ observed LayoutIDs/Types for each call/access site.
+- **Deopt Log**: A map of `RegionID -> DeoptReason -> Count`.
+
+#### 4.2 Global/Module-Level Profile
+Aggregated data for whole-program analysis (used by T5).
+- **Call Graph**: Edges weighted by call-site counts.
+- **Class Hierarchy Analysis (CHA) Weights**: Which subclasses are actually instantiated and called.
+- **Serialized Format**: Can be dumped to disk at shutdown for offline T5 PGO.
+
+#### 4.3 The IC Stub Array (Side-Table)
+Instead of embedding IC state directly in the executable code (which bloats the code cache and complicates patching), we use a side-table.
+- The compiled code contains a `LOAD_IC_STUB(index)` instruction.
+- The IC Stub Array holds the current state (Monomorphic, Polymorphic, Megamorphic) and the associated fast-path code pointers.
+- **Benefit**: IC state can be updated, shared across different compiled versions of the same method, and garbage-collected independently of the code cache.
+
+### 5. Integration with Optimization Tiers
+
+#### 5.1 Tier-Up Triggers
+Tier-ups are driven by the global `MethodProfile`.
+- **T0 $\rightarrow$ T1**: Triggered when a T0 TLB counter exceeds `THRESHOLD_T1` (e.g., 1,000).
+- **T1 $\rightarrow$ T2**: Triggered when the T1 TLB counter exceeds `THRESHOLD_T2` (e.g., 10,000) AND the IC history shows stable types (monomorphic or low-polymorphism).
+- **T2 $\rightarrow$ T3**: Triggered when execution time in T2 exceeds a threshold, OR when T2 deoptimizes due to a megamorphic site, prompting T3 to compile a highly specialized version with aggressive guards.
+
+#### 5.2 Driving AOSS and ARS
+- **AOSS**: The compiler queries the IC History for an object access. If 99% of observations are `LayoutID_A`, AOSS emits a `GuardLayout(LayoutID_A)` and specializes the field offset.
+- **ARS**: The compiler queries the type profile for a variable. If the profile proves it is 100% `F64` (unboxed float), ARS commits to the `F64` representation in LLIR, eliminating NV-1 boxing/unboxing.
+
+### 6. The Deoptimization Feedback Loop (Crucial)
+If T3 speculates on a profile and deoptimizes, we must update the profile to prevent an infinite "deopt storm" (compile $\rightarrow$ deopt $\rightarrow$ compile $\rightarrow$ deopt).
+
+#### 6.1 Deopt Penalties
+When a region deopts, the runtime executes a `RECORD_DEOPT(region_id, reason)` stub before jumping to T0.
+- The `MethodProfile` increments the deopt counter for that specific `RegionID` and `Reason`.
+- **Confidence Decay**: The profile applies a penalty to the specific type/shape assumption that failed.
+- **Recompilation Guard**: When the compiler is invoked again, it checks the deopt counter. If it exceeds `MAX_DEOPTS`, the compiler **bans** that specific speculation and forces a generic, un-specialized path (or a safer, heavily guarded path).
+
+### 7. T5 Offline PGO Integration
+T5 operates offline or during idle time. It consumes the serialized Global Profile to perform transformations that are too expensive for online JIT.
+
+#### 7.1 Profile-Guided Code Layout
+T5 uses the control-flow profile to sort basic blocks.
+- **Hot/Cold Splitting**: Blocks with high execution frequency are placed sequentially in the "Hot" section (improving I-cache locality and branch prediction). Blocks with low frequency (error handling, rare deopts) are moved to the "Cold" section.
+
+#### 7.2 Profile-Guided Inlining
+T5 uses the weighted call graph to decide inlining.
+- Instead of just inlining "small" functions, T5 inlines functions that are called frequently *from hot paths*, even if they are moderately large.
+- **Cloning**: If a function is called with different type profiles from different sites, T5 clones the function, specializing each clone for its specific call-site profile.
+
+#### 7.3 Profile-Guided Loop Unrolling
+T5 uses back-edge counts and loop-body size to calculate the optimal unrolling factor, balancing I-cache pressure against loop overhead.
+
+### 8. PROF-1 Invariants
+To guarantee correctness and performance, the following invariants must hold:
+
+| ID | Invariant |
+| :--- | :--- |
+| **PROF-INV-01** | **No Atomic Contention on Hot Paths**: T2/T3 compiled code must never execute atomic instructions (e.g., `LOCK XADD`) for profiling. Profiling is done via IC misses or statistical sampling. |
+| **PROF-INV-02** | **Thread-Local Safety**: TLB flushes must only occur at safepoints or via thread-local handshake, ensuring no data races during the merge. |
+| **PROF-INV-03** | **Deopt Prevention**: If a specific speculation deoptimizes more than $K$ times, the compiler must permanently disable that speculation for the method. |
+| **PROF-INV-04** | **IC Consistency**: The IC Stub Array must be updated atomically with respect to the mutator. A mutator must never see a partially updated IC state. |
+| **PROF-INV-05** | **Profile Completeness**: The T0/T1 profile must capture all live virtual registers' types at safepoints to ensure T2/T3 ARS has complete information. |
+| **PROF-INV-06** | **T5 Serialization Safety**: The global profile can be serialized for T5 without stopping the world, using a copy-on-write or double-buffering mechanism. |
+---
+
+## CODE-1: Code Cache & Executable Memory Management
+**Version 1.0 · Core Execution Contract**
+
+### 1. Fundamental Design Philosophy
+Executable memory is the most constrained and expensive resource in a modern JIT. Operating systems strictly enforce W^X (Write XOR Execute) security policies, and executable pages cannot be easily shared or swapped. 
+The architecture must satisfy four competing constraints:
+1. **Strict W^X Compliance**: Memory must never be simultaneously writable and executable.
+2. **Metadata Separation**: Executable pages must contain *only* instructions and read-only constants. Metadata (safepoint maps, dependencies) must live in standard read-write memory.
+3. **Fragmentation Resistance**: The code cache must not fragment into unusable slivers over long-running sessions.
+4. **Concurrent Safety**: Compiler threads must allocate and patch code while mutator threads execute it, without data races or ICache coherency failures.
+
+---
+
+### 2. Memory Topology: The Four Heaps
+We do not use a single monolithic "Code Cache". We segregate memory by lifetime, mutability, and access patterns.
+
+| Heap Name | Protection | Contents | Allocation Strategy |
+| :--- | :--- | :--- | :--- |
+| **Stencil Pool** | Read-Only, Execute (RX) | Pre-compiled T1 Stencils, shared across all threads. | Allocated once at startup. Never freed. |
+| **Code Pool** | RX (with RW alias) | T1b/T1c/T2/T3/T4 emitted machine code. | Bump-pointer with TLABs. Evictable. |
+| **Stub Pool** | RX (with RW alias) | Deopt stubs, OSR stubs, FFI trampolines, PIC miss stubs. | Bump-pointer. Evictable. |
+| **Metadata Pool** | Read-Write (RW) | CodeBlob headers, Safepoint maps, Region descriptors, AOSS dependencies. | Standard RW allocator. Tied to Code Pool lifecycle. |
+
+**Why separate Metadata?**
+If a 10KB T3 method has 2KB of safepoint/dependency metadata, embedding it in the Code Pool wastes 20% of your scarce executable memory. By placing the `CodeBlobHeader` and `SafepointRecords` in the Metadata Pool, the Code Pool remains dense with pure instructions, maximizing I-Cache efficiency.
+
+---
+
+### 3. Virtual Memory & W^X Protocol
+To satisfy OS security models (macOS `MAP_JIT`, Linux `SELinux/PaX`, Windows `CFG`), we use a **Dual-Mapping Protocol**.
+
+#### 3.1 Dual-Mapping Mechanism
+When the engine requests a new page of executable memory from the OS (via `mmap` or `VirtualAlloc`), it maps the *same underlying physical memory* twice into the process's virtual address space:
+1. **RW View**: Used *only* by compiler threads and the patcher to write instructions and patch branches.
+2. **RX View**: Used *only* by mutator threads to execute the code.
+
+This eliminates the need for costly `mprotect` system calls (which trigger TLB shootdowns and stall all cores) when transitioning between writing and executing.
+
+#### 3.2 Apple Silicon (AArch64) Special Case
+On macOS/iOS, dual-mapping is restricted. We must use the `MAP_JIT` flag and the thread-local write toggle:
+```c
+pthread_jit_write_protect_np(0); // Enable RW for this thread
+// ... write instructions ...
+pthread_jit_write_protect_np(1); // Re-enable RX
+sys_icache_invalidate(start, length); // Crucial: sync ICache
+```
+
+#### 3.3 ICache Coherency Invariant
+On x86-64, the instruction cache is coherent with the data cache. On AArch64 and RV64, it is not.
+**CODE-INV-01**: After any compiler thread finishes writing to the RW view of the Code/Stub Pool, it *must* execute an architecture-specific ICache flush (e.g., `DC CVAU` / `IC IVAU` on AArch64) before publishing the code pointer to mutator threads.
+
+---
+
+### 4. CodeBlob Physical Anatomy
+A compiled method (CodeBlob) is split across the Code Pool and Metadata Pool.
+
+#### 4.1 In the Metadata Pool (RW)
+```text
+CodeBlobHeader {
+    method_id: u64,
+    tier: u8 (T1, T2, T3, T4),
+    code_size: u32,
+    code_ptr_rx: *u8,       // Pointer to the RX view in the Code Pool
+    region_count: u16,
+    regions: [RegionDescriptor], // Entry offsets, deopt targets
+    safepoint_count: u16,
+    safepoints: [SafepointRecord], // PC offsets, register maps, stack maps
+    dependencies: [AOSS_Dependency], // LayoutIDs, Call targets this code relies on
+    state: enum (Active, DeoptPending, Zombie)
+}
+```
+
+#### 4.2 In the Code Pool (RX)
+```text
+[ Executable Instructions ]
+    - Prologue / Stack allocation
+    - Region 1 (Loop A)
+    - Region 2 (Straight-line)
+    - Epilogue / Return
+[ Read-Only Constant Pool ]
+    - 64-bit float literals, large integer immediates, method pointers
+```
+
+---
+
+### 5. Allocation & Fragmentation Management
+The Code Pool is notorious for fragmenting as methods are compiled, deoptimized, and recompiled.
+
+#### 5.1 Compiler Thread-Local Allocation Buffers (TLABs)
+To prevent lock contention when multiple compiler threads (T2/T3) emit code simultaneously:
+1. The Code Pool maintains a global free-list of large memory chunks (e.g., 256KB).
+2. When a compiler thread needs space, it claims a chunk (TLAB) via an atomic pointer bump.
+3. The thread allocates its CodeBlob locally within its TLAB without locks.
+4. If the TLAB is exhausted, it requests a new one.
+
+#### 5.2 Size-Segregated Arenas
+To prevent a massive T3 method from fragmenting the space needed for tiny FFI stubs, the Code Pool is divided into size classes:
+- **Arena S (Small)**: Stubs, trampolines, T1a stencils (< 1KB).
+- **Arena M (Medium)**: T1c/T2 methods (1KB - 16KB).
+- **Arena L (Large)**: T3/T4 highly optimized methods (> 16KB).
+Allocation only occurs within the appropriate arena.
+
+---
+
+### 6. Region-Based Deopt & Patching Protocol
+How do we patch a Region's entry point to jump to a Deopt Stub without violating W^X or causing race conditions?
+
+#### 6.1 The Patchable NOP Sled
+When T2/T3 emits a Region, the first 4 to 16 bytes of the Region's entry point are reserved as a **Patchable NOP Sled** (e.g., `NOP; NOP; NOP; NOP` on x86, or `BTI` / `NOP` equivalents on AArch64).
+
+#### 6.2 Safepoint-Synchronized Patching
+When the AOSS DependencyMap detects a global invalidation (e.g., a LayoutID transition):
+1. The JIT marks the `CodeBlobHeader` as `DeoptPending`.
+2. The JIT waits for the next **Global Safepoint** (where all mutator threads are paused).
+3. At the safepoint, the JIT uses the **RW View** of the Code Pool to overwrite the NOP sled with a `JMP deopt_stub`.
+4. The JIT flushes the ICache for that specific region.
+5. Mutator threads resume. Any thread that was about to enter the region now hits the `JMP` and deoptimizes safely.
+
+**CODE-INV-02**: Code patching *never* occurs while mutator threads are actively executing the patched region. Patching is strictly serialized with global safepoints.
+
+---
+
+### 7. Lifecycle & Reclamation (Sweeping)
+When a method deoptimizes, its CodeBlob cannot be immediately freed because threads might still have return addresses pointing into it (the "Zombie" problem).
+
+#### 7.1 State Machine
+1. **Active**: Executable, referenced by AOSS dependencies.
+2. **DeoptPending**: Dependencies invalidated. Entry points patched to deopt stubs.
+3. **Zombie**: All mutator threads have passed through a safepoint since the patch. No thread can possibly be executing the old code.
+4. **Reclaimable**: Ready to be freed.
+
+#### 7.2 The Sweeper
+During a GC safepoint, the GC and JIT coordinate:
+1. The JIT scans all thread stacks. If a return address falls within a `DeoptPending` CodeBlob, the stack is rewritten to point to the T0 interpreter frame (or the code is kept alive).
+2. If no stack references a `DeoptPending` CodeBlob, it transitions to `Zombie`.
+3. The Sweeper reclaims the memory in the Code Pool and Metadata Pool.
+4. To prevent Code Pool fragmentation, the Sweeper can optionally perform **Code Compaction** (moving live CodeBlobs to defragment the RX heap), updating all internal pointers and stack maps atomically during the safepoint.
+
+---
+
+### 8. CODE-1 Invariants
+
+| ID | Invariant |
+| :--- | :--- |
+| **CODE-INV-01** | **W^X Strictness**: No page in the Code/Stub Pool is ever simultaneously writable and executable. Dual-mapping or OS-specific JIT toggles are mandatory. |
+| **CODE-INV-02** | **Metadata Separation**: Safepoint maps, dependency records, and CodeBlob headers reside in the RW Metadata Pool, not the RX Code Pool. |
+| **CODE-INV-03** | **ICache Coherency**: Any write to the Code/Stub Pool via the RW view must be followed by an architecture-specific ICache invalidation before the RX view is exposed to mutators. |
+| **CODE-INV-04** | **Safepoint Patching**: Instruction patching for Region Deopt only occurs during a global safepoint. Mutators never observe a partially patched instruction stream. |
+| **CODE-INV-05** | **Zombie Safety**: A CodeBlob's executable memory is never reclaimed until a full safepoint has occurred *after* its invalidation, guaranteeing no thread holds a stale return address. |
+| **CODE-INV-06** | **Lock-Free Allocation**: Compiler threads allocate Code Pool memory via TLABs without acquiring global mutexes. |
+
+---
