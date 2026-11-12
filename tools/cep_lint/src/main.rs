@@ -13,7 +13,7 @@
 // CEP:EVIDENCE cep_lint --self-test and repository scans
 //! cep_lint command-line interface.
 
-use cep_lint::{config::Config, rules};
+use cep_lint::{config::Config, receipts, rules};
 use std::path::{Path, PathBuf};
 
 /// Tool version (50.1 `--version` banner component).
@@ -34,6 +34,7 @@ fn main() {
 fn run(args: &[String]) -> i32 {
     let mut config_path: Option<String> = None;
     let mut self_test = false;
+    let mut verify_hunt = false;
     let mut version = false;
     let mut help = false;
     let mut targets: Vec<String> = Vec::new();
@@ -48,6 +49,7 @@ fn run(args: &[String]) -> i32 {
                 }
             },
             "--self-test" | "-t" => self_test = true,
+            "--verify-hunt" => verify_hunt = true,
             "--version" | "-v" => version = true,
             "--help" | "-h" => help = true,
             other if other.starts_with('-') => {
@@ -59,8 +61,8 @@ fn run(args: &[String]) -> i32 {
     }
 
     if help {
-        println!("usage: cep_lint [-c <config>] [--self-test] [--version] <files or directories>");
-        println!("options: --config/-c, --self-test/-t, --help/-h, --version/-v");
+        println!("usage: cep_lint [-c <config>] [--self-test] [--verify-hunt] [--version] <files or directories>");
+        println!("options: --config/-c, --self-test/-t, --verify-hunt, --help/-h, --version/-v");
         return 0;
     }
     if version {
@@ -92,6 +94,9 @@ fn run(args: &[String]) -> i32 {
 
     if self_test {
         return run_self_test(&root, &cfg);
+    }
+    if verify_hunt {
+        return run_verify_hunt(&root, &cfg);
     }
 
     // DOC-SYNC (CEP-LINT-DOC-SYNC): configured rules must be documented,
@@ -249,8 +254,16 @@ fn run_self_test(root: &Path, cfg: &Config) -> i32 {
         }
     }
     // Coverage: every configured rule must have a violating and a compliant
-    // scenario.
+    // scenario. Receipt rules (65.5, 67.5) are mode-triggered manifest checks,
+    // not file-content scans; their suite is tools/cep_lint/tests/receipts.rs.
     for name in cfg.rules.keys() {
+        let is_manifest_check = cfg
+            .rules
+            .get(name)
+            .is_some_and(|r| r.check == "commit_hunt_manifest" || r.check == "hunter_manifest");
+        if is_manifest_check {
+            continue;
+        }
         let has_v = manifest
             .scenarios
             .iter()
@@ -277,6 +290,82 @@ fn run_self_test(root: &Path, cfg: &Config) -> i32 {
 }
 
 /// Finds the nearest ancestor directory containing standard.md.
+/// Runs the chapter 65/67 receipt gates: verifies the Hunt Receipt and the
+/// HUNTER Receipt against the commit diff and the working tree.
+// CEP:WHAT Runs the receipt gates over the commit diff and the working tree.
+// CEP:WHY Rules CEP-LINT-HUNT-RECEIPT and CEP-LINT-HUNTER-RECEIPT are severity 0; a
+//        commit touching hot functions without signed receipts is blocked.
+// CEP:STATUS complete
+// CEP:FAILURE Exits 1 on any receipt finding; bootstrap failures exit 2.
+// CEP:ASSUMES Runs inside a git repository with HEAD~1 available.
+// CEP:COST O(diff bytes + receipt bytes).
+// CEP:EVIDENCE tools/cep_lint/tests/receipts.rs
+fn run_verify_hunt(root: &Path, cfg: &Config) -> i32 {
+    let base = "HEAD~1";
+    let diff = match std::process::Command::new("git")
+        .args([
+            "-C",
+            root.to_str().unwrap_or("."),
+            "diff",
+            "--unified=0",
+            base,
+        ])
+        .output()
+    {
+        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).into_owned(),
+        _ => {
+            eprintln!("CEP-LINT-BOOT-1: cannot diff {base} (run inside a git repository)");
+            return 2;
+        }
+    };
+    let files = collect_files(root, &[]);
+    let hunt_cfg = cfg
+        .rules
+        .get("CEP-LINT-HUNT-RECEIPT")
+        .map(|r| r.severity)
+        .unwrap_or(0);
+    let hunter_cfg = cfg
+        .rules
+        .get("CEP-LINT-HUNTER-RECEIPT")
+        .map(|r| r.severity)
+        .unwrap_or(0);
+    let mut findings: Vec<rules::Finding> = Vec::new();
+    if let Err(errors) = receipts::verify_hunt_receipt(root, &diff, &files) {
+        for (e, detail) in errors {
+            findings.push(rules::Finding {
+                file: receipts::HUNT_RECEIPT_PATH.into(),
+                line: 1,
+                rule: "CEP-LINT-HUNT-RECEIPT".into(),
+                message: format!("{e:?}: {detail}"),
+                severity: hunt_cfg,
+            });
+        }
+    }
+    if let Err(errors) = receipts::verify_hunter_receipt(root, &diff, &files) {
+        for (e, detail) in errors {
+            findings.push(rules::Finding {
+                file: receipts::HUNTER_RECEIPT_PATH.into(),
+                line: 1,
+                rule: "CEP-LINT-HUNTER-RECEIPT".into(),
+                message: format!("{e:?}: {detail}"),
+                severity: hunter_cfg,
+            });
+        }
+    }
+    if findings.is_empty() {
+        println!("cep_lint: hunt receipts verified for the commit diff");
+        0
+    } else {
+        for f in &findings {
+            println!(
+                "{}:{}: {} [sev {}]: {}",
+                f.file, f.line, f.rule, f.severity, f.message
+            );
+        }
+        1
+    }
+}
+
 fn find_repo_root() -> Option<PathBuf> {
     let mut dir = std::env::current_dir().ok()?;
     loop {

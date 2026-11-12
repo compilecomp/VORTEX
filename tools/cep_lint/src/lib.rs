@@ -13,6 +13,8 @@
 
 /// Configuration schema and loader.
 pub mod config;
+/// Receipt gates (chapters 65 and 67).
+pub mod receipts;
 /// Rule engine and checkers.
 pub mod rules;
 
