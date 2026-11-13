@@ -124,6 +124,7 @@ fn is_pure_no_trap(op: &SonOp) -> bool {
             | SonOp::Null
             | SonOp::Bool(_)
             | SonOp::Copy
+            | SonOp::Guard(_)
     )
 }
 
@@ -316,6 +317,11 @@ pub fn gvn(func: &mut SonFunc) -> u64 {
                 if dominates(func.values[cand].block, func.values[vid].block, &idom) && cand != vid
                 {
                     replace_uses(func, vid, cand);
+                    // Fused guards leave the block: a dead guard node would
+                    // still emit a runtime check after lowering.
+                    if matches!(func.values[vid].op, SonOp::Guard(_)) {
+                        func.blocks[b].insts.retain(|&v| v != vid);
+                    }
                     hits += 1;
                     continue;
                 }
@@ -611,7 +617,9 @@ pub fn assign_reps(func: &mut SonFunc) {
                 SonOp::Eq | SonOp::Lt | SonOp::Le | SonOp::IsNull => Dom::Bool,
                 SonOp::ArrNew(_) | SonOp::ArrLoad => Dom::Ref,
                 SonOp::ArrLen => Dom::Int,
-                SonOp::ArrStore | SonOp::SroaStore(_) | SonOp::SroaNew { .. } => Dom::Bot,
+                SonOp::ArrStore | SonOp::SroaStore(_) | SonOp::SroaNew { .. } | SonOp::Guard(_) => {
+                    Dom::Bot
+                }
                 SonOp::SroaLoad(_) => Dom::Top,
             };
             if dom[vid] != d {

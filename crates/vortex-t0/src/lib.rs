@@ -78,7 +78,32 @@ impl Interp {
         let frame = self.make_frame(method_index, args)?;
         let mut frames = vec![frame];
         let mut pc = 0_usize;
-        self.dispatch(m, &mut frames, &mut pc)
+        self.dispatch(m, &mut frames, &mut pc, &mut |_pc: usize, _op, _cat| {})
+    }
+
+    /// Runs the method while recording every executed instruction as
+    /// `(pc, op, operand categories)` through `recorder` (PROF-1 section 2
+    /// control-flow/type collection; the T4 trace frontend's input). The
+    /// categories are the pre-execution NV-1 domains of the instruction's
+    /// register operands.
+    // CEP:WHAT Runs the method while recording every executed instruction as (pc, op, operand categories) through recorder.
+    // CEP:WHY The T4 trace frontend records hot linear paths through the reference interpreter so specialization guards come from actual execution domains.
+    // CEP:STATUS complete
+    // CEP:FAILURE Reports failure through the module's typed error path; no silent fallback.
+    // CEP:ASSUMES Inputs satisfy the module invariants (see file header).
+    // CEP:COST One closure call per executed instruction.
+    // CEP:EVIDENCE cargo test -p vortex-t4
+    pub fn run_with_recorder(
+        &self,
+        m: &mut rt::Machine,
+        method_index: usize,
+        args: &[u64],
+        recorder: &mut dyn FnMut(usize, Op, &[u64]),
+    ) -> ExecResult {
+        let frame = self.make_frame(method_index, args)?;
+        let mut frames = vec![frame];
+        let mut pc = 0_usize;
+        self.dispatch(m, &mut frames, &mut pc, recorder)
     }
 
     /// Resumes interpretation from an arbitrary bytecode pc with a supplied
@@ -117,7 +142,7 @@ impl Interp {
         };
         let mut frames = vec![frame];
         let mut cur_pc = pc;
-        self.dispatch(m, &mut frames, &mut cur_pc)
+        self.dispatch(m, &mut frames, &mut cur_pc, &mut |_pc: usize, _op, _cat| {})
     }
 
     /// The interpreter dispatch loop shared by `run` and `resume`.
@@ -128,7 +153,14 @@ impl Interp {
     // CEP:ASSUMES Inputs satisfy the module invariants (see file header).
     // CEP:COST Bounded by the file-header budget for this class; no hidden allocation beyond documented growth.
     // CEP:EVIDENCE cargo test -p vortex-t0
-    fn dispatch(&self, m: &mut rt::Machine, frames: &mut Vec<Frame>, pc: &mut usize) -> ExecResult {
+    #[allow(clippy::too_many_arguments)]
+    fn dispatch(
+        &self,
+        m: &mut rt::Machine,
+        frames: &mut Vec<Frame>,
+        pc: &mut usize,
+        recorder: &mut dyn FnMut(usize, Op, &[u64]),
+    ) -> ExecResult {
         loop {
             let depth = frames.len();
             let top = frames.last_mut().expect("frame stack never empty");
@@ -139,6 +171,11 @@ impl Interp {
             let (i, next) = instr::decode_at(&method.code, *pc)
                 .map_err(|e| rt::Trap::InvalidEncoding { offset: e.offset })?;
             let pc_usize = *pc;
+            // Record before execution: the trace frontend sees the pc it
+            // would resume at after a deopt and the full pre-execution
+            // register file (operand domains and entry-frame snapshots
+            // derive from it).
+            recorder(pc_usize, i.op, &top.regs);
             match i.op {
                 Op::LoadNull => top.regs[usize::from(i.regs[0])] = nv1::null_word(),
                 Op::LoadTrue => top.regs[usize::from(i.regs[0])] = nv1::bool_word(true),

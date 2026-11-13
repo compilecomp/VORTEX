@@ -83,15 +83,73 @@ pub fn compile_and_run(
 // CEP:COST Bounded by the file-header budget for this class; no hidden allocation beyond documented growth.
 // CEP:EVIDENCE cargo test -p vortex-opt
 #[allow(clippy::float_cmp, clippy::too_many_lines)]
-pub fn run_plan(
+/// Execution outcome of a plan run that can deoptimize (design.md OSR-1
+/// section 7: the deopt carries the failing bytecode pc and the fully
+/// reconstructed tagged frame).
+#[derive(Debug)]
+pub enum ExecOutcome {
+    /// The plan ran to its Return; the frame accompanies the word so
+    /// trace drivers can resume T0 at a side exit.
+    Returned {
+        /// The boxed return word.
+        word: u64,
+        /// The tagged register frame at the return.
+        frame: Vec<u64>,
+    },
+    /// A speculation guard failed: resume interpretation at `pc` with the
+    /// tagged register frame (OSR-INV-04 deopt reversibility).
+    Deoptimized {
+        /// The bytecode pc to resume at.
+        pc: usize,
+        /// The reconstructed tagged virtual-register frame.
+        frame: Vec<u64>,
+        /// The method index the pc refers to.
+        method_index: usize,
+    },
+}
+
+/// Runs a plan with deopt support: guards signal deoptimization with the
+/// reconstructed frame instead of trapping.
+// CEP:WHAT Runs a plan with deopt support.
+// CEP:WHY Required by the module contract stated in the file header.
+// CEP:STATUS complete
+// CEP:FAILURE Reports failure through the module's typed error path; no silent fallback.
+// CEP:ASSUMES Inputs satisfy the module invariants (see file header).
+// CEP:COST One frame write per defined value.
+// CEP:EVIDENCE cargo test -p vortex-t4
+pub fn run_plan_with_deopt(
     plan: &Plan,
     program: &[vortex_ugb::Method],
     m: &mut Machine,
     args: &[u64],
-) -> Result<u64, Trap> {
+) -> Result<ExecOutcome, Trap> {
+    let mut frame: Vec<u64> = vec![vortex_nv1::undefined_word(); usize::from(plan.nregs)];
+    for (i, &a) in args.iter().enumerate().take(frame.len()) {
+        frame[i] = a;
+    }
+    run_plan_from_frame(plan, program, m, &frame)
+}
+
+/// Runs a plan starting from a full tagged register frame: the OSR/trace
+/// entry contract (design.md OSR-1 section 2.1: the entry block consumes
+/// the VM frame).
+// CEP:WHAT Runs a plan starting from a full tagged register frame.
+// CEP:WHY Required by the module contract stated in the file header.
+// CEP:STATUS complete
+// CEP:FAILURE Reports failure through the module's typed error path; no silent fallback.
+// CEP:ASSUMES Inputs satisfy the module invariants (see file header).
+// CEP:COST Identical to run_plan_with_deopt.
+// CEP:EVIDENCE cargo test -p vortex-t4
+pub fn run_plan_from_frame(
+    plan: &Plan,
+    program: &[vortex_ugb::Method],
+    m: &mut Machine,
+    frame_in: &[u64],
+) -> Result<ExecOutcome, Trap> {
     let _ = program;
     let mut values: Vec<u64> = vec![0; plan.values.len()];
     let mut sroa: Vec<Vec<u64>> = vec![Vec::new(); plan.sroa_slots];
+    let mut frame: Vec<u64> = frame_in.to_vec();
     let mut block: usize = 0;
     let mut prev_block: Option<usize> = None;
     let mut steps: u64 = 0;
@@ -141,7 +199,10 @@ pub fn run_plan(
                 ExecOp::ConstFloat(f) => f.to_bits(),
                 ExecOp::Null => nv1::null_word(),
                 ExecOp::Bool(b) => nv1::bool_word(b),
-                ExecOp::Arg(a) => args.get(usize::from(a)).copied().unwrap_or(0),
+                ExecOp::Arg(a) => frame
+                    .get(usize::from(a))
+                    .copied()
+                    .unwrap_or_else(vortex_nv1::undefined_word),
                 ExecOp::Copy => values[inputs[0]],
                 ExecOp::Phi => {
                     // Block-boundary parallel copy: inputs convert to the
@@ -233,6 +294,10 @@ pub fn run_plan(
                 ExecOp::FCmp(c) => {
                     let x = f64::from_bits(values[inputs[0]]);
                     let y = f64::from_bits(values[inputs[1]]);
+                    // The equality arm uses == deliberately: abstract
+                    // equality on numbers is value equality, and
+                    // NaN != NaN is the required IEEE semantics.
+                    #[allow(clippy::float_cmp)]
                     let r = match c {
                         Cmp::Eq => x == y,
                         Cmp::Lt => x < y,
@@ -286,6 +351,40 @@ pub fn run_plan(
                     // observable boundaries through BoxInt.
                     i64::try_from(len).unwrap_or(i64::MAX) as u64
                 }
+                ExecOp::Guard(kind) => {
+                    let w = word_of(plan, &values, inputs[0], m)?;
+                    let ok = match kind {
+                        crate::son::GuardKind::Int => nv1::is_int(w),
+                        crate::son::GuardKind::Float => nv1::categorize(w) == nv1::Category::Float,
+                        crate::son::GuardKind::Numeric => matches!(
+                            nv1::categorize(w),
+                            nv1::Category::Int | nv1::Category::Float
+                        ),
+                        crate::son::GuardKind::Truthy => sem::is_truthy(w),
+                        crate::son::GuardKind::Falsy => !sem::is_truthy(w),
+                        crate::son::GuardKind::IndexBelowLen => {
+                            let arr = sem::as_handle(word_of(
+                                plan,
+                                &values,
+                                *inputs.get(1).unwrap_or(&0),
+                                m,
+                            )?)?;
+                            let idx = sem::as_index(w)?;
+                            idx < m.heap.array_len(arr)
+                        }
+                    };
+                    if !ok {
+                        // Speculation failed: deoptimize to T0 at this
+                        // bytecode pc (design.md T4 4.4 guard density;
+                        // OSR-1 section 7.1 state reconstruction).
+                        return Ok(ExecOutcome::Deoptimized {
+                            pc: plan.values[vid].pc,
+                            frame,
+                            method_index: plan.method_index,
+                        });
+                    }
+                    0
+                }
                 ExecOp::SroaNew { slot, len } => {
                     if slot >= sroa.len() {
                         return Err(Trap::InvalidEncoding { offset: usize::MAX });
@@ -323,11 +422,16 @@ pub fn run_plan(
                 }
             };
             values[vid] = raw;
+            if let Some(r) = plan.values[vid].def_vreg {
+                // The tagged frame tracks every defined register
+                // (OSR-INV-01 state completeness at any deopt point).
+                frame[usize::from(r)] = word_of(plan, &values, vid, m)?;
+            }
         }
         match &plan.blocks[block].term {
             Some(crate::son::Term::Return(val)) => {
                 let word = word_of(plan, &values, *val, m)?;
-                return Ok(word);
+                return Ok(ExecOutcome::Returned { word, frame });
             }
             Some(crate::son::Term::Branch {
                 cond,
@@ -358,5 +462,25 @@ pub fn run_plan(
                 return Err(Trap::InvalidEncoding { offset: usize::MAX });
             }
         }
+    }
+}
+
+/// Executes a plan to completion without deopt support (plain runs).
+// CEP:WHAT Executes a plan to completion without deopt support (plain runs).
+// CEP:WHY Required by the module contract stated in the file header.
+// CEP:STATUS complete
+// CEP:FAILURE Reports failure through the module's typed error path; no silent fallback.
+// CEP:ASSUMES Inputs satisfy the module invariants (see file header).
+// CEP:COST Identical to run_plan_with_deopt.
+// CEP:EVIDENCE cargo test -p vortex-opt
+pub fn run_plan(
+    plan: &Plan,
+    program: &[vortex_ugb::Method],
+    m: &mut Machine,
+    args: &[u64],
+) -> Result<u64, Trap> {
+    match run_plan_with_deopt(plan, program, m, args)? {
+        ExecOutcome::Returned { word, .. } => Ok(word),
+        ExecOutcome::Deoptimized { .. } => Err(Trap::InvalidEncoding { offset: usize::MAX }),
     }
 }

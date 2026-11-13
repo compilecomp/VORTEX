@@ -98,6 +98,8 @@ pub enum ExecOp {
         /// The constant length.
         len: u32,
     },
+    /// Speculation guard (deoptimizes to T0 on failure).
+    Guard(crate::son::GuardKind),
 }
 
 /// Lowered value.
@@ -163,6 +165,8 @@ pub struct Plan {
     pub sroa_slots: usize,
     /// Pass statistics recorded by the pipeline (optimization remarks).
     pub stats: crate::passes::PassStats,
+    /// The method the plan was compiled from.
+    pub method_index: usize,
 }
 
 /// GPR width of the reference allocation (fast-map width parity with T1).
@@ -202,6 +206,7 @@ pub fn lower(func: &SonFunc) -> Plan {
         arg_count: func.arg_count,
         sroa_slots: 0,
         stats: crate::passes::PassStats::default(),
+        method_index: func.method_index,
     };
 
     // L2: explicit conversions per input edge, placed in the consumer's
@@ -410,6 +415,7 @@ fn exec_op_of(v: &crate::son::Value) -> ExecOp {
             }
         }
         SonOp::IsNull => ExecOp::TagIsNull,
+        SonOp::Guard(g) => ExecOp::Guard(*g),
     }
 }
 

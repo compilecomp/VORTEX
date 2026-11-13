@@ -135,6 +135,29 @@ pub enum SonOp {
         /// The constant length.
         len: u32,
     },
+    /// Speculation guard: the value must match the recorded domain or the
+    /// compiled code deoptimizes to T0 (design.md T4 section 4.4 guard
+    /// density; OSR-1 section 3.2 representation mismatch guards).
+    Guard(GuardKind),
+}
+
+/// Guard domains for speculative execution.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GuardKind {
+    /// The word must be an NV-1 immediate integer.
+    Int,
+    /// The word must be a binary64 float.
+    Float,
+    /// The word must be numeric (int or float).
+    Numeric,
+    /// The value must be an integer below the array's length.
+    IndexBelowLen,
+    /// The word must be truthy (the recorded fallthrough direction of a
+    /// conditional branch inside a closed trace).
+    Truthy,
+    /// The word must be falsy (the recorded fallthrough direction of a
+    /// conditional branch inside a closed trace).
+    Falsy,
 }
 
 /// A CFG block: phis first in `insts`, terminator last.
@@ -164,6 +187,8 @@ pub struct SonFunc {
     pub nregs: u16,
     /// Incoming argument register count (`0..arg_count` of the method).
     pub arg_count: u16,
+    /// The method index in the program table.
+    pub method_index: usize,
 }
 
 /// Compilation failure.
@@ -196,7 +221,28 @@ pub enum SonError {
 // CEP:ASSUMES Inputs satisfy the module invariants (see file header).
 // CEP:COST Bounded by the file-header budget for this class; no hidden allocation beyond documented growth.
 // CEP:EVIDENCE cargo test -p vortex-opt
+/// Builds the SSA graph for a method (index 0).
+// CEP:WHAT Builds the SSA graph for a method (index 0).
+// CEP:WHY Required by the module contract stated in the file header.
+// CEP:STATUS complete
+// CEP:FAILURE Reports failure through the module's typed error path; no silent fallback.
+// CEP:ASSUMES Inputs satisfy the module invariants (see file header).
+// CEP:COST Identical to build_with_index.
+// CEP:EVIDENCE cargo test -p vortex-opt
 pub fn build(method: &Method) -> Result<SonFunc, SonError> {
+    build_with_index(method, 0)
+}
+
+/// Builds the SSA graph for a method with its program-table index.
+// CEP:WHAT Builds the SSA graph for a method with its program-table index.
+// CEP:WHY Deopt signals must name the method the resume pc refers to.
+// CEP:STATUS complete
+// CEP:FAILURE Reports failure through the module's typed error path; no silent fallback.
+// CEP:ASSUMES Inputs satisfy the module invariants (see file header).
+// CEP:COST Identical to build.
+// CEP:EVIDENCE cargo test -p vortex-opt
+#[allow(clippy::too_many_lines)]
+pub fn build_with_index(method: &Method, method_index_of: usize) -> Result<SonFunc, SonError> {
     let decoded = decode(method)?;
 
     // Leaders and contiguous block ranges.
@@ -236,6 +282,7 @@ pub fn build(method: &Method) -> Result<SonFunc, SonError> {
         entry_state: vec![Vec::new(); nblocks],
         nregs: method.register_count,
         arg_count: method.arg_count,
+        method_index: method_index_of,
     };
 
     // Pass 1: emit values per block with pending vreg inputs.

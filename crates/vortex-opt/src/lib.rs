@@ -27,12 +27,12 @@ pub mod passes;
 /// The unified SSA graph (CFG, phi placement, renaming, deopt states).
 pub mod son;
 
-pub use exec::{Bin, Cmp};
+pub use exec::{run_plan_with_deopt, Bin, Cmp, ExecOutcome};
 pub use lower::{lower, ExecOp, Plan, PlanBlock, PlanValue, SafepointMap, FPR_COUNT, GPR_COUNT};
 pub use passes::{
     assign_reps, bce, constant_fold, gvn, licm, run_pipeline, sroa, Pass, PassStats, TierBudget,
 };
-pub use son::{build, Rep, SonError, SonFunc, SonOp};
+pub use son::{build, build_with_index, GuardKind, Rep, SonError, SonFunc, SonOp};
 
 /// Compilation failure of the optimizing pipeline.
 #[derive(Debug, Clone, PartialEq, Eq)]

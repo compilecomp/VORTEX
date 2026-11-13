@@ -1,0 +1,17 @@
+[package]
+name = "vortex-t4"
+description = "T4 trace compiler: records hot linear paths through the reference interpreter, compiles them as guarded straight-line plans over the shared optimizing pipeline, and deoptimizes to T0 at the failing pc on guard failure"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+vortex-nv1 = { path = "../vortex-nv1" }
+vortex-ugb = { path = "../vortex-ugb" }
+vortex-runtime = { path = "../vortex-runtime" }
+vortex-t0 = { path = "../vortex-t0" }
+vortex-opt = { path = "../vortex-opt" }
