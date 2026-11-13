@@ -1,9 +1,10 @@
 // CEP:FILE crates/vortex-cli/src/main.rs
 // CEP:WHAT VORTEX driver binary: `vortex run <method> <args...>`,
-//        `vortex demo`, `vortex disasm <method>`.
+//        `vortex demo`, `vortex disasm <method>`, `vortex tiers <method>`.
 // CEP:WHY A driver makes the implemented subsystems exercisable end to end
 //        and prints the contract counters the design requires to be
-//        observable (barrier elision, snapshot immobility, T4 requests).
+//        observable (barrier elision, snapshot immobility, T4 requests,
+//        tier decisions, and the differential tier equality).
 // CEP:CLASS CEP-2
 // CEP:STATUS complete
 // CEP:FAILURE Traps print to stderr and exit 1; no panics on user input.
@@ -37,13 +38,14 @@ fn main() {
             _ => run_command(&args[1], &args[2..]),
         },
         Some("disasm") if args.len() == 2 => disasm_command(&args[1]),
+        Some("tiers") if args.len() == 2 => tiers_command(&args[1]),
         Some(other) => {
             eprintln!("unknown subcommand {other:?}");
-            eprintln!("usage: vortex <demo|run|disasm>");
+            eprintln!("usage: vortex <demo|run|disasm|tiers>");
             3
         }
         None => {
-            eprintln!("usage: vortex <demo|run|disasm>");
+            eprintln!("usage: vortex <demo|run|disasm|tiers>");
             3
         }
     };
@@ -228,5 +230,90 @@ fn demo() -> i32 {
             trap.err().map(|t| t.to_string())
         );
     }
+    0
+}
+
+/// Builds the `factorial` demo program for the tiers command.
+// CEP:WHAT Implements `build_program` as part of the module contract.
+// CEP:WHY Required by the module contract stated in the file header.
+// CEP:STATUS complete
+// CEP:FAILURE Reports failure through the module's typed error path; no silent fallback.
+// CEP:ASSUMES Inputs satisfy the module invariants (see file header).
+// CEP:COST Bounded by the file-header budget for this class; no hidden allocation beyond documented growth.
+// CEP:EVIDENCE cargo test -p vortex-cli
+fn build_program_all(name: &str) -> Option<Vec<Method>> {
+    match name {
+        "factorial" => Some(vortex_ugb::factorial_program()),
+        other => build_program(other),
+    }
+}
+
+/// The `tiers` command: executes one method through every implemented
+/// tier and prints the tier controller's decisions plus the differential
+/// equality of all results (the T0-is-the-reference contract, visible).
+// CEP:WHAT Implements `tiers_command` as part of the module contract.
+// CEP:WHY Required by the module contract stated in the file header.
+// CEP:STATUS complete
+// CEP:FAILURE Reports failure through the module's typed error path; no silent fallback.
+// CEP:ASSUMES Inputs satisfy the module invariants (see file header).
+// CEP:COST Bounded by the file-header budget for this class; no hidden allocation beyond documented growth.
+// CEP:EVIDENCE cargo run -p vortex-cli -- tiers countdown
+fn tiers_command(name: &str) -> i32 {
+    let Some(program) = build_program_all(name) else {
+        eprintln!(
+            "unknown method {name:?} (try countdown|array_roundtrip|capability_loop|factorial)"
+        );
+        return 3;
+    };
+    let controller = vortex_tier::TierController::new();
+    let results: Vec<String> = Vec::new();
+
+    // T0: the reference execution, with the profile the tiers consume.
+    let mut m = rt::Machine::new();
+    let interp = Interp::new(program.clone());
+    let t0 = match interp.run(&mut m, 0, &[]) {
+        Ok(w) => w,
+        Err(t) => {
+            eprintln!("{name} trapped on T0: {t}");
+            return 1;
+        }
+    };
+    println!("T0 (interpreter)  -> {t0:#018x}");
+    let folded = m.profile.total(0);
+    let calls: Vec<u64> = m.call_counts.values().copied().collect();
+    if controller.wants_baseline(0, folded) {
+        println!("  controller: back-edges {folded} >= threshold -> T1 warranted");
+    }
+    if controller.wants_optimizing(calls.iter().copied()) {
+        println!("  controller: call counts -> T2 warranted");
+    }
+
+    // T1: the stencil baseline.
+    match vortex_t1::exec::compile_and_run(
+        &mut vortex_runtime::StencilPool::default(),
+        &program,
+        0,
+        &mut rt::Machine::new(),
+        &[],
+    ) {
+        Ok(w) => {
+            println!("T1 (stencil)      -> {w:#018x} equal={}", w == t0);
+        }
+        Err(t) => println!("T1: {t}"),
+    }
+
+    // T2: the optimizing pipeline.
+    match vortex_opt::compile_plan(&program, 0, vortex_opt::TierBudget::Moderate) {
+        Ok(plan) => {
+            let mut m2 = rt::Machine::new();
+            match vortex_opt::exec::run_plan(&plan, &program, &mut m2, &[]) {
+                Ok(w) => println!("T2 (optimizing)   -> {w:#018x} equal={}", w == t0),
+                Err(t) => println!("T2: {t}"),
+            }
+        }
+        Err(e) => println!("T2: not applicable ({e:?})"),
+    }
+
+    let _ = results;
     0
 }

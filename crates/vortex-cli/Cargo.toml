@@ -1,6 +1,6 @@
 [package]
 name = "vortex-cli"
-description = "VORTEX driver: run UGB methods on T0, inspect bytecode, run the numeric/capability demos"
+description = "VORTEX driver binary: run / demo / disasm / tiers"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -9,13 +9,11 @@ repository.workspace = true
 [lints]
 workspace = true
 
-[[bin]]
-name = "vortex"
-path = "src/main.rs"
-
 [dependencies]
 vortex-nv1 = { path = "../vortex-nv1" }
 vortex-ugb = { path = "../vortex-ugb" }
 vortex-runtime = { path = "../vortex-runtime" }
 vortex-t0 = { path = "../vortex-t0" }
-vortex-ir = { path = "../vortex-ir" }
+vortex-t1 = { path = "../vortex-t1" }
+vortex-opt = { path = "../vortex-opt" }
+vortex-tier = { path = "../vortex-tier" }

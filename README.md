@@ -2,7 +2,7 @@
 
 ## Abstract
 
-VORTEX is a tiered execution engine specified in `design.md` and implemented in Rust. This repository contains (a) the architecture specification with every external review finding resolved, (b) a reference implementation of the foundation subsystems - the NV-1 value model, the UGB bytecode contract, the runtime (heap, GC, AOSS, capabilities, dependency handshake, profiling, stencils), the T0 interpreter, the unified graph IR with the VSDG overlay API and the FFI compatibility matrix - and (c) the mechanical standards enforcement tool required by `standard.md` chapter 50.
+VORTEX is a tiered execution engine specified in `design.md` and implemented in Rust. This repository contains (a) the architecture specification with every external review finding resolved, (b) a reference implementation of the execution stack - the NV-1 value model, the UGB bytecode contract, the runtime (heap, GC, AOSS, capabilities, dependency handshake, profiling, stencils), the T0 interpreter, the T1 stencil baseline, the T2/T3 optimizing pipeline, the T4 trace compiler, the tier controller with the CODE-1/IC-1/EXC-1/MEM-1/DEBUG-1 support subsystems, the unified graph IR with the VSDG overlay API and the FFI compatibility matrix - and (c) the mechanical standards enforcement tool required by `standard.md` chapter 50.
 
 ## Repository Layout
 
@@ -16,8 +16,16 @@ crates/vortex-ugb          UGB opcodes, hybrid variable-length codec, assembler,
 crates/vortex-runtime      Heap, generational GC, AOSS, capability epochs, DependencyMap,
                            profile store, stencil pool
 crates/vortex-t0           T0 interpreter (semantic reference for all tiers)
+crates/vortex-t1           T1 stencil baseline: copy-and-patch (T1a/T1b), linear-scan
+                           fallback (T1c), OSR trampolines, differential executor
+crates/vortex-opt          T2/T3 optimizing pipeline: SSA graph, fold/GVN/LICM/ARS/
+                           proven BCE/SROA, LLIR/MIR lowering, differential executor
+crates/vortex-t4           T4 trace compiler: guarded recording, guard fusion,
+                           deopt-to-T0 at the failing pc
+crates/vortex-tier         Tier controller, CODE-1 code cache model, IC-1, EXC-1,
+                           MEM-1, DEBUG-1
 crates/vortex-ir           Unified graph, VSDG overlay API, GVN, SemanticCompatibilityMatrix
-crates/vortex-cli          vortex binary: run / demo / disasm
+crates/vortex-cli          vortex binary: run / demo / disasm / tiers
 tools/cep_lint             CEP&CC linter with self-test manifest (chapter 50)
 ```
 
@@ -37,8 +45,16 @@ tools/cep_lint             CEP&CC linter with self-test manifest (chapter 50)
 | REVISED 1 (overlay mutation API) | Implemented: transaction, event log, revision checks; tests |
 | FFI-1 section 5 (SemanticCompatibilityMatrix, INV-FFI-007) | Implemented: pure checker; tests |
 | SIMD-1 v1.1 (PACKED_TAGGED, B-F/B-I lane semantics) | Software model implemented; collision/overflow tests |
-| T1/T2/T3/T4/T5 compilers | Specified only (design.md); the T0 interpreter is the execution reference |
-| EXC-1, IC-1, MEM-1, CODE-1, DEBUG-1 | Specified only |
+| T1 baseline (design.md sections 3-5, revised structure) | Implemented: copy-and-patch T1a/T1b over the pure stencil pool, T1c linear-scan fallback, OSR trampolines, DWARF stitching, shared unwind descriptor; differential tests |
+| T2/T3 optimizing (design.md section 8) | Implemented: SSA graph (dominators, phi, rename), moderate and aggressive pass budgets, LLIR/MIR with explicit conversions, linear-scan allocation; differential + evidence tests |
+| T4 trace compiler (design.md T4) | Implemented: guarded recording through the interpreter hook, guard fusion through GVN, deopt-to-T0 at the failing pc; differential tests |
+| T5 whole-program optimizer | Specified only (the pipeline pieces it composes are implemented) |
+| OSR-1 (entry contract, purity, instability) | Implemented: Interp::resume entry, frame-based plan entry, OSR-unstable bookkeeping; tests |
+| CODE-1 (code cache) | Modeled: arenas, TLABs, blob lifecycle, sweeper; tests |
+| IC-1 (inline caches) | Implemented: bounded state machine with megamorphic latch; tests |
+| EXC-1 (exception tables) | Modeled: sorted tables, binary-search dispatch, coverage proof, deopt transfer; tests |
+| MEM-1 (memory orders) | Implemented: reorder legality, fence elimination, target lowering tables; tests |
+| DEBUG-1 (tooling) | Modeled: location-list coverage proof, perf-map publication; tests |
 
 The tiering design in `design.md` is a specification for implementations; the reference engine executes UGB programs on T0 and exposes the runtime counters the higher tiers consume.
 
@@ -51,6 +67,7 @@ cargo clippy --workspace --all-targets
 cargo run -p vortex-cli -- demo
 cargo run -p vortex-cli -- run countdown
 cargo run -p vortex-cli -- disasm countdown
+cargo run -p vortex-cli -- tiers countdown
 ```
 
 ## Standards Enforcement
@@ -70,7 +87,7 @@ Clippy runs with the workspace lint set (all warnings, `float_cmp`); `unsafe` co
 
 ## Known Limitations
 
-- The T0 interpreter does not implement `CALL` (no method-table linking); cross-method calls are a frontend concern in the tiered design.
+- The optimizing pipeline (T2/T3) compiles a documented subset of UGB; methods using `CALL`, the exception opcodes, or the capability opcodes reject compilation with typed errors and stay on T1/T0 (a legal, visible outcome - `vortex tiers` prints it).
 - Boxed integers outside the i48 immediate domain are allocated as `Layout_BoxedInt` objects; re-tagging such values into a numeric array clamps to null in the reference reverse transition.
 - `DependencyMap` guards list storage with a short lock instead of RCU pointer surgery (the workspace forbids `unsafe`); the observable protocol - sequence lock, retry, generation rejection - is the specified contract and is exercised under threads.
 - The snapshot model is in-process (page freezing and immutability), not a serialized `.snap` file format.

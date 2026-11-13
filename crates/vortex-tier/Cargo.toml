@@ -1,0 +1,18 @@
+[package]
+name = "vortex-tier"
+description = "The tiering controller and the execution-support subsystems: tier-up triggers and OSR bookkeeping, the CODE-1 code cache model (arenas, TLABs, blob lifecycle, sweeping), IC-1 inline-cache evolution, EXC-1 exception tables, MEM-1 memory-order mapping, and DEBUG-1 tooling interfaces"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+vortex-nv1 = { path = "../vortex-nv1" }
+vortex-ugb = { path = "../vortex-ugb" }
+vortex-runtime = { path = "../vortex-runtime" }
+
+[dev-dependencies]
+vortex-t0 = { path = "../vortex-t0" }
