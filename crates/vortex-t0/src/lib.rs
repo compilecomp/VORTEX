@@ -2,17 +2,20 @@
 // CEP:FILE crates/vortex-t0/src/lib.rs
 // CEP:WHAT T0 interpreter: table-dispatch execution of UGB methods with the
 //        BARRIER-1-corrected load barrier, epoch-based capability checks,
-//        sampled back-edge counting for T4, AOSS numeric transitions, and
-//        exception handlers.
+//        sampled back-edge counting for T4, AOSS numeric transitions,
+//        exception handlers, and cross-method CALL through the program's
+//        method table with a bounded frame stack.
 // CEP:WHY T0 is the semantic reference for every higher tier: if T0's
 //        behavior and an optimization disagree, T0 wins by definition.
 // CEP:CLASS CEP-1
 // CEP:STATUS complete
 // CEP:FAILURE All failure paths surface as typed Trap values; handler stacks
-//        are unwound on throw; no silent state corruption.
+//        are unwound on throw; recursion is bounded by the machine's
+//        documented depth bound; no silent state corruption.
 // CEP:ASSUMES Methods pass vortex-ugb verification before execution.
 // CEP:COST Dispatch is a jump-table match; hot ops are branch-light. The
 //        barrier adds at most one classify + one color test per ref load.
+//        CALL/RETURN push/pop a frame: O(registers) per call.
 // CEP:EVIDENCE cargo test -p vortex-t0
 use std::collections::HashMap;
 
@@ -23,10 +26,16 @@ use vortex_ugb::{instr, Op};
 /// One activation frame.
 #[derive(Debug)]
 struct Frame {
+    /// Method currently executing (index into the program).
+    method: usize,
     /// Virtual registers (NV-1 words).
     regs: Vec<u64>,
     /// Open exception handlers (bytecode offsets of the Catch site).
     handlers: Vec<usize>,
+    /// Resume point in the caller after this frame returns.
+    resume: Option<usize>,
+    /// Caller register that receives the returned word.
+    caller_dst: usize,
 }
 
 /// Execution outcome.
@@ -47,6 +56,13 @@ impl Interp {
     }
 
     /// Executes `method_index` with the given argument words to completion.
+    ///
+    /// CALL convention (documented reference subset): `CALL dst, callee,
+    /// argc` with `imm32u[0] = argc`; the caller stages arguments in its
+    /// registers `0..argc` (the fixed argument-window convention), the
+    /// callee receives them as its first `argc` registers, and `dst` of the
+    /// caller receives the returned word. Recursion depth is bounded by
+    /// `Machine::call_depth_bound` (bounded failure, Law 6).
     // CEP:WHAT Executes method_index with the given argument words to completion.
     // CEP:WHY Required by the module contract stated in the file header.
     // CEP:STATUS complete
@@ -55,32 +71,29 @@ impl Interp {
     // CEP:COST Bounded by the file-header budget for this class; no hidden allocation beyond documented growth.
     // CEP:EVIDENCE cargo test -p vortex-t0
     pub fn run(&self, m: &mut rt::Machine, method_index: usize, args: &[u64]) -> ExecResult {
-        let method = self
-            .program
-            .get(method_index)
-            .ok_or(rt::Trap::InvalidEncoding { offset: 0 })?;
-        let mut frame = Frame {
-            regs: vec![nv1::undefined_word(); usize::from(method.register_count)],
-            handlers: Vec::new(),
-        };
-        for (i, &a) in args.iter().enumerate().take(usize::from(method.arg_count)) {
-            frame.regs[i] = a;
-        }
-
+        let frame = self.make_frame(method_index, args)?;
+        let mut frames = vec![frame];
         let mut pc = 0_usize;
+
         loop {
+            let depth = frames.len();
+            let top = frames.last_mut().expect("frame stack never empty");
+            let method = self
+                .program
+                .get(top.method)
+                .ok_or(rt::Trap::InvalidEncoding { offset: 0 })?;
             let (i, next) = instr::decode_at(&method.code, pc)
                 .map_err(|e| rt::Trap::InvalidEncoding { offset: e.offset })?;
             match i.op {
-                Op::LoadNull => frame.regs[usize::from(i.regs[0])] = nv1::null_word(),
-                Op::LoadTrue => frame.regs[usize::from(i.regs[0])] = nv1::bool_word(true),
-                Op::LoadFalse => frame.regs[usize::from(i.regs[0])] = nv1::bool_word(false),
+                Op::LoadNull => top.regs[usize::from(i.regs[0])] = nv1::null_word(),
+                Op::LoadTrue => top.regs[usize::from(i.regs[0])] = nv1::bool_word(true),
+                Op::LoadFalse => top.regs[usize::from(i.regs[0])] = nv1::bool_word(false),
                 Op::LoadInt32 => {
-                    frame.regs[usize::from(i.regs[0])] =
+                    top.regs[usize::from(i.regs[0])] =
                         nv1::encode_int(i64::from(i.imm32)).unwrap_or_else(nv1::null_word)
                 }
                 Op::LoadFloat => {
-                    frame.regs[usize::from(i.regs[0])] = nv1::encode_f64(f64::from_bits(i.imm64))
+                    top.regs[usize::from(i.regs[0])] = nv1::encode_f64(f64::from_bits(i.imm64))
                 }
                 Op::LoadConst => {
                     let c = method
@@ -88,29 +101,32 @@ impl Interp {
                         .get(usize::from(i.pool))
                         .copied()
                         .ok_or(rt::Trap::InvalidEncoding { offset: pc })?;
-                    frame.regs[usize::from(i.regs[0])] = match c {
+                    top.regs[usize::from(i.regs[0])] = match c {
                         vortex_ugb::Const::Int(v) => {
                             nv1::encode_int(v).unwrap_or_else(|| self.box_int(m, v))
                         }
                         vortex_ugb::Const::Float(v) => nv1::encode_f64(v),
                     };
                 }
-                Op::Move => frame.regs[usize::from(i.regs[0])] = frame.regs[usize::from(i.regs[1])],
+                Op::Move => {
+                    let v = top.regs[usize::from(i.regs[1])];
+                    top.regs[usize::from(i.regs[0])] = v;
+                }
                 Op::Add | Op::Sub | Op::Mul | Op::Div => {
                     let dst = usize::from(i.regs[0]);
-                    let a = frame.regs[usize::from(i.regs[1])];
-                    let b = frame.regs[usize::from(i.regs[2])];
-                    frame.regs[dst] = self.arith(m, i.op, a, b)?;
+                    let a = top.regs[usize::from(i.regs[1])];
+                    let b = top.regs[usize::from(i.regs[2])];
+                    top.regs[dst] = self.arith(m, i.op, a, b)?;
                 }
                 Op::Neg => {
-                    let a = frame.regs[usize::from(i.regs[1])];
+                    let a = top.regs[usize::from(i.regs[1])];
                     let zero = nv1::encode_int(0).expect("zero encodes");
-                    frame.regs[usize::from(i.regs[0])] = self.arith(m, Op::Sub, zero, a)?;
+                    top.regs[usize::from(i.regs[0])] = self.arith(m, Op::Sub, zero, a)?;
                 }
                 Op::Eq | Op::Lt | Op::Le => {
                     let dst = usize::from(i.regs[0]);
-                    let a = frame.regs[usize::from(i.regs[1])];
-                    let b = frame.regs[usize::from(i.regs[2])];
+                    let a = top.regs[usize::from(i.regs[1])];
+                    let b = top.regs[usize::from(i.regs[2])];
                     let r = if i.op == Op::Eq {
                         words_equal(a, b)
                     } else {
@@ -122,18 +138,18 @@ impl Interp {
                             _ => false,
                         }
                     };
-                    frame.regs[dst] = nv1::bool_word(r);
+                    top.regs[dst] = nv1::bool_word(r);
                 }
                 Op::IsNull => {
-                    let a = frame.regs[usize::from(i.regs[1])];
-                    frame.regs[usize::from(i.regs[0])] = nv1::bool_word(a == nv1::null_word());
+                    let a = top.regs[usize::from(i.regs[1])];
+                    top.regs[usize::from(i.regs[0])] = nv1::bool_word(a == nv1::null_word());
                 }
                 Op::Jump | Op::JumpTrue | Op::JumpFalse => {
                     let target = method.branch_target(&i, pc, next - pc);
                     let taken = match i.op {
                         Op::Jump => true,
-                        Op::JumpTrue => is_truthy(frame.regs[usize::from(i.regs[0])]),
-                        _ => !is_truthy(frame.regs[usize::from(i.regs[0])]),
+                        Op::JumpTrue => is_truthy(top.regs[usize::from(i.regs[0])]),
+                        _ => !is_truthy(top.regs[usize::from(i.regs[0])]),
                     };
                     if taken {
                         if target < pc {
@@ -147,33 +163,78 @@ impl Interp {
                         continue;
                     }
                 }
-                Op::Call => return Err(rt::Trap::UnsupportedCall),
-                Op::Return => return Ok(frame.regs[usize::from(i.regs[0])]),
+                Op::Call => {
+                    let callee = usize::from(i.regs[1]);
+                    if callee >= self.program.len() {
+                        return Err(rt::Trap::CalleeOutOfRange {
+                            callee,
+                            methods: self.program.len(),
+                        });
+                    }
+                    if depth >= m.call_depth_bound {
+                        return Err(rt::Trap::CallStackOverflow {
+                            bound: m.call_depth_bound,
+                        });
+                    }
+                    let argc = i.imm32u[0] as usize;
+                    let callee_method = &self.program[callee];
+                    if usize::from(callee_method.arg_count) < argc {
+                        return Err(rt::Trap::InvalidEncoding { offset: pc });
+                    }
+                    let site = (top.method, pc);
+                    let counter = m.call_counts.entry(site).or_insert(0);
+                    *counter = counter.saturating_add(1);
+                    // Arguments: caller registers 0..argc (fixed window).
+                    let args: Vec<u64> = top.regs[..argc].to_vec();
+                    let resume = next;
+                    let dst = usize::from(i.regs[0]);
+                    let mut callee_frame = self.make_frame(callee, &args)?;
+                    callee_frame.resume = Some(resume);
+                    callee_frame.caller_dst = dst;
+                    frames.push(callee_frame);
+                    pc = 0;
+                    continue;
+                }
+                Op::Return => {
+                    let returned = top.regs[usize::from(i.regs[0])];
+                    let finished = frames.pop().expect("frame stack never empty");
+                    match finished.resume {
+                        Some(resume) => {
+                            // Resume the caller; write the return value into
+                            // the caller's dst register recorded at the call.
+                            let caller = frames.last_mut().expect("caller present");
+                            caller.regs[finished.caller_dst] = returned;
+                            pc = resume;
+                            continue;
+                        }
+                        None => return Ok(returned),
+                    }
+                }
                 Op::AllocArray => {
                     let len = i.imm32u[0] as usize;
                     let nursery = m.heap.nursery_page().ok_or(rt::Trap::OutOfMemory)?;
                     let h = m
                         .heap
                         .alloc_array(rt::layout::GENERIC_ARRAY, len, nursery)?;
-                    frame.regs[usize::from(i.regs[0])] =
+                    top.regs[usize::from(i.regs[0])] =
                         nv1::encode_ref(h.0, 0).expect("valid handle");
                 }
                 Op::LoadIndex => {
-                    let arr = as_handle(frame.regs[usize::from(i.regs[1])])?;
-                    let idx = as_index(frame.regs[usize::from(i.regs[2])])?;
+                    let arr = as_handle(top.regs[usize::from(i.regs[1])])?;
+                    let idx = as_index(top.regs[usize::from(i.regs[2])])?;
                     let v = m.heap.load_array_element(arr, idx, &mut m.gc.stats)?;
-                    frame.regs[usize::from(i.regs[0])] = v;
+                    top.regs[usize::from(i.regs[0])] = v;
                 }
                 Op::StoreIndex => {
-                    let arr = as_handle(frame.regs[usize::from(i.regs[0])])?;
-                    let idx = as_index(frame.regs[usize::from(i.regs[1])])?;
-                    let val = frame.regs[usize::from(i.regs[2])];
+                    let arr = as_handle(top.regs[usize::from(i.regs[0])])?;
+                    let idx = as_index(top.regs[usize::from(i.regs[1])])?;
+                    let val = top.regs[usize::from(i.regs[2])];
                     self.store_element(m, arr, idx, val)?;
                 }
                 Op::LoadLength => {
-                    let arr = as_handle(frame.regs[usize::from(i.regs[1])])?;
+                    let arr = as_handle(top.regs[usize::from(i.regs[1])])?;
                     let len = m.heap.array_len(arr);
-                    frame.regs[usize::from(i.regs[0])] =
+                    top.regs[usize::from(i.regs[0])] =
                         nv1::encode_int(i64::try_from(len).unwrap_or(i64::MAX))
                             .unwrap_or_else(nv1::null_word);
                 }
@@ -187,11 +248,11 @@ impl Interp {
                         false,
                         nursery,
                     )?;
-                    frame.regs[usize::from(i.regs[0])] =
+                    top.regs[usize::from(i.regs[0])] =
                         nv1::encode_ref(h.0, 0).expect("valid handle");
                 }
                 Op::CapCheck => {
-                    let cap_word = frame.regs[usize::from(i.regs[0])];
+                    let cap_word = top.regs[usize::from(i.regs[0])];
                     let h = as_handle(cap_word)?;
                     let id = rt::CapId(m.heap.read_payload(h, 1) as u32);
                     let site = i.imm32u[1] as usize;
@@ -206,18 +267,17 @@ impl Interp {
                     m.caps.check_fast(&mut cache, id, req)?;
                     // Persist the refreshed cache in the machine-level site
                     // table (shared across activations; single-threaded T0).
-                    m.site_epochs
-                        .insert((method_index, site), cache.cached_epoch);
+                    m.site_epochs.insert((top.method, site), cache.cached_epoch);
                 }
                 Op::CapRevoke => {
-                    let cap_word = frame.regs[usize::from(i.regs[0])];
+                    let cap_word = top.regs[usize::from(i.regs[0])];
                     let h = as_handle(cap_word)?;
                     let id = rt::CapId(m.heap.read_payload(h, 1) as u32);
                     m.caps.revoke(id);
                 }
                 Op::Throw => {
-                    let exc = frame.regs[usize::from(i.regs[0])];
-                    match frame.handlers.pop() {
+                    let exc = top.regs[usize::from(i.regs[0])];
+                    match top.handlers.pop() {
                         Some(catch_pc) => {
                             m.pending_exception = Some(exc);
                             pc = catch_pc;
@@ -228,20 +288,47 @@ impl Interp {
                 }
                 Op::TryBegin => {
                     let target = method.branch_target(&i, pc, next - pc);
-                    frame.handlers.push(target);
+                    top.handlers.push(target);
                 }
                 Op::TryEnd => {
-                    frame.handlers.pop();
+                    top.handlers.pop();
                 }
                 Op::Catch => {
                     let exc = m.pending_exception.take().unwrap_or_else(nv1::null_word);
-                    frame.regs[usize::from(i.regs[0])] = exc;
+                    top.regs[usize::from(i.regs[0])] = exc;
                 }
                 Op::Safepoint | Op::Nop => { /* documented no-op */ }
                 Op::Halt => return Ok(nv1::null_word()),
             }
             pc = next;
         }
+    }
+
+    /// Builds one activation frame: undefined-initialized registers, caller
+    /// arguments in `0..arg_count`, and the caller resume bookkeeping.
+    // CEP:WHAT Builds one activation frame: undefined-initialized registers, caller arguments in 0..arg_count, and the caller resume bookkeeping.
+    // CEP:WHY Frame construction is shared by the entry call and nested CALLs.
+    // CEP:STATUS complete
+    // CEP:FAILURE Reports failure through the module's typed error path; no silent fallback.
+    // CEP:ASSUMES Inputs satisfy the module invariants (see file header).
+    // CEP:COST O(register_count) per frame.
+    // CEP:EVIDENCE cargo test -p vortex-t0
+    fn make_frame(&self, method_index: usize, args: &[u64]) -> Result<Frame, rt::Trap> {
+        let method = self
+            .program
+            .get(method_index)
+            .ok_or(rt::Trap::InvalidEncoding { offset: 0 })?;
+        let mut regs = vec![nv1::undefined_word(); usize::from(method.register_count)];
+        for (i, &a) in args.iter().enumerate().take(usize::from(method.arg_count)) {
+            regs[i] = a;
+        }
+        Ok(Frame {
+            method: method_index,
+            regs,
+            handlers: Vec::new(),
+            resume: None,
+            caller_dst: 0,
+        })
     }
 
     /// Store path with the full AOSS policy: numeric elision, reverse

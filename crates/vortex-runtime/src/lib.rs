@@ -63,6 +63,13 @@ pub struct Machine {
     /// Capability-site epoch caches keyed by (method, site), maintained by
     /// the interpreter (UGB-1 section 6.3 fast path).
     pub site_epochs: std::collections::HashMap<(usize, usize), Option<u16>>,
+    /// Call-site counters keyed by (method, pc), maintained by the
+    /// interpreter (design.md section 2.3: call-site counters trigger
+    /// tier-up). Saturation-safe: counters cap at u64::MAX.
+    pub call_counts: std::collections::HashMap<(usize, usize), u64>,
+    /// Maximum interpreter frame-stack depth (bounded failure for recursive
+    /// programs; the reference bound is 256 frames).
+    pub call_depth_bound: usize,
 }
 
 impl Machine {
@@ -72,6 +79,7 @@ impl Machine {
         let mut m = Machine::default();
         m.heap.add_nursery_page();
         m.heap.add_old_page();
+        m.call_depth_bound = 256;
         m
     }
 }

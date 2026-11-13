@@ -49,10 +49,20 @@ pub enum Trap {
         /// The page that could not be frozen.
         page: usize,
     },
-    /// The CALL opcode is outside the reference interpreter's scope (no
-    /// method-table linking implemented); the tiered design compiles calls
-    /// through inline caches.
-    UnsupportedCall,
+    /// The static callee index of a CALL exceeded the program's method
+    /// table (UGB-INV-02 for the callee operand).
+    CalleeOutOfRange {
+        /// The callee index found in the instruction.
+        callee: usize,
+        /// Number of methods in the program.
+        methods: usize,
+    },
+    /// The call frame stack exceeded its documented depth bound
+    /// (bounded failure for recursive programs).
+    CallStackOverflow {
+        /// The depth bound that was exceeded.
+        bound: usize,
+    },
     /// A throw reached the top of the handler stack.
     UnhandledException,
     /// Integer arithmetic overflowed even the boxed slow path (i64).
@@ -79,7 +89,12 @@ impl fmt::Display for Trap {
             Trap::DivByZero => write!(f, "division by zero"),
             Trap::InvalidEncoding { offset } => write!(f, "invalid encoding at byte {offset}"),
             Trap::FreezeFailed { page } => write!(f, "freeze failed for page {page}"),
-            Trap::UnsupportedCall => write!(f, "call not supported by the reference interpreter"),
+            Trap::CalleeOutOfRange { callee, methods } => {
+                write!(f, "callee index {callee} out of range ({methods} methods)")
+            }
+            Trap::CallStackOverflow { bound } => {
+                write!(f, "call stack overflow beyond the {bound}-frame bound")
+            }
             Trap::UnhandledException => write!(f, "unhandled exception reached the top frame"),
             Trap::ArithmeticOverflow => write!(f, "arithmetic overflow beyond the boxed domain"),
         }

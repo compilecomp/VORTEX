@@ -307,3 +307,93 @@ fn snapshot_pages_are_immutable() {
             .store_array_element(arr, 0, nv1::null_word(), &mut m.remembered, &mut m.gc.stats);
     assert_eq!(t, Err(rt::Trap::SnapshotViolation { handle: arr.0 }));
 }
+
+/// Cross-method CALL: the caller stages the argument into the fixed window,
+/// the callee doubles it, and the return value lands in the caller's dst
+/// register. The call-site counter records exactly one call.
+// CEP:WHAT Cross-method CALL: the caller stages the argument into the fixed window, the callee doubles it, and the return value lands in the caller's dst register. The call-site counter records exactly one call.
+// CEP:WHY Required by the module contract stated in the file header.
+// CEP:STATUS complete
+// CEP:FAILURE A failing assertion aborts the test binary.
+// CEP:ASSUMES Deterministic inputs constructed in the test.
+// CEP:COST Bounded by the file-header budget for this class; no hidden allocation beyond documented growth.
+// CEP:EVIDENCE cargo test -p vortex-t0
+#[test]
+fn call_links_through_the_method_table() {
+    let mut m = rt::Machine::new();
+    let interp = Interp::new(vortex_ugb::call_demo_program(21));
+    let r = interp.run(&mut m, 0, &[]).expect("runs");
+    assert_eq!(nv1::decode_int(r), 42);
+    assert_eq!(m.call_counts.get(&(0, 4)), Some(&1), "one call at the site");
+}
+
+/// Recursion through CALL computes the factorial; the frame stack grows and
+/// unwinds correctly across nested activations.
+// CEP:WHAT Recursion through CALL computes the factorial; the frame stack grows and unwinds correctly across nested activations.
+// CEP:WHY Required by the module contract stated in the file header.
+// CEP:STATUS complete
+// CEP:FAILURE A failing assertion aborts the test binary.
+// CEP:ASSUMES Deterministic inputs constructed in the test.
+// CEP:COST Bounded by the file-header budget for this class; no hidden allocation beyond documented growth.
+// CEP:EVIDENCE cargo test -p vortex-t0
+#[test]
+fn recursion_computes_factorial() {
+    let mut m = rt::Machine::new();
+    let interp = Interp::new(vortex_ugb::factorial_program());
+    let r = interp.run(&mut m, 0, &[nv1::encode_int(6).expect("encodes")]);
+    assert_eq!(r.map(nv1::decode_int), Ok(720));
+}
+
+/// Runaway recursion terminates with the documented depth-bound trap instead
+/// of exhausting memory (Law 6: no unbounded failure).
+// CEP:WHAT Runaway recursion terminates with the documented depth-bound trap instead of exhausting memory (Law 6: no unbounded failure).
+// CEP:WHY Required by the module contract stated in the file header.
+// CEP:STATUS complete
+// CEP:FAILURE A failing assertion aborts the test binary.
+// CEP:ASSUMES Deterministic inputs constructed in the test.
+// CEP:COST Bounded by the file-header budget for this class; no hidden allocation beyond documented growth.
+// CEP:EVIDENCE cargo test -p vortex-t0
+#[test]
+fn recursion_is_depth_bounded() {
+    let mut m = rt::Machine::new();
+    m.call_depth_bound = 16;
+    let interp = Interp::new(vortex_ugb::factorial_program());
+    let t = interp
+        .run(&mut m, 0, &[nv1::encode_int(1000).expect("encodes")])
+        .expect_err("infinite recursion traps");
+    assert_eq!(
+        t,
+        rt::Trap::CallStackOverflow { bound: 16 },
+        "the typed depth-bound trap fires"
+    );
+}
+
+/// A CALL to a method index beyond the program traps with the typed callee
+/// range error.
+// CEP:WHAT A CALL to a method index beyond the program traps with the typed callee range error.
+// CEP:WHY Required by the module contract stated in the file header.
+// CEP:STATUS complete
+// CEP:FAILURE A failing assertion aborts the test binary.
+// CEP:ASSUMES Deterministic inputs constructed in the test.
+// CEP:COST Bounded by the file-header budget for this class; no hidden allocation beyond documented growth.
+// CEP:EVIDENCE cargo test -p vortex-t0
+#[test]
+fn call_to_unknown_callee_traps() {
+    let mut a = vortex_ugb::Asm::new("bad", 0, 4);
+    let mut call = vortex_ugb::mk(vortex_ugb::Op::Call, &[1, 9]);
+    call.imm32u = [0, 0];
+    a.emit(&call);
+    a.emit(&vortex_ugb::mk(vortex_ugb::Op::Return, &[0]));
+    let mut m = rt::Machine::new();
+    let interp = Interp::new(vec![a.finish()]);
+    let t = interp
+        .run(&mut m, 0, &[])
+        .expect_err("unknown callee traps");
+    assert_eq!(
+        t,
+        rt::Trap::CalleeOutOfRange {
+            callee: 9,
+            methods: 1
+        }
+    );
+}
