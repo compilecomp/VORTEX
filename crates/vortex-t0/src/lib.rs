@@ -23,6 +23,10 @@ use vortex_nv1 as nv1;
 use vortex_runtime as rt;
 use vortex_ugb::{instr, Op};
 
+/// The shared T0 semantic core (arithmetic, AOSS store policy, equality,
+/// truthiness) reused verbatim by the higher-tier executors.
+pub mod sem;
+
 /// One activation frame.
 #[derive(Debug)]
 struct Frame {
@@ -103,7 +107,7 @@ impl Interp {
                         .ok_or(rt::Trap::InvalidEncoding { offset: pc })?;
                     top.regs[usize::from(i.regs[0])] = match c {
                         vortex_ugb::Const::Int(v) => {
-                            nv1::encode_int(v).unwrap_or_else(|| self.box_int(m, v))
+                            nv1::encode_int(v).unwrap_or_else(|| sem::box_int(m, v))
                         }
                         vortex_ugb::Const::Float(v) => nv1::encode_f64(v),
                     };
@@ -116,22 +120,22 @@ impl Interp {
                     let dst = usize::from(i.regs[0]);
                     let a = top.regs[usize::from(i.regs[1])];
                     let b = top.regs[usize::from(i.regs[2])];
-                    top.regs[dst] = self.arith(m, i.op, a, b)?;
+                    top.regs[dst] = sem::arith(m, i.op, a, b)?;
                 }
                 Op::Neg => {
                     let a = top.regs[usize::from(i.regs[1])];
                     let zero = nv1::encode_int(0).expect("zero encodes");
-                    top.regs[usize::from(i.regs[0])] = self.arith(m, Op::Sub, zero, a)?;
+                    top.regs[usize::from(i.regs[0])] = sem::arith(m, Op::Sub, zero, a)?;
                 }
                 Op::Eq | Op::Lt | Op::Le => {
                     let dst = usize::from(i.regs[0]);
                     let a = top.regs[usize::from(i.regs[1])];
                     let b = top.regs[usize::from(i.regs[2])];
                     let r = if i.op == Op::Eq {
-                        words_equal(a, b)
+                        sem::words_equal(a, b)
                     } else {
-                        let x = self.numeric_value(m, a)?;
-                        let y = self.numeric_value(m, b)?;
+                        let x = sem::numeric_value(m, a)?;
+                        let y = sem::numeric_value(m, b)?;
                         match x.partial_cmp(&y) {
                             Some(core::cmp::Ordering::Less) => i.op == Op::Lt || i.op == Op::Le,
                             Some(core::cmp::Ordering::Equal) => i.op == Op::Le,
@@ -148,8 +152,8 @@ impl Interp {
                     let target = method.branch_target(&i, pc, next - pc);
                     let taken = match i.op {
                         Op::Jump => true,
-                        Op::JumpTrue => is_truthy(top.regs[usize::from(i.regs[0])]),
-                        _ => !is_truthy(top.regs[usize::from(i.regs[0])]),
+                        Op::JumpTrue => sem::is_truthy(top.regs[usize::from(i.regs[0])]),
+                        _ => !sem::is_truthy(top.regs[usize::from(i.regs[0])]),
                     };
                     if taken {
                         if target < pc {
@@ -220,19 +224,19 @@ impl Interp {
                         nv1::encode_ref(h.0, 0).expect("valid handle");
                 }
                 Op::LoadIndex => {
-                    let arr = as_handle(top.regs[usize::from(i.regs[1])])?;
-                    let idx = as_index(top.regs[usize::from(i.regs[2])])?;
+                    let arr = sem::as_handle(top.regs[usize::from(i.regs[1])])?;
+                    let idx = sem::as_index(top.regs[usize::from(i.regs[2])])?;
                     let v = m.heap.load_array_element(arr, idx, &mut m.gc.stats)?;
                     top.regs[usize::from(i.regs[0])] = v;
                 }
                 Op::StoreIndex => {
-                    let arr = as_handle(top.regs[usize::from(i.regs[0])])?;
-                    let idx = as_index(top.regs[usize::from(i.regs[1])])?;
+                    let arr = sem::as_handle(top.regs[usize::from(i.regs[0])])?;
+                    let idx = sem::as_index(top.regs[usize::from(i.regs[1])])?;
                     let val = top.regs[usize::from(i.regs[2])];
                     self.store_element(m, arr, idx, val)?;
                 }
                 Op::LoadLength => {
-                    let arr = as_handle(top.regs[usize::from(i.regs[1])])?;
+                    let arr = sem::as_handle(top.regs[usize::from(i.regs[1])])?;
                     let len = m.heap.array_len(arr);
                     top.regs[usize::from(i.regs[0])] =
                         nv1::encode_int(i64::try_from(len).unwrap_or(i64::MAX))
@@ -253,7 +257,7 @@ impl Interp {
                 }
                 Op::CapCheck => {
                     let cap_word = top.regs[usize::from(i.regs[0])];
-                    let h = as_handle(cap_word)?;
+                    let h = sem::as_handle(cap_word)?;
                     let id = rt::CapId(m.heap.read_payload(h, 1) as u32);
                     let site = i.imm32u[1] as usize;
                     let mut cache: rt::EpochCache = method
@@ -271,7 +275,7 @@ impl Interp {
                 }
                 Op::CapRevoke => {
                     let cap_word = top.regs[usize::from(i.regs[0])];
-                    let h = as_handle(cap_word)?;
+                    let h = sem::as_handle(cap_word)?;
                     let id = rt::CapId(m.heap.read_payload(h, 1) as u32);
                     m.caps.revoke(id);
                 }
@@ -333,6 +337,9 @@ impl Interp {
 
     /// Store path with the full AOSS policy: numeric elision, reverse
     /// transition on domain violation, transition on homogeneity window.
+    ///
+    /// Delegates to [`sem::store_element`], the shared reference semantics
+    /// also composed by the T1/T2/T4 executors.
     // CEP:WHAT Store path with the full AOSS policy: numeric elision, reverse transition on domain violation, transition on homogeneity window.
     // CEP:WHY Required by the module contract stated in the file header.
     // CEP:STATUS complete
@@ -347,117 +354,7 @@ impl Interp {
         idx: usize,
         val: u64,
     ) -> Result<(), rt::Trap> {
-        let lay = m.heap.layout_of(arr);
-        if rt::layout::is_numeric(lay) {
-            // Reverse transition when the value violates the numeric domain
-            // (NUM-INV-02).
-            let domain_ok = if lay == rt::layout::NUMERIC_F64 {
-                nv1::categorize(val) == nv1::Category::Float
-            } else {
-                nv1::is_int(val)
-            };
-            if !domain_ok {
-                m.aoss.transition_tagged(&mut m.heap, arr)?;
-            }
-        } else {
-            // Tagged store: observe for the numeric transition.
-            let decision = m.aoss.observe_store(arr, val);
-            if decision != rt::Decision::None {
-                // Transition converts the existing payload; the store below
-                // then lands raw.
-                m.aoss.transition_numeric(&mut m.heap, arr, decision)?;
-            }
-        }
-        m.heap
-            .store_array_element(arr, idx, val, &mut m.remembered, &mut m.gc.stats)
-    }
-
-    /// Allocates a boxed integer for the i48 overflow domain (NV-1 2.1).
-    fn box_int(&self, m: &mut rt::Machine, v: i64) -> u64 {
-        let nursery = m.heap.nursery_page().expect("nursery present");
-        let h = m
-            .heap
-            .alloc_array(rt::layout::BOXED_INT, 1, nursery)
-            .expect("boxed alloc");
-        let _ = m.heap.write_payload(h, 0, v as u64);
-        nv1::encode_ref(h.0, 0).expect("valid handle")
-    }
-
-    /// Arithmetic with the int fast path, float path, and boxed slow path.
-    // CEP:WHAT Arithmetic with the int fast path, float path, and boxed slow path.
-    // CEP:WHY Required by the module contract stated in the file header.
-    // CEP:STATUS complete
-    // CEP:FAILURE Reports failure through the module's typed error path; no silent fallback.
-    // CEP:ASSUMES Inputs satisfy the module invariants (see file header).
-    // CEP:COST Bounded by the file-header budget for this class; no hidden allocation beyond documented growth.
-    // CEP:EVIDENCE cargo test -p vortex-t0
-    fn arith(&self, m: &mut rt::Machine, op: Op, a: u64, b: u64) -> Result<u64, rt::Trap> {
-        match (nv1::categorize(a), nv1::categorize(b)) {
-            (nv1::Category::Int, nv1::Category::Int) => {
-                let (x, y) = (nv1::decode_int(a), nv1::decode_int(b));
-                let r = match op {
-                    Op::Add => x.checked_add(y),
-                    Op::Sub => x.checked_sub(y),
-                    Op::Mul => x.checked_mul(y),
-                    Op::Div => {
-                        if y == 0 {
-                            return Err(rt::Trap::DivByZero);
-                        }
-                        x.checked_div(y)
-                    }
-                    _ => None,
-                };
-                match r {
-                    Some(v) if (nv1::I48_MIN..=nv1::I48_MAX).contains(&v) => {
-                        Ok(nv1::encode_int(v).expect("in range"))
-                    }
-                    Some(v) => Ok(self.box_int(m, v)), // boxed overflow domain
-                    None => Err(rt::Trap::ArithmeticOverflow),
-                }
-            }
-            _ => {
-                // Float path (mixed int/float promotes per UGB semantics);
-                // boxed integers unbox first.
-                let x = self.numeric_value(m, a)?;
-                let y = self.numeric_value(m, b)?;
-                let r = match op {
-                    Op::Add => x + y,
-                    Op::Sub => x - y,
-                    Op::Mul => x * y,
-                    Op::Div => x / y,
-                    _ => {
-                        return Err(rt::Trap::TypeMismatch {
-                            expected: "arith op",
-                            word: u64::from(op as u8),
-                        })
-                    }
-                };
-                Ok(nv1::encode_f64(r))
-            }
-        }
-    }
-
-    /// Numeric value with boxed-integer unboxing.
-    fn numeric_value(&self, m: &mut rt::Machine, w: u64) -> Result<f64, rt::Trap> {
-        match nv1::categorize(w) {
-            nv1::Category::Int => Ok(nv1::decode_int(w) as f64),
-            nv1::Category::Float => Ok(f64::from_bits(w)),
-            nv1::Category::Ref => {
-                let h = as_handle(w)?;
-                if m.heap.layout_of(h) == rt::layout::BOXED_INT {
-                    Ok(m.heap.read_payload(h, 0) as i64 as f64)
-                } else {
-                    Err(rt::Trap::TypeMismatch {
-                        expected: "numeric",
-                        word: w,
-                    })
-                }
-            }
-            _ => Err(rt::Trap::TypeMismatch {
-                expected: "numeric",
-                word: w,
-            }),
-        }
+        sem::store_element(m, arr, idx, val)
     }
 }
 
@@ -478,59 +375,6 @@ fn backward_site_ordinal(method: &vortex_ugb::Method, pc: usize) -> usize {
         }
     }
     ordinal
-}
-
-/// Abstract equality over NV-1 words (subset semantics).
-///
-/// The float arm uses `==` deliberately: abstract equality on numbers is
-/// value equality, and NaN != NaN is the required IEEE semantics.
-#[allow(clippy::float_cmp)]
-fn words_equal(a: u64, b: u64) -> bool {
-    match (nv1::categorize(a), nv1::categorize(b)) {
-        (nv1::Category::Int, nv1::Category::Int) => nv1::decode_int(a) == nv1::decode_int(b),
-        (nv1::Category::Float, nv1::Category::Float) => f64::from_bits(a) == f64::from_bits(b),
-        (nv1::Category::Special, nv1::Category::Special) => a == b,
-        _ => a == b, // reference identity
-    }
-}
-
-/// Truthiness: null, undefined, false, and integer zero are falsy.
-#[must_use]
-pub fn is_truthy(w: u64) -> bool {
-    match nv1::categorize(w) {
-        nv1::Category::Special => !matches!(
-            nv1::decode_special(w),
-            nv1::SPECIAL_NULL | nv1::SPECIAL_UNDEF | nv1::SPECIAL_FALSE
-        ),
-        nv1::Category::Int => nv1::decode_int(w) != 0,
-        _ => true,
-    }
-}
-
-/// Extracts a heap handle from a reference word.
-fn as_handle(w: u64) -> Result<rt::Handle, rt::Trap> {
-    if !nv1::is_ref(w) {
-        return Err(rt::Trap::TypeMismatch {
-            expected: "reference",
-            word: w,
-        });
-    }
-    Ok(rt::Handle(nv1::ref_offset(w)))
-}
-
-/// Extracts an array index from an integer word.
-fn as_index(w: u64) -> Result<usize, rt::Trap> {
-    if !nv1::is_int(w) {
-        return Err(rt::Trap::TypeMismatch {
-            expected: "index",
-            word: w,
-        });
-    }
-    let v = nv1::decode_int(w);
-    usize::try_from(v).map_err(|_| rt::Trap::BoundsCheck {
-        index: usize::MAX,
-        len: 0,
-    })
 }
 
 /// Site epoch cache table type re-exported for machine composition.

@@ -123,8 +123,8 @@ pub fn sig(op: Op) -> Sig {
         Call => (2, 0, 0, 1, 0, 0),
         Return => (1, 0, 0, 0, 0, 0),
         AllocArray => (1, 0, 0, 1, 0, 0),
-        CapCreate => (1, 0, 0, 2, 0, 0),
-        CapCheck => (1, 0, 0, 1, 0, 0),
+        // CapCreate carries auth + handle; CapCheck carries req_auth + site.
+        CapCreate | CapCheck => (1, 0, 0, 2, 0, 0),
         Jump => (0, 1, 0, 0, 0, 0),
         JumpTrue | JumpFalse => (1, 1, 0, 0, 0, 0),
         TryBegin => (0, 1, 0, 0, 0, 0),

@@ -39,7 +39,10 @@ pub use heap::{
     HEADER_WORDS, WORD,
 };
 pub use profile::{EpochCache, LoopCounter, ProfileConfig, ProfileStore};
-pub use stencil::{CodeBlob, Loc, OsrCounter, OsrTrampolineStub, Stencil, StencilKey, StencilPool};
+pub use stencil::{
+    CodeBlob, Loc, OsrCounter, OsrTrampolineStub, PayloadHole, PayloadKind, Stencil, StencilKey,
+    StencilPool,
+};
 pub use trap::{RtResult, Trap};
 
 /// Convenience bundle the interpreter drives: heap, GC, capabilities,

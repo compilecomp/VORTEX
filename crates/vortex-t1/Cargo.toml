@@ -1,0 +1,16 @@
+[package]
+name = "vortex-t1"
+description = "T1 stencil-first baseline compiler: copy-and-patch (T1a/T1b) with a linear-scan fallback path (T1c), OSR trampolines, DWARF fragment stitching, and a differential executor over the shared T0 semantics"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+vortex-nv1 = { path = "../vortex-nv1" }
+vortex-ugb = { path = "../vortex-ugb" }
+vortex-runtime = { path = "../vortex-runtime" }
+vortex-t0 = { path = "../vortex-t0" }
