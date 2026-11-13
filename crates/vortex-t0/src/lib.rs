@@ -78,7 +78,57 @@ impl Interp {
         let frame = self.make_frame(method_index, args)?;
         let mut frames = vec![frame];
         let mut pc = 0_usize;
+        self.dispatch(m, &mut frames, &mut pc)
+    }
 
+    /// Resumes interpretation from an arbitrary bytecode pc with a supplied
+    /// register frame: the deoptimization and OSR entry point (design.md
+    /// OSR-1 section 7, section 4.4 "resuming exactly at the bytecode
+    /// instruction that failed the assumption"). The frame words are the
+    /// virtual registers; handlers start empty (a deopt into a try region
+    /// re-executes the TryBegin).
+    // CEP:WHAT Resumes interpretation from an arbitrary bytecode pc with a supplied register frame.
+    // CEP:WHY The deopt/OSR contract of every compiled tier lands back in T0 at the failing pc; this method is that contract.
+    // CEP:STATUS complete
+    // CEP:FAILURE Reports failure through the module's typed error path; no silent fallback.
+    // CEP:ASSUMES pc is an instruction boundary and regs.len() equals the method's register_count.
+    // CEP:COST Identical to run() from the resume point.
+    // CEP:EVIDENCE cargo test -p vortex-t0; differential deopt tests in vortex-opt/vortex-t4
+    pub fn resume(
+        &self,
+        m: &mut rt::Machine,
+        method_index: usize,
+        pc: usize,
+        regs: Vec<u64>,
+    ) -> ExecResult {
+        let method = self
+            .program
+            .get(method_index)
+            .ok_or(rt::Trap::InvalidEncoding { offset: 0 })?;
+        if regs.len() != usize::from(method.register_count) {
+            return Err(rt::Trap::InvalidEncoding { offset: pc });
+        }
+        let frame = Frame {
+            method: method_index,
+            regs,
+            handlers: Vec::new(),
+            resume: None,
+            caller_dst: 0,
+        };
+        let mut frames = vec![frame];
+        let mut cur_pc = pc;
+        self.dispatch(m, &mut frames, &mut cur_pc)
+    }
+
+    /// The interpreter dispatch loop shared by `run` and `resume`.
+    // CEP:WHAT The interpreter dispatch loop shared by run and resume.
+    // CEP:WHY Required by the module contract stated in the file header.
+    // CEP:STATUS complete
+    // CEP:FAILURE Reports failure through the module's typed error path; no silent fallback.
+    // CEP:ASSUMES Inputs satisfy the module invariants (see file header).
+    // CEP:COST Bounded by the file-header budget for this class; no hidden allocation beyond documented growth.
+    // CEP:EVIDENCE cargo test -p vortex-t0
+    fn dispatch(&self, m: &mut rt::Machine, frames: &mut Vec<Frame>, pc: &mut usize) -> ExecResult {
         loop {
             let depth = frames.len();
             let top = frames.last_mut().expect("frame stack never empty");
@@ -86,8 +136,9 @@ impl Interp {
                 .program
                 .get(top.method)
                 .ok_or(rt::Trap::InvalidEncoding { offset: 0 })?;
-            let (i, next) = instr::decode_at(&method.code, pc)
+            let (i, next) = instr::decode_at(&method.code, *pc)
                 .map_err(|e| rt::Trap::InvalidEncoding { offset: e.offset })?;
+            let pc_usize = *pc;
             match i.op {
                 Op::LoadNull => top.regs[usize::from(i.regs[0])] = nv1::null_word(),
                 Op::LoadTrue => top.regs[usize::from(i.regs[0])] = nv1::bool_word(true),
@@ -104,7 +155,7 @@ impl Interp {
                         .consts
                         .get(usize::from(i.pool))
                         .copied()
-                        .ok_or(rt::Trap::InvalidEncoding { offset: pc })?;
+                        .ok_or(rt::Trap::InvalidEncoding { offset: pc_usize })?;
                     top.regs[usize::from(i.regs[0])] = match c {
                         vortex_ugb::Const::Int(v) => {
                             nv1::encode_int(v).unwrap_or_else(|| sem::box_int(m, v))
@@ -149,21 +200,21 @@ impl Interp {
                     top.regs[usize::from(i.regs[0])] = nv1::bool_word(a == nv1::null_word());
                 }
                 Op::Jump | Op::JumpTrue | Op::JumpFalse => {
-                    let target = method.branch_target(&i, pc, next - pc);
+                    let target = method.branch_target(&i, pc_usize, next - pc_usize);
                     let taken = match i.op {
                         Op::Jump => true,
                         Op::JumpTrue => sem::is_truthy(top.regs[usize::from(i.regs[0])]),
                         _ => !sem::is_truthy(top.regs[usize::from(i.regs[0])]),
                     };
                     if taken {
-                        if target < pc {
+                        if target < pc_usize {
                             // Back-edge: sampled counter for T4 (PROF-1 3.2).
                             // The per-site slot index is the ordinal of this
                             // backward-jump instruction in the stream.
-                            let site = backward_site_ordinal(method, pc);
+                            let site = backward_site_ordinal(method, pc_usize);
                             let _request = m.profile.backedge(site);
                         }
-                        pc = target;
+                        *pc = target;
                         continue;
                     }
                 }
@@ -183,9 +234,9 @@ impl Interp {
                     let argc = i.imm32u[0] as usize;
                     let callee_method = &self.program[callee];
                     if usize::from(callee_method.arg_count) < argc {
-                        return Err(rt::Trap::InvalidEncoding { offset: pc });
+                        return Err(rt::Trap::InvalidEncoding { offset: pc_usize });
                     }
-                    let site = (top.method, pc);
+                    let site = (top.method, pc_usize);
                     let counter = m.call_counts.entry(site).or_insert(0);
                     *counter = counter.saturating_add(1);
                     // Arguments: caller registers 0..argc (fixed window).
@@ -196,7 +247,7 @@ impl Interp {
                     callee_frame.resume = Some(resume);
                     callee_frame.caller_dst = dst;
                     frames.push(callee_frame);
-                    pc = 0;
+                    *pc = 0;
                     continue;
                 }
                 Op::Return => {
@@ -208,7 +259,7 @@ impl Interp {
                             // the caller's dst register recorded at the call.
                             let caller = frames.last_mut().expect("caller present");
                             caller.regs[finished.caller_dst] = returned;
-                            pc = resume;
+                            *pc = resume;
                             continue;
                         }
                         None => return Ok(returned),
@@ -284,14 +335,14 @@ impl Interp {
                     match top.handlers.pop() {
                         Some(catch_pc) => {
                             m.pending_exception = Some(exc);
-                            pc = catch_pc;
+                            *pc = catch_pc;
                             continue;
                         }
                         None => return Err(rt::Trap::UnhandledException),
                     }
                 }
                 Op::TryBegin => {
-                    let target = method.branch_target(&i, pc, next - pc);
+                    let target = method.branch_target(&i, pc_usize, next - pc_usize);
                     top.handlers.push(target);
                 }
                 Op::TryEnd => {
@@ -304,7 +355,7 @@ impl Interp {
                 Op::Safepoint | Op::Nop => { /* documented no-op */ }
                 Op::Halt => return Ok(nv1::null_word()),
             }
-            pc = next;
+            *pc = next;
         }
     }
 
