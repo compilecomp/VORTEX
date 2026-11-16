@@ -83,6 +83,8 @@ pub enum Op {
     FMul,
     /// Float division.
     FDiv,
+    /// Identity pass-through used by simplification passes.
+    Identity,
     /// Tuple field extraction.
     TupleExtract,
     /// Tuple field insertion.

@@ -353,6 +353,13 @@ name = "vortex-nv1"
 version = "0.1.0"
 
 [[package]]
+name = "vortex-opt"
+version = "0.1.0"
+dependencies = [
+ "vortex-ir",
+]
+
+[[package]]
 name = "vortex-runtime"
 version = "0.1.0"
 

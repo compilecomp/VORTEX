@@ -1,0 +1,13 @@
+[package]
+name = "vortex-opt"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Optimizing backend: ET-SoN passes, Vector IR, Machine IR, scheduling, ELF emission, DWARF, linker."
+
+[lints]
+workspace = true
+
+[dependencies]
+vortex-ir = { path = "../vortex-ir" }

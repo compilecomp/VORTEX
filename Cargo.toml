@@ -8,6 +8,7 @@ members = [
     "crates/vortex-ir",
     "crates/vortex-t0",
     "crates/vortex-t1",
+    "crates/vortex-opt",
     "tools/cep_lint",
 ]
 
