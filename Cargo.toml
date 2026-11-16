@@ -3,6 +3,7 @@ resolver = "2"
 # Members are re-added incrementally as each crate lands on main.
 members = [
     "crates/vortex-nv1",
+    "crates/vortex-ugb",
     "tools/cep_lint",
 ]
 
