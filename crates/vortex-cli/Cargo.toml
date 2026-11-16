@@ -1,0 +1,25 @@
+[package]
+name = "vortex-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "VORTEX driver: demo, assemble, verify, interpret, optimize, tier."
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "vortex-cli"
+path = "src/main.rs"
+
+[dependencies]
+vortex-nv1 = { path = "../vortex-nv1" }
+vortex-ugb = { path = "../vortex-ugb" }
+vortex-runtime = { path = "../vortex-runtime" }
+vortex-ir = { path = "../vortex-ir" }
+vortex-t0 = { path = "../vortex-t0" }
+vortex-t1 = { path = "../vortex-t1" }
+vortex-opt = { path = "../vortex-opt" }
+vortex-t4 = { path = "../vortex-t4" }
+vortex-tier = { path = "../vortex-tier" }

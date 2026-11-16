@@ -1,0 +1,12 @@
+[package]
+name = "vortex-tier"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Tier controller: transitions, cancellation, deopt demotion, safepoints, invalidation."
+
+[lints]
+workspace = true
+
+[dependencies]
