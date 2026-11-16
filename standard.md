@@ -15536,3 +15536,165 @@ State these in the design, not in a footnote:
 ---
 
 **Summary of the load-bearing ideas:** obligation-directed compositional search with sound-only pruning; one warm incremental context per worker with trail-fork instead of restart; deterministic cube-and-conquer instead of portfolios; heuristic isolation so concurrency touches speed and never verdicts; work-unit budgets so `UNPROVEN` is reproducible; and a six-stage canonicalization — slice, minimize, canonicalize, symmetry-quotient, lex-min, hash — that makes the representative independent of who found the witness, with proof-or-flag semantics for every merge.
+---
+
+# 68. Documentation and Knowledge Transfer 
+---
+
+## 68.1 The Prime Directive: The Rosetta Mandate
+
+> **Every function must be documented.**
+> **Every function must have a globally unique ID.**
+> **Every function must be explainable at two distinct levels of depth.**
+> **Silent fallbacks, silent truncation, and hidden degradation are not just bugs; they are fraud.**
+
+Violations of the Rosetta Protocol are Severity 0 defects. Consistent violations of the integrity mandates within this chapter result in **immediate and permanent banning**.
+
+---
+
+## 68.2 The Function ID Registry
+
+You cannot document what you cannot name. Every non-trivial function in the repository must be assigned a globally unique identifier.
+
+### 68.2.1 ID Format
+The ID format is strictly: `<DOMAIN>-<alphanumeric_id>`.
+- **Domains:** `JIT` (JIT Compiler), `IR` (Intermediate Representation), `LEX` (Lexer), `FE` (Frontend), `MEM` (Memory/Allocator), `NET` (Network/Fabric), `GPU` (Accelerator), `HOT` (General Hot Path), `CS` (Cold/Support).
+- **ID:** A lowercase alphanumeric string (e.g., `y42`, `a09`, `k99`).
+
+Example: `JIT-y42`, `IR-a01`, `GPU-k99`.
+
+### 68.2.2 Source Code Declaration
+The ID must be declared in the function's CEP comment block:
+```cpp
+// CEP:ID: JIT-y42
+// CEP:WHAT: ...
+```
+
+### 68.2.3 The Registry Manifest
+All IDs must be registered in `docs/registry.json`. This file is mechanically verified by `cep_lint`.
+- **Extermination:** A function with a `CEP:ID` that is not in `registry.json` is **exterminated**.
+- **Extermination:** A function missing a `CEP:ID` is **exterminated**.
+
+---
+
+## 68.3 The Dual-Tier Documentation Mandate
+
+Every registered function must have a corresponding Markdown file in `docs/functions/<DOMAIN>/<ID>.md`. This file must contain exactly two sections.
+
+### 68.3.1 Tier 1: The Beginner/Onboarding View (The "What" and "Why")
+This section must be simple enough for a junior engineer, a new hire, or a reviewer from a different domain to understand in under 5 minutes.
+- **No jargon:** Do not mention uops, cache lines, or IR dialects here.
+- **Analogies:** Use real-world analogies to explain the control flow.
+- **Inputs/Outputs:** What goes in, what comes out, what errors can occur.
+- **The Contract:** What are the preconditions? What are the postconditions?
+- **Extermination:** If a Tier 1 explanation requires understanding the target microarchitecture to parse, it is **exterminated**.
+
+### 68.3.2 Tier 2: The Advanced/Silicon Reality (The "How" and "At What Cost")
+This section is for principal engineers, performance auditors, and hardware specialists. It must go into extreme depth on the silicon reality.
+- **Microarchitecture:** Which execution ports are saturated? What is the dependency chain length?
+- **Memory Hierarchy:** How does this interact with the L1/L2 cache? Is it prefetch-friendly?
+- **IR/Codegen:** What specific IR transformations does this perform? What are the exact assembly instructions generated?
+- **Cost Model:** Exact cycle counts, throughput, and latency bounds.
+- **Extermination:** If a Tier 2 explanation relies on vague phrases like "it's fast" or "optimized", it is **exterminated**.
+
+---
+
+## 68.4 The Inquisition Reminders (Silent Failure Checklist)
+
+Documentation is not just about explaining the code; it is about actively hunting the silent failures defined in Chapter 66. Every documentation page must include a "Silent Failure Checklist" section that explicitly addresses the following for that specific function:
+
+1. **Fallbacks:** Does this function have a slow path? If so, where is the telemetry counter incremented?
+2. **Truncation:** Are there any narrowing conversions? Are they proven safe or explicitly checked?
+3. **Wrapping:** Is there arithmetic that could overflow? How is it handled?
+4. **Error Codes:** Are all fallible calls checked? What happens if the cold path fails?
+
+If any of these questions are answered with "N/A" without mathematical proof, the documentation is incomplete.
+
+---
+
+## 68.5 The Ban on Silent Fallbacks and the Integrity Mandate
+
+This is the most critical rule in this chapter.
+
+> **Silent fallbacks are not a coding mistake. They are a performance lie.**
+> **If your code silently falls back to a scalar path when SIMD fails, you are hiding a regression.**
+> **If your code silently drops precision when a fast-math flag is missing, you are corrupting data.**
+> **If you consistently write code that silently falls back, you are not a developer; you are a liability.**
+
+### 68.5.1 The Penalty for Silent Fallbacks
+A silent fallback is a **Severity 0 defect**. The code is immediately **exterminated**.
+
+However, if a developer *consistently* writes code that silently falls back, hides performance regressions, or masks hardware limitations without telemetry, it crosses the line from incompetence to **fraud**.
+
+Fraud results in the following, with zero appeals:
+1. **Immediate termination** from the project.
+2. **Permanent blacklisting** from all affiliated repositories, organizations, and partner projects.
+3. **Formal notification** to external maintainers and affiliated projects regarding the integrity breach.
+
+You do not get to hide the silicon's reality. You do not get to lie about the cost of your code.
+
+---
+
+## 68.6 Documentation Topology
+
+The `docs/` directory is a first-class citizen of the repository. It is not a graveyard for outdated wikis.
+
+```text
+docs/
+├── registry.json             # Master list of all Function IDs
+├── onboarding/               # High-level architecture guides
+├── functions/                # Dual-tier function documentation
+│   ├── JIT/
+│   │   ├── JIT-y42.md
+│   │   └── JIT-y43.md
+│   ├── IR/
+│   └── GPU/
+├── architecture/             # Deep dives into subsystems
+└── inquisition/              # Post-mortems of caught silent failures
+```
+
+### 68.6.1 Mechanical Enforcement
+`cep_lint` enforces the Rosetta Protocol:
+- **Rule CEP-LINT-DOC-ID:** Every function with >10 LOC must have a `CEP:ID`.
+- **Rule CEP-LINT-DOC-FILE:** Every `CEP:ID` must have a corresponding `.md` file in `docs/functions/`.
+- **Rule CEP-LINT-DOC-TIERS:** The `.md` file must contain both `## Tier 1: Beginner` and `## Tier 2: Silicon Reality` headers.
+- **Rule CEP-LINT-DOC-INQUISITION:** The `.md` file must contain the `## Silent Failure Checklist` section.
+
+---
+
+## 68.7 Extermination and Ban Examples (The Rosetta Protocol)
+
+### Example 1: Missing Documentation
+**Violation:** A developer writes a complex lock-free queue `MEM-q01` but does not create `docs/functions/MEM/MEM-q01.md`.
+**Response:**
+```text
+EXTERMINATE
+Reason: Black box code. No dual-tier documentation provided.
+Rule: CEP&CC 68.3
+Action: Revert commit. Developer must write the Tier 1 and Tier 2 docs before merging.
+```
+
+### Example 2: The Hidden Fallback (Integrity Breach)
+**Violation:** A developer writes a vectorized string parser. When the input is misaligned, it silently falls back to a byte-by-byte scalar loop. No telemetry counter is incremented. The `CEP:COST` claim remains "1 cycle/byte". The developer does this for the 4th time in the quarter.
+**Response:**
+```text
+EXTERMINATE (INTEGRITY BREACH)
+Reason: Silent fallback masking a performance regression. Consistent violation of the Inquisition Protocol (Ch. 66) and the Rosetta Protocol (Ch. 68.5).
+Rule: CEP&CC 68.5.1 / 66.3
+Action: Revert commit. IMMEDIATELY BAN THE DEVELOPER. BLACKLIST FROM ALL PROJECTS.
+NOTIFY EXTERNAL MAINTAINERS. Hiding a fallback is a performance lie. Consistent lying is fraud.
+```
+
+### Example 3: Tier 2 Documentation is Vague
+**Violation:**
+```markdown
+## Tier 2: Silicon Reality
+This function is very fast. It uses SIMD to process the data quickly.
+```
+**Response:**
+```text
+EXTERMINATE
+Reason: Tier 2 documentation is vague and lacks silicon reality. Does not mention execution ports, cache hierarchy, or exact uop counts.
+Rule: CEP&CC 68.3.2
+Action: Rewrite with exact microarchitectural analysis and PMC evidence.
+```
