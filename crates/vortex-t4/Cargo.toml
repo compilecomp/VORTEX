@@ -1,0 +1,14 @@
+[package]
+name = "vortex-t4"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "T4: O(n^2) passes tier with guarded trace recording."
+
+[lints]
+workspace = true
+
+[dependencies]
+vortex-ir = { path = "../vortex-ir" }
+vortex-opt = { path = "../vortex-opt" }
