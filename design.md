@@ -1,7073 +1,7598 @@
+# ET-SoN IR — Complete Design Document (v1)
 
+## 0. Document Control and Design Scope
 
-# 1. Foundational architecture
+**Component:** Intermediate Representation (ET-SoN — Effect-Typed Sea of Nodes)
 
-## Proposed compilation architecture
+**Version:** 1.0
 
-Register-based VM
+**Role:** Central target-independent representation of the program. Domain for global optimizations including GVN, LICM, DCE, and effect-preserving transformations.
 
-Bytecode, runtime state, execution semantics
+**Design Status:** Complete specification, pending alias-analysis subsystem.
 
-1\. VSDG
+**Scope:** This document defines the graph structure, type system, effect lattice, node semantics, and validity invariants of the IR. It does not define:
+- The source language (which maps into this IR via front-end lowering)
+- The target machine (which this IR maps into via backend lowering)
+- The alias analysis that determines region classes (separate subsystem)
 
-Value-centric dependency representation
+**Normative References:**
+- Click, C. "A Simple, Fast Dominance Algorithm" (for scheduling conditions)
+- C11 Standard §7.17 (for atomic ordering semantics)
+- IEEE 754-2019 (for floating-point semantics)
 
-2\. Sea of Nodes
-
-Graph-based optimization and control/data dependencies
-
-3\. Low-Level IR
-
-Explicit control flow, operations, and machine-independent lowering
-
-4\. Machine IR
-
-Target-specific instructions, registers, constraints, and scheduling
-
-Native machine code
-
-Executable code, runtime integration, deoptimization support
-
-This is our initial structural proposal, not a claim that this is the optimal sequence.
-
-# 2. The four IR levels
-
-We need to establish exactly what each representation is responsible for.
-
-## 2.1 VSDG
-
-Value State Dependence Graph.
-
-Its purpose is to represent computation through value dependencies and state dependencies.
-
-The critical distinction is that data dependencies and effects must not be conflated.
-
-We need to define:
-
-- Value nodes.
-- State nodes.
-- Memory dependencies.
-- Side-effect dependencies.
-- Control-dependent computation.
-- Function entry and exit.
-- Exceptional control flow.
-- Cyclic dependencies and loop representation.
-- Undefined and poison-like values, if the language semantics require them.
-
-A major design question: whether the VSDG is strictly acyclic, uses explicit loop constructs, or permits certain cyclic structures.
-
-We cannot leave that ambiguous.
-
-## 2.2 Sea of Nodes
-
-This level should expose explicit graph relationships between operations.
-
-Potential responsibilities:
-
-- Global value numbering.
-- Common subexpression elimination.
-- Constant propagation.
-- Dead-code elimination.
-- Escape analysis.
-- Load/store optimization.
-- Control-dependent simplification.
-- Loop optimization.
-- Speculative specialization.
-
-But we must establish which transformations actually benefit from this representation. Merely having a graph does not make every graph optimization profitable.
-
-## 2.3 Low-Level IR
-
-This is where abstract computation becomes much more explicit.
-
-We need to define:
-
-- Control-flow blocks.
-- Explicit terminators.
-- SSA or non-SSA representation.
-- Phi nodes or block arguments.
-- Explicit memory operations.
-- Calling conventions at the compiler level.
-- Deoptimization points.
-- Safepoints.
-- Exception edges.
-- Representation-specific arithmetic.
-
-This level should make the eventual machine implementation predictable without prematurely committing to individual machine instructions.
-
-## 2.4 Machine IR
-
-This is the target-specific representation.
-
-Responsibilities include:
-
-- Physical register constraints.
-- Virtual register allocation.
-- Register classes.
-- Instruction selection.
-- Register allocation.
-- Spill and reload placement.
-- Instruction scheduling.
-- ABI compliance.
-- Machine-level control flow.
-- Code layout.
-- Encoding constraints.
-
-We will need to decide the ordering of instruction selection, register allocation, and scheduling based on the target architecture rather than adopting a conventional compiler pipeline blindly.
-
-# 3. Important architectural concern: VSDG versus Sea of Nodes
-
-I want to investigate this before we write optimization rules.
-
-These two representations have substantial conceptual overlap.
-
-If both represent:
-
-- Value dependencies.
-- State dependencies.
-- Memory effects.
-- Control dependencies.
-- Computation ordering.
-
-Then having both may introduce unnecessary conversion costs and duplicate optimization infrastructure.
-
-There are two possible designs:
-
-Design A: Distinct optimization domains
-
-- VSDG handles value/state dependence and high-level transformations.
-- Sea of Nodes handles global graph optimization, control dependencies, and scheduling preparation.
-- Explicit conversion rules govern the boundary.
-
-Design B: Unified graph infrastructure
-
-- Both representations share underlying graph infrastructure.
-- Different graph disciplines and invariants apply at different compilation stages.
-- Conversion is minimized.
-
-Neither is automatically superior. We need to compare construction costs, optimization opportunities, graph traversal complexity, memory consumption, and information preservation.
-
-I am not selecting one yet.
-
-# 4. Decisions we must establish before T0
-
-There are several architectural variables that fundamentally affect the lowest tiers.
-
-| Variable       | What we need to establish                                            |
-| -------------- | -------------------------------------------------------------------- |
-| VM values      | Tagged values, NaN boxing, unboxed values, or another representation |
-| Register model | Fixed virtual registers, dynamically allocated registers, or both    |
-| Type system    | Static, dynamic, gradual, or mixed                                   |
-| Memory model   | Heap layout, object model, aliasing rules                            |
-| GC             | Reference counting, tracing GC, moving GC, or another collector      |
-| Exceptions     | Explicit exceptional edges, runtime unwinding, or both               |
-| Calls          | Direct, indirect, dynamic dispatch                                   |
-| Targets        | x86-64, AArch64, or additional architectures                         |
-
-These aren't minor implementation details. For example, the value representation directly affects arithmetic lowering, register pressure, calling conventions, specialization, and generated code size.
-
-# 5. Proposed tier structure
-
-I would initially investigate this arrangement:
-
-| Tier | Purpose                             |
-| ---- | ----------------------------------- |
-| T0   | Interpreter                         |
-| T1   | Extremely fast baseline compilation |
-| T2   | Optimizing compilation              |
-| T3   | Aggressive optimizing compilation   |
-| T4   | Optional trace-based specialization |
-
-Important: tracing should not necessarily be a higher tier. It can be an independent compilation path that produces specialized code and interacts with the normal tier system.
-
-We will investigate that separately.
-
-## 6. Our first actual design task
-
-I propose beginning with T0 and T1, specifically:
-
-1. VM execution semantics.
-2. Bytecode/register representation.
-3. Runtime value representation.
-4. Baseline compilation requirements.
-5. Compilation latency constraints.
-6. Generated-code representation.
-7. Runtime integration.
-8. Tier-up mechanisms.
-9. Deoptimization and recovery requirements.
-
-We should establish the runtime contract before optimizing the compiler. Otherwise, we'll end up optimizing against assumptions that the runtime cannot satisfy.
-
-First architectural decision: the VM's value model.
-
-This is where I suggest we begin. Everything from arithmetic specialization to register allocation eventually runs into it.
-
-Then Design A is our architectural direction.
-
-Good. We're establishing the actual VM contract now. I've separated your selections from the decisions that remain open.
-
-There are several important consequences here, particularly from combining NaN boxing, dynamically allocated VM registers, and a concurrent generational collector.
-1. Architecture decision ledger
-
-Selected
- = architectural decision supplied by you.
-
-Unresolved
- = requires further specification.
-Component       Current decision
-VM values       Selected  NaN boxing
-Register model  Selected  Dynamically allocated registers
-Language type system    Selected  None; engine uses UGB
-Memory model    Unresolved
-Garbage collector       Selected  Incremental, concurrent, generational
-Exceptions      Unresolved
-Calls   Unresolved
-Targets Clarification needed  x86-64, AArch64, R-V5
-
-2. Consequences of the selected decisions
-2.1 VM values: NaN boxing
-Selected
-We need to define the representation much more precisely.
-
-NaN boxing uses the available bit patterns in IEEE-754 binary64 values to encode non-floating-point values.
-
-The architecture must establish:
-1. Which bit patterns represent ordinary floating-point numbers.
-2. Which NaN patterns are reserved for tagged values.
-3. How integers are represented.
-4. How heap references are represented.
-5. How booleans, null, undefined, and other immediate values are represented.
-6. How invalid or reserved patterns are handled.
-7. Whether pointers are compressed, offset-based, or directly encoded.
-8. How canonicalization interacts with floating-point operations.
-Particularly important: GC interaction.
-
-The collector must reliably distinguish heap references from non-reference values.
-
-A false positive can cause unnecessary retention. A false negative can cause memory corruption.
-
-We therefore need an exact reference-identification invariant, not merely a convenient bit mask.
-
-We also need to establish how concurrent collection interacts with references being modified by generated code.
-2.2 Register model: dynamically allocated registers
-Selected
-There are two different register systems here, and we must not confuse them.
-- VM registers: Logical registers addressed by UGB instructions.
-- Machine registers: Physical CPU registers used by generated native code.
-Your dynamically allocated register model concerns the former.
-
-The existing UGB terminology provides a useful starting point: methods have register_count and arg_count, and virtual registers are dynamically addressed within method frames.
-
-For the new architecture, we need to define:
-- Register numbering.
-- Register lifetime.
-- Register initialization.
-- Register reuse.
-- Register frame layout.
-- Argument placement.
-- Return-value placement.
-- Register bounds behavior.
-- Register storage during deoptimization.
-- Register visibility to the garbage collector.
-One critical distinction:
-
-Dynamically allocated VM registers do not imply dynamically allocated native registers.
-
-The optimizing compiler can map VM register values into physical registers, stack slots, constants, or eliminated values.
-
-Those mappings need not preserve VM register numbering.
-2.3 Type system: none
-Selected
-This is an execution engine, not a language compiler with a source-language type system.
-
-UGB provides the execution semantics.
-
-However, we must distinguish three things:
-- Source-language type information.
-- Runtime value representation and tags.
-- Compiler-inferred facts about values.
-The first is not required by your architecture.
-
-The second is unavoidable with NaN boxing.
-
-The third can still be extremely useful.
-
-For example, the optimizer might prove that a particular value is always an integer, even though the engine has no static type system.
-
-That is a runtime/compiler fact, not a language-level type declaration.
-
-We must preserve that distinction throughout all four IR levels.
-2.4 Garbage collector
-Selected
-Incremental, concurrent, generational GC.
-
-This is one of the most consequential decisions in the entire architecture.
-
-The JIT cannot treat garbage collection as an external service.
-
-Generated code participates in the collector's correctness protocol.
-
-We will need to specify:
-- Root identification.
-- Stack maps.
-- Register maps.
-- Safepoint placement.
-- Object allocation.
-- Write barriers.
-- Read barriers, if required.
-- Remembered sets.
-- Generational promotion.
-- Concurrent marking interaction.
-- Object relocation, if supported.
-- Atomicity requirements.
-- Mutator/collector synchronization.
-There is also a particularly important question concerning generated code:
-
-Which GC operations are permitted to execute without leaving native code, and which require runtime helpers?
-
-That decision affects baseline compilation, optimization, register preservation, and safepoint frequency.
-
-We should not decide it prematurely.
-3. Still unresolved
-These deserve independent design work.
-Area    Decisions needed
-Memory model    Heap organization, object layout, arrays, fields, aliasing, memory ordering
-Exceptions      Exceptional CFG edges, runtime unwinding, handler lookup, deoptimization interaction
-Calls   Direct calls, indirect calls, dynamic dispatch, calling conventions, inline caches
-
-I recommend we treat exceptions and calls as separate architectural subsystems rather than burying them inside ordinary control-flow rules.
-4. Target architectures
-You specified:
-- x86-64
-- AArch64
-- R-V5
-I need to clarify the last one: do you mean RISC-V 64-bit (RV64)?
-
-This matters because machine instruction selection, register allocation, ABI handling, atomic operations, and instruction scheduling must be designed around actual ISA specifications.
-
-We should not invent an architecture called R-V5 and hope the assembler cooperates.
-
-5. What I want to establish next
-Before writing T0 optimization rules, I want to finish the VM execution contract.
-
-My proposed order:
-1. NaN-boxed value encoding.
-2. UGB register semantics.
-3. VM frame layout.
-4. Memory and object model.
-5. GC/JIT interaction.
-6. Calls and exceptions.
-7. Target-specific execution constraints.
-Only then should we begin defining the actual T0 rules.
-
-The next major specification should be NaN boxing. It is a foundational representation decision that affects the GC, all four IRs, register allocation, and native execution. We should define its complete bit-level encoding and invariants before building optimizations on top of it.
-
-We'll treat VSDG and Sea of Nodes as two genuinely distinct optimization domains, not two interchangeable graph formats.
-
-That means each must justify its existence through transformations, invariants, and capabilities that the other does not provide as effectively.
-
-Our initial architectural contract:
-
-1. VSDG: Owns value/state dependence and transformations that benefit from that representation.
-2. Sea of Nodes: Owns graph-based optimization with explicit control and data dependencies.
-3. Conversion boundary: Has formally specified input requirements, output guarantees, information-preservation rules, and computational costs.
-4. No duplicate optimization: A transformation must have an explicitly assigned owner unless there is a demonstrated reason to perform it in both domains.
-5. No gratuitous conversion: Conversion must provide sufficient optimization value to justify its cost.
-
-One particularly important rule: neither representation gets to silently weaken semantic guarantees established by the previous representation.
-
-We should eventually specify the conversion as a formal semantic-preservation obligation, not merely a graph translation.
-
-I also want to investigate whether some optimizations should be deliberately delayed until Sea of Nodes rather than performed in VSDG. That decision needs evidence, not intuition.
-
-Design A is selected. We can now develop its two domains independently, beginning with the exact mathematical and operational definition of VSDG.
-
-Confirmed: RISC-V 64-bit (RV64) is our third target.
-
-And your NaN-boxing priority is clear:
-
-- Minimize runtime overhead.
-- Minimize instruction count on hot paths.
-- Avoid unnecessary decoding and encoding.
-- Architecture-specific implementations are acceptable.
-- Portability does not require identical internal representations.
-- Correctness must survive hostile execution conditions, not merely ordinary test cases.
-
-That last distinction matters. CPU corruption experience is useful, but we should still distinguish hardware faults, compiler miscompilation, memory corruption, and representation invariant violations. They require different defenses.
-
-## 1. NaN boxing: design objective
-
-I propose we establish this as the optimization objective:
-
-Minimize the total execution cost of representing, accessing, testing, and manipulating VM values, subject to exact representation correctness and GC compatibility.
-
-We should measure at least:
-
-1. Tag extraction cost.
-2. Type-check cost.
-3. Integer extraction cost.
-4. Floating-point extraction cost.
-5. Pointer extraction cost.
-6. Value construction cost.
-7. Branches introduced by decoding.
-8. Register pressure.
-9. Memory traffic.
-10. Interaction with GC barriers.
-
-A representation that saves one instruction during construction but adds two instructions to every type check is probably a bad trade. The hot-path frequency matters.
-
-# 2.1.1 Important distinction: VM NaN boxing versus hardware NaN boxing
-
-These are not the same thing.
-
-RISC-V's floating-point ISA already specifies NaN boxing for narrower floating-point values held in wider floating-point registers. For example, a valid 32-bit value in a 64-bit floating-point register has all upper 32 bits set to one.&#x20;
-
-[image](https://www.google.com/s2/favicons?domain=https://docs.riscv.org\&sz=32)
-
-RISC-V Documentation+1
-
-
-
-That is useful hardware behavior, but it does not automatically give us an efficient tagged VM value representation.
-
-We must design our VM encoding independently.
-
-# 2.1.2 Proposed representation requirements
-
-I want to investigate a 64-bit tagged representation first.
-
-| Property                       | Requirement                                    |
-| ------------------------------ | ---------------------------------------------- |
-| Value width                    | 64 bits                                        |
-| Ordinary floating-point values | Direct binary64 representation where permitted |
-| Integer values                 | Immediate representation                       |
-| Booleans                       | Immediate representation                       |
-| Null/undefined                 | Immediate representation                       |
-| Heap references                | Direct or encoded references                   |
-| Tag extraction                 | Minimum practical instruction cost             |
-| Construction                   | Minimum practical instruction cost             |
-| Invalid encodings              | Precisely defined behavior                     |
-| GC identification              | Exact reference classification                 |
-
-One important trade-off: reserving NaN bit patterns for tags means we potentially sacrifice some IEEE-754 NaN payload representations.
-
-We need to decide whether preserving arbitrary NaN payloads is a semantic requirement.
-
-# 2.1.3 Architecture-specific representations
-
-I agree that maintaining different encoding versions is acceptable.
-
-I would actually recommend that we avoid forcing one universal physical encoding across all targets.
-
-Target-specific value ABI
-
-x86-64
-
-Encoding selected for x86-64 addressing constraints, integer instructions, and register allocation.
-
-AArch64
-
-Encoding selected with its address-space configuration, pointer features, and instruction capabilities in mind.
-
-RV64
-
-Encoding selected around the actual supported ISA extensions, address-space configuration, and integer/floating-point execution facilities.
-
-All three must implement the same abstract VM value semantics.
-
-The physical representation can differ.
-
-# 2.1.4 Corruption resistance
-
-I want three distinct operating policies:
-
-- Production: No unnecessary validation on proven-safe hot paths.
-- Debug: Aggressive representation invariant checks.
-- Diagnostic: Detect malformed tags, invalid references, and violated runtime contracts.
-
-One warning: we cannot assume that every malformed 64-bit value is recoverable. In particular, a corrupted heap reference must never be allowed to become an unchecked memory access.
-
-We should also distinguish hardware error detection from software representation validation.
-
-# 2.1.5 First decision: NaN semantics
-
-This is the first decision that materially changes the available encoding space.
-
-A. How should NaN values behave?
-
-Canonicalize NaNs
-
-All NaN results use a canonical representation. Maximizes freedom for tagging.
-
-Preserve NaN payloads
-
-Preserve payload information wherever possible. Restricts available tag space.
-
-Preserve payloads selectively
-
-Preserve them where practical, with explicitly defined canonicalization cases.
-
-B. Integer representation
-
-Immediate tagged integers
-
-Heap-boxed integers
-
-Immediate integers with overflow fallback
-
-Commit these decisions
-
-I would investigate canonicalized NaNs and immediate integers first, but I am not treating either as selected.
-
-We need the bit-level mathematics before declaring this representation optimal.
-
-# NV-1: NaN-Boxed VM Value Representation
-
-
-
-Architectural specification in development
-
-Bit allocation not yet frozen
-
-
-
-Selected decisions
-
-| Property               | Decision                                  |
-| ---------------------- | ----------------------------------------- |
-| VM word width          | 64 bits                                   |
-| Floating-point format  | IEEE-754 binary64                         |
-| NaN semantics          | Partial payload preservation              |
-| Integer representation | Immediate                                 |
-| VM architecture        | Register-based                            |
-| GC                     | Incremental, concurrent, generational     |
-| Targets                | x86-64, AArch64, RV64                     |
-| Encoding portability   | Architecture-specific encodings permitted |
-
-Our objective is not to make NaN boxing elegant. It is to make the common operations cheap.
-
-There is a critical distinction in the design: we need to optimize the representation of values, not just the cost of extracting a tag. The encoding must also make allocation, GC scanning, register spilling, arithmetic, and deoptimization efficient.
-
-# 1. Mathematical foundation
-
-IEEE-754 binary64 has this layout:
-
-64-bit binary64 representation
-
-1 bit
-
-Sign
-
-11 bits
-
-Exponent
-
-52 bits
-
-Fraction
-
-Bit 63Bit 0
-
-The exponent is 11 bits, and the fraction is 52 bits.
-
-A binary64 NaN has:
-
-\\[ E=2047=2^{11}-1 \\]
-
-and
-
-\\[ F\neq 0 \\]
-
-Therefore, the set of NaN bit patterns has cardinality:
-
-\\[ N\_{\mathrm{NaN}}=2(2^{52}-1) \\]
-
-\\[ \boxed{N\_{\mathrm{NaN}}=2^{53}-2} \\]
-
-This is the theoretical space from which we can reserve encodings.
-
-However, not all these patterns are equally useful.
-
-We need to consider:
-
-- Quiet versus signaling NaNs.
-- Positive versus negative NaNs.
-- Hardware canonicalization.
-- Floating-point operations that produce NaNs.
-- NaN payload propagation.
-- Interoperability with native floating-point code.
-
-Important: We cannot simply assume that every NaN payload survives an arithmetic operation. IEEE-754 does not promise universal payload propagation across all operations and hardware implementations.
-
-That is why partial preservation is a reasonable direction.
-
-# 2. Bit allocation proposal
-
-Here is the first concrete encoding candidate.
-
-We reserve three of the eight possible negative quiet-NaN prefix patterns.
-
-The 16-bit prefix determines the value category. The remaining 48 bits carry its payload.
-
-## Proposed 64-bit encoding
-
-16 bits
-
-Category tag
-
-48 bits
-
-Payload
-
-Bits 63–48 | Bits 47–0
-
-| Prefix            | Meaning                     |
-| ----------------- | --------------------------- |
-| `0xFFF8`          | Immediate integer           |
-| `0xFFF9`          | Heap reference              |
-| `0xFFFA`          | Special immediate           |
-| `0xFFFB`–`0xFFFF` | Floating-point NaN patterns |
-| Other patterns    | Floating-point values       |
-
-This has an interesting property: we don't need a separate tag field inside the payload.
-
-The entire 48-bit payload remains available to each category.
-
-## 2.1 Integer encoding
-
-The integer payload is signed two's-complement, 48-bit.
-
-Its range is:
-
-\\[ -2^{47}\leq n\leq 2^{47}-1 \\]
-
-Therefore:
-
-\\[ \boxed{-140737488355328\leq n\leq140737488355327} \\]
-
-This is a 48-bit signed immediate integer.
-
-The payload is extracted and sign-extended to 64 bits.
-
-Important limitation: This does not represent every possible signed 64-bit integer.
-
-If UGB requires exact signed 64-bit integer semantics, we need an overflow representation. That could be a boxed extended integer, a multiword representation, or another explicitly defined mechanism.
-
-There is no way to injectively encode every 64-bit integer, every binary64 value, and additional reference categories into the same 64-bit word. The cardinality constraints prohibit it.
-
-We must not quietly change integer semantics to accommodate the representation.
-
-## 2.2 Heap reference encoding
-
-The proposed reference payload is 48 bits.
-
-I would investigate heap-relative offsets rather than directly embedding native pointers.
-
-\\[ address=heap\\\_base+offset \\]
-
-With a byte-addressed 48-bit offset:
-
-\\[ 0\leq offset<2^{48} \\]
-
-That gives a theoretical heap address window of 256 TiB per heap base.
-
-Advantages:
-
-- No dependence on native pointer canonicality.
-- No dependence on a particular virtual-address width.
-- Easier relocation of the heap base.
-- Stable representation across different machine architectures.
-- Potentially simpler GC reference handling.
-
-However, this introduces address reconstruction and heap-base management.
-
-We need to measure that cost against direct pointer encoding.
-
-We also need to define whether offset zero is reserved, whether multiple heaps are supported, and whether references can escape the heap.
-
-## 2.3 Special immediates
-
-The `0xFFFA` category has a 48-bit payload.
-
-It can encode:
-
-| Payload | Meaning                |
-| ------- | ---------------------- |
-| 0       | Null                   |
-| 1       | Undefined              |
-| 2       | False                  |
-| 3       | True                   |
-| 4       | Uninitialized          |
-| 5       | Internal invalid value |
-
-Additional special values can be assigned later.
-
-This avoids consuming separate 16-bit category prefixes for every singleton value.
-
-The uninitialized and invalid states must remain distinct from user-visible values.
-
-# 3. What NaN payload preservation actually means
-
-Our candidate reserves:
-
-- All three selected negative quiet-NaN prefix groups for VM tags.
-- The remaining five negative quiet-NaN groups for floating-point NaNs.
-
-Consequently, it preserves:
-
-- All positive NaN bit patterns.
-- All negative signaling-NaN bit patterns.
-- Five eighths of negative quiet-NaN bit patterns.
-
-Partial preservation
-
-This is a precise definition of partial preservation, rather than an undefined promise to preserve NaNs whenever convenient.
-
-There is one necessary rule:
-
-A floating-point NaN whose bit pattern collides with a reserved VM tag must be transformed before being stored as a VM value.
-
-The default candidate is canonicalization to:
-
-\\[ \texttt{0x7FF8000000000000} \\]
-
-That is a positive quiet NaN outside our reserved region.
-
-We should preserve non-colliding payloads during bitwise transport, loads, stores, and value copies.
-
-Arithmetic is a separate issue.
-
-RISC-V's standard floating-point arithmetic produces canonical NaNs rather than guaranteeing payload propagation. Its floating-point transfers preserve NaN payload bits.&#x20;
-
-[image](https://www.google.com/s2/favicons?domain=https://docs.riscv.org\&sz=32)
-
-RISC-V Documentation+1
-
-
-
-That means our VM cannot assume arithmetic NaN propagation is identical across x86-64, AArch64, and RV64.
-
-We need an explicit VM-level contract for this.
-
-# 4. Revised prefix selection
-
-I would actually revise the initial prefix assignment before freezing it.
-
-The reason is that we should leave common hardware-generated NaN patterns available to floating-point values where possible.
-
-A particularly useful pattern to leave unreserved is:
-
-\\[ \texttt{0xFFF8000000000000} \\]
-
-This is a commonly encountered negative quiet-NaN indefinite value on x86 implementations.
-
-Our revised proposal reserves the upper half of negative quiet-NaN prefix space instead.
-
-Revised encoding
-
-| Prefix            | Category                      |
-| ----------------- | ----------------------------- |
-| `0xFFFC`          | Integer                       |
-| `0xFFFD`          | Heap reference                |
-| `0xFFFE`          | Special immediate             |
-| `0xFFFF`          | Invalid/reserved              |
-| `0xFFF8`–`0xFFFB` | Preserved floating-point NaNs |
-
-This gives us four contiguous tag categories and leaves the lower four negative quiet-NaN prefix groups available.
-
-The exact hardware NaN patterns must still be tested on every supported target.
-
-## 4.1 Why four contiguous prefixes?
-
-The four prefixes share their upper 14 bits.
-
-This permits a unified tag-region test:
-
-\\[ (w\mathbin{\&}\texttt{0xFFFC000000000000}) = \texttt{0xFFFC000000000000} \\]
-
-The category is then:
-
-\\[ tag=(w\gg48)\mathbin{\&}3 \\]
-
-And the payload:
-
-\\[ payload=w\mathbin{\&}(2^{48}-1) \\]
-
-This gives us:
-
-- One common tag-region predicate.
-- Two bits for category selection.
-- A full 48-bit payload.
-- One reserved invalid category.
-
-This is an attractive encoding structure, but it is not yet a proven instruction-count optimum. Constant materialization, register availability, and target-specific instruction selection still matter.
-
-# 5. Floating-point operation requirements
-
-We need to separate four operations.
-
-| Operation                 | Required behavior                              |
-| ------------------------- | ---------------------------------------------- |
-| Bitwise copy              | Preserve exact permitted NaN bits              |
-| Load/store                | Preserve exact permitted NaN bits              |
-| Floating-point arithmetic | Apply the VM's defined NaN result policy       |
-| Conversion to VM value    | Reject or canonicalize reserved tag collisions |
-
-## 5.1 Collision handling
-
-Suppose a native floating-point operation produces a bit pattern belonging to the reserved VM region.
-
-We cannot interpret that result as an integer or pointer.
-
-The conversion boundary must normalize it.
-
-The proposed normalization is:
-
-\\[ NaN\_{\mathrm{collision}} \rightarrow \texttt{0x7FF8000000000000} \\]
-
-This is safe with respect to our chosen tag region.
-
-However, there is an optimization opportunity worth investigating: avoiding unnecessary normalization for operations whose possible outputs are already proven not to collide.
-
-That would require operation-specific reasoning and target-specific guarantees.
-
-We should not put an unconditional normalization sequence after every floating-point operation without first examining those guarantees.
-
-## 5.2 NaN semantics across architectures
-
-There are two possible contracts:
-
-A. Target-native propagation
-
-NaN payload propagation follows the underlying hardware behavior, subject to reserved-pattern normalization.
-
-B. VM-defined propagation
-
-The VM defines a consistent result policy independent of hardware.
-
-I lean toward B if cross-platform reproducibility matters, but we haven't established that requirement.
-
-This is an architectural decision, not a minor implementation detail.
-
-# 6. Register representation and native execution
-
-This is where I want to avoid a potentially expensive mistake.
-
-A 64-bit NaN-boxed VM value does not necessarily need to occupy one general-purpose native register throughout execution.
-
-The compiler should be permitted to use different physical representations internally.
-
-For example:
-
-| VM value              | Possible native representation        |
-| --------------------- | ------------------------------------- |
-| Tagged integer        | General-purpose register              |
-| Heap reference        | General-purpose register              |
-| Boolean               | Immediate or general-purpose register |
-| Null                  | Constant                              |
-| Binary64 number       | Floating-point register               |
-| Compile-time constant | Immediate or constant materialization |
-
-This is especially important for floating-point-heavy workloads.
-
-If every floating-point operation requires:
-
-1. Extracting a VM word.
-2. Moving it to an FPU register.
-3. Performing arithmetic.
-4. Moving it back.
-5. Checking its tag region.
-
-Then we may have created a representation whose overhead dominates the actual computation.
-
-Instead, we should investigate keeping unboxed floating-point values in FPU registers across multiple operations.
-
-The VM's canonical storage representation remains 64-bit NaN-boxed, but the compiler can use temporary unboxed representations.
-
-This introduces a requirement for precise representation tracking in the IR and register allocator.
-
-# 7. GC compatibility
-
-Our concurrent generational collector imposes additional requirements.
-
-The reference category is:
-
-\\[ tag=01_2 \\]
-
-under the proposed category assignment.
-
-A heap reference must be recognizable without examining arbitrary object contents.
-
-However, this does not mean the collector should conservatively scan every machine register and interpret every matching 64-bit pattern as a pointer.
-
-We should use precise root maps.
-
-The runtime must know:
-
-- Which machine registers contain references.
-- Which stack slots contain references.
-- Which slots contain tagged VM values.
-- Which slots contain unboxed floating-point values.
-- Which values are temporarily unavailable because they were optimized away.
-- Which references need relocation after collection.
-
-This is particularly important when the compiler keeps values unboxed.
-
-GC root classification must be based on compiler/runtime metadata, not assumptions about whatever bits happen to occupy a register.
-
-# 8. Corruption and validation requirements
-
-Since you've dealt with CPU corruption before, I want a clear distinction here.
-
-NaN boxing provides category encoding. It does not provide hardware fault tolerance.
-
-A bit flip can turn:
-
-- An integer into another integer.
-- A reference into another reference.
-- A valid value into an invalid value.
-- A floating-point value into a tagged value.
-
-The invalid category catches some malformed values, not all corruption.
-
-I propose three validation levels:
-
-| Level      | Behavior                                                          |
-| ---------- | ----------------------------------------------------------------- |
-| Production | Maintain proven invariants; avoid redundant hot-path checks       |
-| Debug      | Validate category, reference range, and representation invariants |
-| Diagnostic | Add stronger consistency checks and corruption reporting          |
-
-If hardware fault detection is a requirement, we must separately investigate ECC, memory protection, redundancy, and fault containment.
-
-Adding arbitrary checks to every arithmetic operation is not a substitute.
-
-# 9. Preliminary NV-1 rule list
-
-These are proposed rules, not finalized requirements.
-
-| ID     | Rule                                                                     | Status     |
-| ------ | ------------------------------------------------------------------------ | ---------- |
-| NV-001 | VM values occupy 64-bit words                                            | Selected   |
-| NV-002 | Immediate integers use signed 48-bit payloads                            | Proposed   |
-| NV-003 | Heap references use 48-bit payloads                                      | Proposed   |
-| NV-004 | Special values share one category                                        | Proposed   |
-| NV-005 | One category is reserved for invalid values                              | Proposed   |
-| NV-006 | Reserved NaN patterns cannot be stored as ordinary floating-point values | Required   |
-| NV-007 | Non-colliding NaN payloads are preserved during bitwise transport        | Proposed   |
-| NV-008 | Native arithmetic NaN behavior is explicitly specified                   | Unresolved |
-| NV-009 | Native registers may hold unboxed VM values                              | Proposed   |
-| NV-010 | GC uses precise root maps                                                | Required   |
-| NV-011 | Target-specific encodings are permitted                                  | Selected   |
-| NV-012 | Production checks must be justified by their safety requirements         | Proposed   |
-
-# 10. Remaining mathematical and architectural questions
-
-We cannot finish NV-1 without resolving these.
-
-10.1 Integer overflow representation
-
-Signed 48-bit integers only
-
-48-bit immediates, extended integers boxed on overflow
-
-Exact 64-bit integer semantics required
-
-10.2 Heap references
-
-Heap-relative 48-bit offsets
-
-Direct 48-bit pointer encoding
-
-Compare both mathematically and architecturally first
-
-10.3 Arithmetic NaN behavior
-
-Target-native propagation with collision normalization
-
-Canonical NaNs for arithmetic results
-
-Investigate performance and semantic costs first
-
-10.4 Native register representation
-
-Hybrid tagged and unboxed native representations
-
-Always retain NaN-boxed representation
-
-Evaluate both before selecting
-
-Submit architectural decisions
-
-One final point: I don't want to call this representation optimal yet. We have a promising encoding with a useful tag structure, but we have not compared its complete cost against alternative NaN-boxing layouts, split representations, or target-specific encodings.
-
-That comparison is part of NV-1, not optional future polish.
-
-
-# NV-1 continued: Full mathematical and architectural analysis
-
-
-
-Decisions incorporated
-
-Representation not frozen
-
-
-
-Your decisions give us the following direction:
-
-| Property                       | Decision                        |
-| ------------------------------ | ------------------------------- |
-| Immediate integer              | Signed 48-bit                   |
-| Integer overflow               | Heap-boxed                      |
-| Heap references                | 48-bit heap-relative offsets    |
-| Arithmetic NaNs                | Canonical                       |
-| Transported NaNs               | Preserve non-colliding payloads |
-| Native register representation | Under investigation             |
-
-There is an important optimization opportunity here: the VM storage representation and the compiler's internal representation should not be required to match.
-
-We will investigate that in detail.
-
-# 1. Final candidate encoding layout
-
-Let's establish the candidate precisely before discussing its costs.
-
-## 1.1 Binary64 structure
-
-A binary64 word is:
-
-\\[ W = S\cdot 2^{63}+E\cdot 2^{52}+F \\]
-
-Where:
-
-- \\(S\\) is the sign bit.
-- \\(E\\) is the 11-bit exponent.
-- \\(F\\) is the 52-bit fraction.
-
-A negative quiet NaN has:
-
-\\[ S=1,\quad E=2047,\quad F\_{51}=1 \\]
-
-Its top 16 bits occupy one of eight possible prefixes:
-
-\\[ \texttt{0xFFF8}\ldots\texttt{0xFFFF} \\]
-
-Our candidate reserves the upper four.
-
-## 1.2 Proposed allocation
-
-## NV-1 candidate: 64-bit word
-
-16 bits
-
-Tag
-
-48 bits
-
-Payload
-
-63–48 | 47–0
-
-| Prefix            | Category              |
-| ----------------- | --------------------- |
-| `0xFFFC`          | Immediate integer     |
-| `0xFFFD`          | Heap reference        |
-| `0xFFFE`          | Special immediate     |
-| `0xFFFF`          | Invalid/reserved      |
-| `0xFFF8`–`0xFFFB` | Floating-point NaNs   |
-| Other patterns    | Floating-point values |
-
-The three active categories are distinguished by their low two prefix bits:
-
-\\[ tag=(W\gg48)\mathbin{\&}3 \\]
-
-The common reserved-region test is:
-
-\\[ (W\mathbin{\&}M)=P \\]
-
-Where:
-
-\\[ M=\texttt{0xFFFC000000000000} \\]
-
-\\[ P=\texttt{0xFFFC000000000000} \\]
-
-This is a convenient structural property: all four categories share the same upper 14 bits.
-
-The invalid category is deliberate. We should not assign all possible patterns to valid values merely because they are available.
-
-NaN-space accounting:
-
-There are eight negative quiet-NaN prefix groups. Four are reserved, leaving four available.
-
-Thus, we preserve half of the negative quiet-NaN prefix space, plus all positive NaN patterns and all negative signaling-NaN patterns.
-
-This is a trade-off, not a claim that we preserve every IEEE-754 payload.
-
-## 1.3 Exact category equations
-
-For the integer category:
-
-\\[ W=\texttt{0xFFFC}\cdot2^{48}+p \\]
-
-For the reference category:
-
-\\[ W=\texttt{0xFFFD}\cdot2^{48}+p \\]
-
-For special values:
-
-\\[ W=\texttt{0xFFFE}\cdot2^{48}+p \\]
-
-Where:
-
-\\[ 0\leq p<2^{48} \\]
-
-The invalid category is:
-
-\\[ W\in[\texttt{0xFFFF000000000000}, \texttt{0xFFFFFFFFFFFFFFFF}] \\]
-
-Any occurrence of this category in a value that is supposed to be valid must be rejected by the relevant runtime boundary.
-
-# 2. Immediate integers with boxed overflow
-
-Selected architecture
-
-This is a good candidate for workloads where small integers are common.
-
-We have:
-
-\\[ -2^{47}\leq n\leq2^{47}-1 \\]
-
-The immediate range is:
-
-\\[ [-140737488355328,\ 140737488355327] \\]
-
-The integer payload is a signed two's-complement 48-bit number.
-
-Decoding requires sign extension:
-
-\\[ n=\operatorname{sext}\_{48}(p) \\]
-
-Encoding requires:
-
-\\[ p=n\bmod2^{48} \\]
-
-provided \\(n\\) is within the immediate range.
-
-## 2.1 Overflow policy
-
-When the result falls outside the immediate range, the result becomes a heap-allocated integer object.
-
-This gives us two representations:
-
-| Representation | Contents                                  |
-| -------------- | ----------------------------------------- |
-| Immediate      | Signed 48-bit integer                     |
-| Boxed          | Integer value outside the immediate range |
-
-The boxed integer is referenced through the ordinary heap-reference category.
-
-This means we do not need another NaN prefix.
-
-The object header identifies the integer object representation.
-
-For example, an integer operation can have three conceptual stages:
-
-1. Test whether the operands are immediate integers.
-2. Perform the operation using native integer arithmetic.
-3. If the result does not fit, invoke the appropriate boxed-integer operation.
-
-The slow path must preserve exact integer semantics.
-
-## 2.2 Addition and subtraction
-
-For two immediate operands:
-
-\\[ a,b\in[-2^{47},2^{47}-1] \\]
-
-Their sum satisfies:
-
-\\[ -2^{48}\leq a+b\leq2^{48}-2 \\]
-
-Their difference satisfies:
-
-\\[ -(2^{48}-1)\leq a-b\leq2^{48}-1 \\]
-
-Both fit in signed 64-bit arithmetic.
-
-Therefore, 64-bit addition and subtraction are sufficient to compute the candidate result without signed 64-bit overflow.
-
-The result must then be checked against the 48-bit range.
-
-The important observation is that we do not need a general 64-bit overflow check for immediate addition or subtraction.
-
-We need a 48-bit representability check.
-
-That is a smaller problem.
-
-## 2.3 Multiplication
-
-Multiplication is more interesting.
-
-The largest positive product is:
-
-\\[ (2^{47}-1)^2 \\]
-
-This approaches \\(2^{94}\\).
-
-A 64-bit result alone is insufficient to determine whether every multiplication result fits.
-
-We need to examine the complete product or use an equivalent mathematically correct overflow test.
-
-The supported architectures have relevant high-half multiplication facilities:
-
-- x86-64: high-half multiplication through integer multiply instructions.
-- AArch64: `SMULH` alongside low-half multiplication.
-- RV64: `MULH` alongside `MUL`.
-
-The exact lowering will depend on operand constraints and the surrounding computation.
-
-We should compare:
-
-1. Full-width product followed by a 48-bit range check.
-2. A high-half-based representability test.
-3. A specialized check that avoids materializing unnecessary result bits.
-
-We cannot declare one optimal without target-specific measurements and instruction-level analysis.
-
-## 2.4 Boxed integer semantics remain unresolved
-
-There is one important distinction we must not silently decide.
-
-Does the engine require:
-
-- Exact signed 64-bit integer semantics, with values outside 64 bits handled according to UGB rules?
-- Arbitrary-precision integers?
-
-The representation can support either, but the object layout and arithmetic implementation differ considerably.
-
-For arbitrary precision, boxed integer objects need variable-length magnitude storage and sign information.
-
-For fixed-width integers, the box can be much simpler.
-
-The immediate representation does not determine the integer semantic domain. UGB does.
-
-# 3. Heap-relative reference encoding
-
-Selected architecture
-
-The reference payload represents an offset from a heap base.
-
-\\[ A=B+O \\]
-
-Where:
-
-- \\(A\\) is the reconstructed native address.
-- \\(B\\) is the heap base.
-- \\(O\\) is the unsigned 48-bit byte offset.
-
-The payload range is:
-
-\\[ 0\leq O\leq2^{48}-1 \\]
-
-This provides a theoretical address window of:
-
-\\[ 2^{48}\text{ bytes}=256\text{ TiB} \\]
-
-Important: this is the representable offset window, not a claim that we should reserve or physically commit 256 TiB of memory.
-
-## 3.1 Zero-offset reservation
-
-I recommend reserving offset zero.
-
-Thus:
-
-\\[ O=0\Rightarrow\text{invalid reference} \\]
-
-And valid heap references satisfy:
-
-\\[ 1\leq O\leq2^{48}-1 \\]
-
-This gives us an additional corruption-detection invariant.
-
-It does not make arbitrary bit corruption safe, but it prevents one particularly dangerous class of invalid reference from becoming a valid heap-base reference.
-
-## 3.2 Byte offsets versus scaled offsets
-
-We should compare two alternatives.
-
-| Property              | Byte offset         | Scaled offset                 |
-| --------------------- | ------------------- | ----------------------------- |
-| Payload               | Byte address offset | Offset divided by alignment   |
-| Reconstruction        | Base + offset       | Base + shifted offset         |
-| Address window        | 256 TiB             | Larger                        |
-| Interior references   | Easier              | More restrictive              |
-| Arithmetic            | Simpler             | Requires scaling              |
-| Alignment assumptions | Minimal             | Requires guaranteed alignment |
-
-For a scale factor \\(2^k\\):
-
-\\[ A=B+(O\ll k) \\]
-
-The theoretical window becomes:
-
-\\[ 2^{48+k}\text{ bytes} \\]
-
-However, scaled offsets only make sense if every encoded reference points to an appropriately aligned object start.
-
-They complicate interior references and address calculations.
-
-My current preference is byte offsets. A 256 TiB window is already substantial, and the simpler reconstruction semantics are valuable.
-
-This remains a proposal pending target-specific address-space analysis.
-
-## 3.3 Heap-base requirements
-
-The heap base must satisfy:
-
-1. The heap's representable address range cannot overflow the 48-bit offset.
-2. All valid object addresses must be representable.
-3. Heap-base changes must preserve or correctly update references.
-4. Every reconstructed address must be valid under the target's virtual-address rules.
-5. Invalid offsets must never be dereferenced.
-6. Concurrent collection must not expose stale references to mutator code.
-
-The last requirement is especially important.
-
-A moving collector that relocates an object changes its offset.
-
-Therefore, references to that object must be updated, or a forwarding/indirection mechanism must preserve correctness.
-
-Relative references do not magically eliminate relocation work.
-
-## 3.4 Target-specific consequences
-
-- x86-64: Canonical virtual-address restrictions and LA48/LA57 configurations matter.
-- AArch64: Virtual-address size, TBI, MTE, and pointer authentication configurations matter.
-- RV64: The configured virtual-address scheme and translation mode matter.
-
-The offset encoding avoids embedding target-native pointer bit patterns in VM values, but it does not eliminate native address reconstruction requirements.
-
-# 4. Arithmetic NaNs: canonicalization policy
-
-Selected
-
-Your choice is particularly useful for cross-platform consistency.
-
-We establish the following contract:
-
-A floating-point arithmetic operation that produces NaN produces the VM's canonical binary64 NaN.
-
-The canonical value is:
-
-\\[ \boxed{\texttt{0x7FF8000000000000}} \\]
-
-This is a positive quiet NaN.
-
-It is outside our reserved tag region.
-
-The RISC-V floating-point specification already uses this canonical binary64 representation for ordinary NaN-producing arithmetic. It also specifies exceptions for certain operations, including sign-injection instructions.&#x20;
-
-[image](https://www.google.com/s2/favicons?domain=https://github.com\&sz=32)
-
-GitHub+1
-
-
-
-IEEE-754 defines NaN payloads and propagation recommendations, but does not require every implementation to propagate payloads identically.&#x20;
-
-[image](https://www.google.com/s2/favicons?domain=https://rtrb.org\&sz=32)
-
-RTRB
-
-
-
-## 4.1 Operation classification
-
-We need to distinguish numerical operations from bit-preserving operations.
-
-| Operation             | Proposed behavior                           |
-| --------------------- | ------------------------------------------- |
-| Addition              | Canonicalize NaN result                     |
-| Subtraction           | Canonicalize NaN result                     |
-| Multiplication        | Canonicalize NaN result                     |
-| Division              | Canonicalize NaN result                     |
-| Square root           | Canonicalize NaN result                     |
-| Fused multiply-add    | Canonicalize NaN result                     |
-| Bitwise copy          | Preserve permitted payload                  |
-| Load/store            | Preserve permitted payload                  |
-| Bit reinterpretation  | Preserve permitted payload unless collision |
-| Sign manipulation     | Preserve payload subject to collision rules |
-| Arithmetic conversion | Canonicalize NaN result                     |
-
-We should define minimum/maximum separately because their NaN behavior can differ from ordinary arithmetic.
-
-Likewise, comparisons need their own semantics.
-
-## 4.2 Canonicalization cost
-
-On RISC-V, ordinary arithmetic NaN results are already canonical under the standard floating-point behavior. That is a useful advantage.
-
-On x86-64 and AArch64, we cannot assume every arithmetic operation produces the same canonical bit pattern.
-
-A hardware arithmetic operation can propagate an input NaN payload.
-
-Therefore, we need a target-independent lowering strategy.
-
-There are two approaches:
-
-Approach A: Immediate normalization
-
-After an arithmetic operation, determine whether its result is NaN and replace it with the canonical value.
-
-Approach B: Deferred normalization
-
-Keep the result in an internal floating-point representation and normalize when it crosses an observable VM-value boundary.
-
-Approach B can avoid repeated conversions.
-
-For example:
-
-\\[ x=a+b \\]
-
-\\[ y=x\times c \\]
-
-If \\(x\\) is never observed independently, the compiler may be able to defer normalization until \\(y\\) becomes observable.
-
-However, this requires a carefully specified floating-point semantic model.
-
-If NaN payload inspection is possible between those operations, normalization cannot be deferred across that observation.
-
-This is exactly where our VSDG and Sea of Nodes distinction becomes useful:
-
-- VSDG can preserve value/state dependencies and represent the arithmetic results.
-- Sea of Nodes can reason about observability, dependencies, and opportunities to delay representation normalization.
-- LLIR must eventually enforce the required observable semantics.
-
-## 4.3 Floating-point exception flags
-
-We must not confuse NaN canonicalization with floating-point exception behavior.
-
-Canonicalizing the result does not mean suppressing:
-
-- Invalid operation.
-- Divide by zero.
-- Overflow.
-- Underflow.
-- Inexact.
-
-These flags must follow the VM's specified floating-point environment.
-
-In particular, the compiler must not eliminate an operation that changes observable floating-point exception state.
-
-NV-1 therefore does not authorize arbitrary floating-point reassociation or exception suppression.
-
-# 5. Native register representation investigation
-
-Not selected
-
-This is the most interesting part of the current design.
-
-I do not recommend forcing all values to remain NaN-boxed in native registers.
-
-That would defeat one of the primary advantages of a multi-tier optimizing JIT.
-
-Instead, we should investigate four possible execution representations.
-
-## 5.1 Candidate A: Always-tagged
-
-Every VM value remains a complete 64-bit NaN-boxed word.
-
-Representation
-
-GPR
-
-64-bit tagged value
-
-One representation for integers, references, floating-point values, and special values.
-
-Advantages:
-
-- Simple register representation.
-- Simple spill representation.
-- Straightforward safepoint handling.
-- Easy value copying.
-- Straightforward deoptimization.
-
-Disadvantages:
-
-- Floating-point operations require unboxing.
-- Integer operations require decoding.
-- Type checks may appear frequently.
-- Tagged values can consume additional instructions in arithmetic-heavy code.
-
-This is attractive for baseline compilation.
-
-It is not necessarily attractive for optimizing compilation.
-
-## 5.2 Candidate B: Fully unboxed
-
-Values are represented in native registers according to their inferred representation.
-
-| Value     | Native representation               |
-| --------- | ----------------------------------- |
-| Integer   | Native integer register             |
-| Float     | Native floating-point register      |
-| Reference | Native pointer or offset            |
-| Boolean   | Integer register or condition value |
-| Constant  | Immediate or constant               |
-
-Advantages:
-
-- Less tagging overhead.
-- Natural arithmetic.
-- Potentially fewer conversions.
-- Better opportunities for register allocation.
-
-Disadvantages:
-
-- Representation tracking becomes more complicated.
-- Safepoint handling becomes more complicated.
-- Deoptimization requires reconstruction.
-- Mixed-type operations require conversions.
-- Moving GC requires special handling for native pointers.
-
-Fully unboxed execution can be very efficient, but it requires stronger compiler/runtime coordination.
-
-## 5.3 Candidate C: Hybrid tagged and unboxed
-
-This is my preferred research candidate.
-
-The compiler chooses representations based on the operations and lifetime of individual values.
-
-For example:
-
-Example: floating-point computation
-
-NaN-boxed VM input
-
-Unbox once
-
-Native FPR: binary64
-
-Multiple native operations
-
-Native FPR: binary64 result
-
-Normalize and box when observable
-
-NaN-boxed VM output
-
-The key is that the compiler should not repeatedly convert between tagged and unboxed representations when the value remains within one computation region.
-
-For integers, the same idea applies.
-
-An integer known to fit in the immediate range can remain in a native GPR without carrying the 16-bit NaN tag during every operation.
-
-An integer that overflows the immediate range can transition into the boxed representation.
-
-For references, we should initially keep the offset representation in native GPRs rather than eagerly converting every reference into a raw native pointer.
-
-This avoids creating unnecessary GC relocation obligations.
-
-## 5.4 Candidate D: Adaptive representation selection
-
-This goes further than simply using a hybrid representation.
-
-The compiler could select the representation according to estimated execution cost.
-
-For a value \\(v\\), define:
-
-\\[ C(v,r)= C\_{\mathrm{conversion}} +C\_{\mathrm{operation}} +C\_{\mathrm{register}} +C\_{\mathrm{spill}} +C\_{\mathrm{GC}} +C\_{\mathrm{deopt}} \\]
-
-Where \\(r\\) is a candidate representation.
-
-The compiler selects:
-
-\\[ r^\*=\arg\min_r C(v,r) \\]
-
-subject to correctness constraints.
-
-This is a conceptual cost model, not yet an implementable cost equation. We need target-specific coefficients, frequency estimates, and dependency modeling.
-
-For example:
-
-- A value used in many floating-point operations may benefit from FPR storage.
-- A value frequently passed through generic VM helpers may benefit from tagged storage.
-- A heap reference crossing many safepoints may benefit from remaining as an offset.
-- A reference used repeatedly for memory accesses may benefit from temporary native-pointer decoding.
-
-The important thing is that representation decisions should account for the entire live range, not just the next instruction.
-
-## 5.5 Preliminary comparison
-
-| Property              | Always tagged      | Fully unboxed      | Hybrid             | Adaptive              |
-| --------------------- | ------------------ | ------------------ | ------------------ | --------------------- |
-| Baseline simplicity   | Excellent          | Poor               | Good               | Poor                  |
-| Arithmetic efficiency | Variable           | Excellent          | Excellent          | Potentially excellent |
-| GC integration        | Simplest           | Complex            | Manageable         | Complex               |
-| Deoptimization        | Simplest           | Complex            | Manageable         | Complex               |
-| Compilation cost      | Low                | High               | Medium             | Potentially high      |
-| Register pressure     | Workload-dependent | Workload-dependent | Workload-dependent | Workload-dependent    |
-
-There is no universal winner.
-
-My current recommendation is to investigate Hybrid as the default optimizing-tier strategy, with Always-tagged as the baseline strategy.
-
-Adaptive selection can be evaluated later, after we have actual profiling data and a representation-aware register allocator.
-
-# 6. GC interaction with all four representations
-
-This needs its own explicit contract.
-
-Your collector is incremental, concurrent, and generational.
-
-That means the JIT must coordinate with the collector rather than simply provide a list of pointers when collection begins.
-
-## 6.1 Root categories
-
-We need at least these root-map categories:
-
-| Category          | Contents                   | GC treatment            |
-| ----------------- | -------------------------- | ----------------------- |
-| Tagged value      | NaN-boxed VM value         | Inspect tag             |
-| Encoded reference | Heap-relative offset       | Decode and trace        |
-| Native pointer    | Reconstructed heap address | Trace and relocate      |
-| Unboxed float     | Binary64 value             | Never treat as pointer  |
-| Unboxed integer   | Native integer             | Never treat as pointer  |
-| Constant          | Compile-time value         | Usually no mutable root |
-
-A precise stack map must describe which physical registers and stack locations hold which categories at each safepoint.
-
-A general-purpose register containing an integer must never be scanned as though it were a heap pointer.
-
-## 6.2 Moving collector interaction
-
-Suppose:
-
-\\[ R=B+O \\]
-
-The collector moves an object from offset \\(O_1\\) to \\(O_2\\).
-
-The encoded reference must be updated:
-
-\\[ O_1\rightarrow O_2 \\]
-
-If the heap base remains fixed, the base-relative representation remains valid after relocation, provided all references are updated correctly.
-
-If the heap base changes, the heap's relocation policy must preserve or reconstruct the relationship.
-
-This is one reason I prefer keeping encoded offsets in native registers across safepoints.
-
-Raw native pointers require relocation-aware register maps, pinning, or another mechanism.
-
-## 6.3 Write barriers
-
-A concurrent generational collector generally needs to track mutations that could violate its tracing invariants.
-
-Depending on the collector's marking algorithm, this may require:
-
-- A generational remembered-set barrier.
-- An incremental marking barrier.
-- A SATB barrier, if snapshot-at-the-beginning marking is used.
-- An incremental-update barrier, if that is the chosen invariant.
-
-We have not selected the collector's exact marking algorithm, so we must not prescribe a single barrier implementation yet.
-
-The JIT's memory-store lowering must be designed to accommodate the selected protocol.
-
-## 6.4 Safepoint constraints
-
-A generated method must have a defined way to reach a collector-safe state.
-
-That means:
-
-1. All live references are discoverable.
-2. All relocatable references can be updated.
-3. No untracked temporary pointer remains live across a relocating collection.
-4. The collector can distinguish encoded references from ordinary integers.
-5. Deoptimization can reconstruct the interpreter-visible VM state.
-
-We will eventually need precise safepoint maps, not merely conservative register scanning.
-
-# 7. Cost model: what actually determines the winner?
-
-We need to avoid optimizing one instruction while making the whole execution path slower.
-
-For a representation \\(r\\), define its total expected cost over an execution interval:
-
-\\[ C(r)= N_cC_c+ N_oC_o+ N_sC_s+ N_gC_g+ N_dC_d \\]
-
-Where:
-
-| Variable  | Meaning                                         |
-| --------- | ----------------------------------------------- |
-| \\(N_c\\) | Number of representation conversions            |
-| \\(C_c\\) | Average conversion cost                         |
-| \\(N_o\\) | Number of operations                            |
-| \\(C_o\\) | Average operation cost                          |
-| \\(N_s\\) | Number of spills/reloads                        |
-| \\(C_s\\) | Average spill/reload cost                       |
-| \\(N_g\\) | Number of GC-related interactions               |
-| \\(C_g\\) | Average GC interaction cost                     |
-| \\(N_d\\) | Number of deoptimization/materialization events |
-| \\(C_d\\) | Average associated cost                         |
-
-This is a starting model. It does not yet account for overlapping execution, memory-level parallelism, cache misses, branch prediction, or dependency chains.
-
-Those require a more complete microarchitectural model.
-
-## 7.1 A particularly important consideration: conversion amortization
-
-Suppose a floating-point value undergoes \\(n\\) operations.
-
-With repeated boxing and unboxing:
-
-\\[ C\_{\mathrm{repeated}}=n(C\_{\mathrm{unbox}}+C\_{\mathrm{operation}}+C\_{\mathrm{box}}) \\]
-
-With one unboxing and one final boxing:
-
-\\[ C\_{\mathrm{amortized}}= C\_{\mathrm{unbox}}+ nC\_{\mathrm{operation}}+ C\_{\mathrm{box}} \\]
-
-The difference is:
-
-\\[ \Delta C=(n-1)(C\_{\mathrm{unbox}}+C\_{\mathrm{box}}) \\]
-
-This is a real structural advantage of unboxed live ranges.
-
-It does not prove that hybrid execution wins every workload. Register spills, safepoints, and conversion boundaries can change the result.
-
-But it gives us a mathematically justified optimization target.
-
-# 8. NV-1 mandatory invariants
-
-These are the invariants I would require before accepting the representation.
-
-| ID      | Invariant                                                                           |
-| ------- | ----------------------------------------------------------------------------------- |
-| INV-001 | Every valid VM value has exactly one valid storage representation.                  |
-| INV-002 | No valid value uses the reserved invalid category.                                  |
-| INV-003 | Immediate integers decode to their exact signed 48-bit value.                       |
-| INV-004 | Integer overflow never silently truncates.                                          |
-| INV-005 | Every heap reference identifies a valid object or is rejected before dereferencing. |
-| INV-006 | Offset zero is never a valid heap reference.                                        |
-| INV-007 | Arithmetic NaN results use the canonical VM NaN.                                    |
-| INV-008 | Permitted non-colliding NaN payloads survive bitwise transport.                     |
-| INV-009 | Reserved NaN patterns cannot be mistaken for ordinary floating-point values.        |
-| INV-010 | Unboxed values are never accidentally interpreted as tagged values.                 |
-| INV-011 | GC root maps accurately describe live references.                                   |
-| INV-012 | Relocatable references remain correct across collection.                            |
-| INV-013 | Deoptimization reconstructs the exact interpreter-visible state.                    |
-| INV-014 | Target-specific encodings preserve identical abstract VM semantics.                 |
-| INV-015 | Invalid representations cannot become unchecked native memory accesses.             |
-
-These are correctness requirements, not optional optimizations.
-
-# 9. Performance rules under consideration
-
-Here is the first batch of actual NV-1 optimization rules.
-
-| Rule   | Description                                                          | Status    |
-| ------ | -------------------------------------------------------------------- | --------- |
-| NV-P01 | Immediate integers avoid heap allocation within range                | Candidate |
-| NV-P02 | Integer arithmetic remains unboxed during eligible live ranges       | Candidate |
-| NV-P03 | Floating-point arithmetic remains in native FPRs where profitable    | Candidate |
-| NV-P04 | Avoid repeated boxing/unboxing within a computation region           | Candidate |
-| NV-P05 | Keep references encoded across safepoints where practical            | Candidate |
-| NV-P06 | Decode heap offsets only when needed for addressing                  | Candidate |
-| NV-P07 | Defer NaN normalization when semantic observability permits          | Candidate |
-| NV-P08 | Avoid scanning non-reference native registers during GC              | Required  |
-| NV-P09 | Avoid redundant tag extraction when representation is already proven | Candidate |
-| NV-P10 | Use target-specific lowering for encoding and decoding               | Candidate |
-
-A candidate becomes mandatory only after we establish its applicable conditions and prove its correctness.
-
-# 10. Outstanding questions
-
-We have made substantial progress, but NV-1 is not finished.
-
-These are the remaining issues I consider architecturally significant.
-
-## 10.1 Integer semantics
-
-We need to establish whether boxed integers represent:
-
-- Exact signed 64-bit integers.
-- Arbitrary-precision integers.
-- Another UGB-defined integer domain.
-
-This changes object layouts, arithmetic helpers, overflow behavior, and optimization opportunities.
-
-## 10.2 Heap object alignment
-
-We need to establish:
-
-- Minimum object alignment.
-- Maximum object size.
-- Whether interior references are permitted.
-- Whether references can cross heap regions.
-- Whether multiple heaps or isolates are supported.
-
-This determines whether byte offsets remain the best representation.
-
-## 10.3 Native register allocation
-
-We need to investigate:
-
-- GPR/FPR register pressure.
-- Tagged versus unboxed live ranges.
-- Representation transitions.
-- Spill-slot representation.
-- Safepoint constraints.
-- Deoptimization reconstruction.
-- Register allocation interactions across calls.
-
-I particularly want to avoid a representation-selection algorithm that saves conversion instructions but causes enough extra spills to lose overall.
-
-## 10.4 Floating-point semantics
-
-We still need exact rules for:
-
-- Signaling NaN inputs.
-- NaN payload inspection.
-- Minimum/maximum operations.
-- Comparisons.
-- Floating-point conversions.
-- Rounding modes.
-- Exception flags.
-- Fused operations.
-- Bitwise reinterpretation.
-
-Canonical arithmetic NaNs alone do not define the entire floating-point contract.
-
-# 11. NV-1 current status
-
-## NaN-boxed VM representation
-
-Architecture
-
-Established direction
-
-64-bit encoding
-
-Candidate
-
-Integer representation
-
-Decision made
-
-Heap references
-
-Decision made
-
-NaN semantics
-
-Policy selected
-
-Native representation
-
-Under investigation
-
-GC integration
-
-Partially specified
-
-Formal invariants
-
-Draft
-
-Not approved for implementation as a frozen standard.
-
-## My architectural recommendation
-
-I would retain the current four-prefix encoding as our leading candidate, use signed 48-bit immediate integers with boxed overflow, and use byte-based heap-relative offsets.
-
-For the optimizing compiler, I would investigate hybrid representation as the default design, without yet making it mandatory.
-
-The most important unresolved optimization is native representation selection. That decision will affect VSDG, Sea of Nodes, LLIR, Machine IR, register allocation, and GC integration.
-
-Next, we should settle the integer semantic domain and heap object layout. Those two decisions determine whether our proposed 48-bit immediate and reference encodings are actually sufficient, rather than merely attractive on paper.
-
-Candidate D is interesting. It changes how we should approach the rest of the architecture.
-
-I would actually make adaptive representation selection a first-class compiler subsystem, rather than an isolated optimization pass.
-
-And I would avoid deciding the integer domain and heap layout prematurely. Those are foundational decisions, but they should follow from the engine's semantic requirements.
-
-Let's separate the problems.
-
-# 1. Adaptive representation selection (ARS)
-
-Selected research direction
-
-The compiler should choose the representation of each value according to its expected total execution cost.
-
-Not according to a fixed rule such as "integers go in GPRs" or "references always stay tagged."
-
-## 1.1 Candidate representations
-
-| Representation | Description                                  |
-| -------------- | -------------------------------------------- |
-| `TAGGED64`     | Complete NaN-boxed VM value                  |
-| `I64`          | Native signed integer                        |
-| `F64`          | Native binary64                              |
-| `REF_OFFSET`   | Encoded heap-relative reference              |
-| `NATIVE_REF`   | Reconstructed native pointer                 |
-| `CONSTANT`     | Compile-time known value                     |
-| `SPECIALIZED`  | Representation with proven value constraints |
-
-`SPECIALIZED` needs further definition. It should describe a proven subset of a representation, not become an excuse for creating arbitrary types.
-
-## 1.2 Selection objective
-
-For a value \\(v\\), candidate representation \\(r\\), and execution region \\(G\\):
-
-\\[ r^\*=\arg\min\_{r\in R(v)} C(v,r,G) \\]
-
-Where:
-
-\\[ C = C\_{\mathrm{conversion}} +C\_{\mathrm{operations}} +C\_{\mathrm{register}} +C\_{\mathrm{memory}} +C\_{\mathrm{GC}} +C\_{\mathrm{deopt}} \\]
-
-The important addition is \\(G\\).
-
-We should not select a representation independently for every instruction. That would produce excessive conversions.
-
-Instead, we investigate selecting representations for connected computation regions and live ranges.
-
-### Example
-
-Suppose a value participates in 100 floating-point operations.
-
-- Tagged storage might require repeated unboxing.
-- F64 storage might require one unboxing and one final boxing.
-- F64 storage might also increase FPR pressure.
-
-ARS must account for all three.
-
-## 1.3 Hard constraints
-
-The optimizer must never select a representation that violates:
-
-1. Value semantics.
-2. Overflow semantics.
-3. NaN semantics.
-4. GC visibility.
-5. Safepoint requirements.
-6. Calling convention requirements.
-7. Deoptimization reconstructability.
-
-Correctness constraints are not cost penalties. They are feasibility conditions.
-
-# 2. Where ARS belongs in the four IR levels
-
-This is important.
-
-I propose that representation selection have different responsibilities at different levels.
-
-VSDG
-
-Semantic analysis
-
-- Determine value properties.
-- Track dependencies.
-- Establish representation-independent facts.
-
-Sea of Nodes
-
-Optimization planning
-
-- Analyze computation regions.
-- Estimate representation transitions.
-- Evaluate unboxing opportunities.
-- Consider GC and observability boundaries.
-
-Low-Level IR
-
-Representation commitment
-
-- Select concrete value representations.
-- Insert necessary conversions.
-- Establish explicit safepoint and spill requirements.
-
-Machine IR
-
-Physical realization
-
-- Map representations to register classes.
-- Allocate physical registers.
-- Resolve spills.
-- Materialize conversions and constraints.
-
-I would not let Machine IR freely change the semantic representation decisions. It can influence their profitability, but the compiler must maintain a clear contract between representation selection and machine lowering.
-
-# 3. Integer semantic domain
-
-We should not assume that the language uses arbitrary-precision integers just because boxed overflow is available.
-
-There are several possible semantic domains.
-
-| Domain                        | Immediate      | Boxed                               |
-| ----------------------------- | -------------- | ----------------------------------- |
-| Fixed signed 64-bit           | Fast           | Overflow handling only if specified |
-| Arbitrary precision           | Fast           | Extended magnitude                  |
-| Fixed signed 128-bit          | Fast           | Larger values                       |
-| UGB-defined numeric semantics | Depends on UGB | Depends on UGB                      |
-
-The key question is whether the integer object is:
-
-- A different storage representation of the same integer domain.
-- A different numeric category with different semantics.
-
-Those are very different designs.
-
-For example, if integers are arbitrary precision, then:
-
-\\[ 2^{100}+2^{100} \\]
-
-must produce the exact mathematical result.
-
-If integers are fixed-width, the same expression might overflow, wrap, trap, or produce another UGB-defined result.
-
-We cannot select an object layout until that is established.
-
-# 4. Heap object layout
-
-I suggest we treat heap layout as a separate specification, `HEAP-1`.
-
-It should define:
-
-1. Object header.
-2. Object size representation.
-3. Object alignment.
-4. Object type identification.
-5. Field layout.
-6. Array layout.
-7. Variable-length payloads.
-8. Reference encoding.
-9. Forwarding and relocation.
-10. GC metadata.
-11. Allocation fast paths.
-12. Concurrent mutation requirements.
-
-One particularly important question: should GC metadata live inside objects, outside objects, or be split between both?
-
-That affects object density, traversal performance, allocator complexity, and cache behavior.
-
-I would investigate side metadata seriously rather than automatically putting everything into object headers.
-
-# 5. What I want to establish before selecting layouts
-
-There are three decisions I would tackle in this order:
-
-First: integer semantics.
-
-This determines what boxed integers must represent.
-
-Second: object model.
-
-This determines what an object actually is and what references point to.
-
-Third: heap organization.
-
-This determines how objects are allocated, located, traversed, moved, and collected.
-
-The order matters. Otherwise we risk designing a beautiful heap that cannot efficiently represent the engine's actual objects.
-
-## 6. Two foundational questions
-
-I want to avoid imposing assumptions about UGB.
-
-Integer semantics: Does UGB define the integer domain, or is UGB intentionally generic and expected to support multiple numeric semantics?
-
-Object model: Are we building a general-purpose object engine with objects, arrays, strings, closures, and other heap entities, or is the heap primarily an implementation detail for a narrower execution model?
-
-These two answers will determine the next specifications.
-
-And one architectural rule I would establish now:
-
-ARS must be allowed to choose representations adaptively, but it must never be allowed to invent semantic guarantees that UGB does not provide.
-
-
-That establishes three important architectural constraints.
-
-1. UGB owns integer semantics. The JIT does not get to choose whether integers are signed, unsigned, fixed-width, arbitrary-precision, wrapping, trapping, or anything else. Those rules come from UGB. The JIT must preserve them exactly.
-2. The engine has a general-purpose heap. Objects, arrays, strings, closures, and other UGB-defined heap entities are first-class. We cannot design a heap that only happens to work for the first two object types we implement.
-3. Specialization is automatic, but not semantic invention. The engine may discover and exploit properties of existing UGB entities. It may not invent new language-level entities, operations, or guarantees.
-
-That last distinction is especially important. We are designing an optimizer that specializes the implementation of existing semantics, not a language extension disguised as an optimization.
-
-## The specialization boundary
-
-We should make this a foundational rule:
-
-A specialization may narrow the implementation strategy, but it must not expand or alter the semantic contract.
-
-For example:
-
-- An object with a stable observed layout may receive a specialized access path.
-- An array with proven element representation may receive specialized storage or access operations, provided UGB-visible behavior remains identical.
-- A closure with a known target may receive a direct-call path, while preserving the required closure semantics.
-- A string may receive specialized comparison or indexing paths if they preserve UGB's string semantics.
-- An object may be scalar-replaced or eliminated if its identity, mutation, aliasing, and observability requirements permit it.
-
-But the optimizer cannot assume an object is immutable merely because it has not observed a mutation. It cannot assume a call is non-throwing because it usually does not throw. It cannot silently replace a general object with a restricted object type.
-
-Those are proof obligations, not optimistic guesses.
-
-## Consequence for Adaptive Representation Selection
-
-ARS now has two distinct dimensions:
-
-- Value representation selection: tagged, unboxed integer, floating-point, heap offset, native reference, and so on.
-- Entity implementation specialization: layout, field access, array storage, string representation, closure environment, allocation strategy, and other implementation choices.
-
-They interact, but they are not the same subsystem. We should avoid turning ARS into a gigantic bucket containing every optimization anyone can think of.
-
-A specialized object layout may influence the best representation of its fields. Conversely, a field's selected representation may constrain the layout. Their decisions therefore need a shared cost and correctness model, with explicit ownership of each decision.
-
-This also means automatic object specialization must be a core architectural capability, not an optional optimization pass bolted onto the highest tier.
-
-I would give it its own subsystem, provisionally called the Automatic Object Specialization System (AOSS).
-
-## 1. Three levels of object specialization
-
-We need to keep these separate.
-
-| Level            | What changes                                       | What cannot change                            |
-| ---------------- | -------------------------------------------------- | --------------------------------------------- |
-| Structural       | Field layout, offsets, storage organization        | Object identity and observable field behavior |
-| Representational | How fields and references are stored               | UGB value semantics                           |
-| Operational      | Access paths, allocation, calls, mutation handling | UGB operation semantics                       |
-
-For example, suppose UGB permits an object to have dynamically added properties.
-
-The engine might discover that a particular group of objects consistently has the same property layout. It can then specialize their storage and generate direct field accesses.
-
-However, if an operation adds a property that violates the assumed layout, the engine must handle that correctly. It might transition the object to another layout, use a generic path, or invalidate dependent compiled code.
-
-It cannot simply pretend the property was never added. That would be a rather aggressive interpretation of optimization.
-
-## 2. Specialization needs explicit correctness rules
-
-I propose these initial architectural requirements:
-
-- SPEC-001: Semantic preservation. Every specialization must preserve the complete observable behavior defined by UGB.
-- SPEC-002: No semantic invention. Specialization cannot introduce new guest-visible types, operations, guarantees, or restrictions.
-- SPEC-003: General fallback. Every speculative specialization must have a correct path for cases outside its assumptions.
-- SPEC-004: Guard validity. Runtime assumptions must be guarded, proven invariant, or otherwise maintained.
-- SPEC-005: Mutation correctness. Specialization must account for mutations, aliases, and changes to object structure.
-- SPEC-006: Identity preservation. Object identity and aliasing behavior must remain correct.
-- SPEC-007: GC correctness. Specialized layouts must remain compatible with allocation, tracing, relocation, and barriers.
-- SPEC-008: Deoptimization correctness. The engine must reconstruct the exact required UGB-visible state when leaving specialized execution.
-- SPEC-009: Profitability. A specialization must justify its compilation, code-size, memory, and execution costs.
-
-These are proposed requirements, not a completed specification.
-
-## 3. Implications for the rest of the architecture
-
-UGB semantic contract
-
-Defines integer domains, object behavior, operations, identity, and observable semantics.
-
-Automatic specialization analysis
-
-Discovers properties, evaluates whether specialization is legal, and determines which assumptions need protection.
-
-Specialized implementation planning
-
-Coordinates object layouts, value representations, access paths, allocation strategies, and generated code.
-
-Tier-specific realization
-
-Baseline and optimizing tiers implement the same specialization semantics at different costs and sophistication levels.
-
-One important consequence: specialization cannot belong exclusively to the optimizing JIT. The baseline tier may use simpler specialization mechanisms, while higher tiers exploit richer analysis. The semantic contract remains identical.
-
-## 4. Two things we must not prematurely freeze
-
-NV-1 integer representation: UGB defines the integer domains, so our 48-bit immediate proposal must be checked against every domain UGB actually supports. We might need multiple immediate encodings, tagged boxed forms, or different representations selected by ARS. The 48-bit range is not sacred.
-
-HEAP-1 object layout: We should not choose a universal object header or fixed layout before examining every UGB-defined heap entity. Objects, arrays, strings, closures, and other entities may have fundamentally different storage requirements. A common allocation and GC framework does not imply identical physical layouts.
-
-## 5. The next design target
-
-I suggest we define the specialization model before the physical heap layout.
-
-Specifically, we need to establish:
-
-1. What properties can the engine discover automatically?
-2. Which properties are stable, mutable, or invalidatable?
-3. What makes a specialization legal?
-4. How are specialized and general representations related?
-5. How are transitions between representations handled?
-6. How are specialization decisions shared across compilation tiers?
-7. How does the system decide whether specialization is actually profitable?
-
-This is the foundation. Once it is defined, we can design HEAP-1 around the requirements rather than inventing an object layout and discovering six chapters later that it cannot support the optimizer.
-
-The governing principle: UGB defines what an entity is. The engine determines how efficiently that entity can be implemented.
-
-
-Then we start with the Automatic Object Specialization System (AOSS). Before designing headers, layouts, or machine instructions, we need to define exactly what this system is allowed to specialize, how it proves a specialization is valid, and how it recovers when its assumptions stop holding.
-
-I'm treating AOSS as a core architectural subsystem, not merely a collection of optimization passes.
-
-# AOSS-1: Automatic Object Specialization Model
-
-
-
-Draft specification
-
-&#x20;Version 0.1 · Not frozen
-
-
-
-## 1. Fundamental model
-
-Every heap entity has two distinct descriptions:
-
-- Semantic identity: What the entity means under UGB.
-- Physical implementation: How the engine represents, stores, accesses, and manipulates it.
-
-AOSS operates on the second description.
-
-For example, two objects may have identical UGB-visible behavior while using different physical layouts. One might use a general-purpose layout, while another uses a specialized layout with fixed field offsets.
-
-The specialization is valid only if the difference is invisible to UGB execution.
-
-We should formalize this distinction:
-
-\\[ \operatorname{Semantics}(E\_{\text{general}}) = \operatorname{Semantics}(E\_{\text{specialized}}) \\]
-
-This equality covers all observable behavior, not merely the results of ordinary field reads.
-
-It includes mutation, identity, aliasing, exceptions, ordering, allocation behavior where observable, and interactions with the collector.
-
-## 2. What AOSS may specialize
-
-We need a classification of specialization opportunities.
-
-| Domain               | Potential specialization                                          |
-| -------------------- | ----------------------------------------------------------------- |
-| Object structure     | Field layout, offsets, property lookup                            |
-| Field representation | Tagged, unboxed, compressed or indirect storage                   |
-| Arrays               | Element representation, indexing, bounds-check paths              |
-| Strings              | Storage representation, length and access operations              |
-| Closures             | Environment layout, captured-value representation                 |
-| Calls                | Known targets, direct-call paths, specialized calling conventions |
-| Allocation           | Object size, allocation path, initialization                      |
-| Access               | Direct access, guarded access, cached metadata                    |
-| Lifetime             | Escape analysis, scalar replacement, allocation elimination       |
-
-These are candidate capabilities, not blanket permissions.
-
-For example, specialized string indexing is only valid once we know whether UGB defines strings as UTF-8, UTF-16, byte sequences, or something else. We must not quietly select a convenient string model.
-
-Likewise, specialized arrays cannot assume homogeneous elements unless UGB semantics and runtime evidence justify it.
-
-## 3. Facts versus assumptions
-
-This is one of the most important parts of the design.
-
-AOSS must distinguish three categories of information.
-
-A. Proven facts
-
-Strongest
-
-Properties established by semantics, static proof, or invariants maintained by the runtime.
-
-Example: an object's allocation size is fixed after allocation, if UGB and the object model guarantee that.
-
-B. Guarded assumptions
-
-Conditional
-
-Properties observed or inferred that require runtime validation.
-
-Example: a particular call site currently sees only one closure target.
-
-C. Heuristics
-
-Weakest
-
-Predictions used to estimate profitability, not establish correctness.
-
-Example: a particular object shape is likely to remain common.
-
-A heuristic must never become a correctness assumption.
-
-A profile saying that 99.9% of objects have a certain shape does not prove the remaining 0.1% cannot exist.
-
-AOSS must preserve this separation throughout every IR.
-
-## 4. Specialization lifecycle
-
-A specialization should have an explicit lifecycle.
-
-1. Discovery
-
-   Collect structural and behavioral information about UGB entities. Identify recurring properties and candidate specialization opportunities.
-2. Legality analysis
-
-   Determine whether the candidate preserves UGB semantics. Reject candidates whose assumptions cannot be established or protected.
-3. Profitability analysis
-
-   Estimate execution savings against compilation cost, code size, metadata, memory overhead, and invalidation risk.
-4. Construction
-
-   Create the specialized implementation, required metadata, guards, and dependency records.
-5. Execution
-
-   Execute through the specialized path while maintaining its required invariants.
-6. Invalidation or transition
-
-   If an assumption ceases to hold, invalidate dependent compiled code or transition the affected entity safely.
-7. Retirement
-
-   Reclaim obsolete specialization metadata and code when no longer needed, respecting concurrent execution and GC requirements.
-
-The lifecycle must be concurrency-safe. Our collector is concurrent and incremental, so specialization metadata cannot be casually mutated or reclaimed while generated code or collector threads still reference it.
-
-## 5. Specialization dependencies
-
-This deserves its own subsystem.
-
-Suppose compiled code assumes:
-
-- Object shape `S` is unchanged.
-- Field `x` occupies offset `O`.
-- Field `x` has representation `R`.
-- The call target remains `T`.
-
-The compiled code depends on those properties.
-
-We need a dependency model that records exactly which assumptions each compiled artifact relies upon.
-
-A useful abstraction is:
-
-\\[ D(C)=\\{d_1,d_2,\ldots,d_n\\} \\]
-
-Where \\(D(C)\\) is the set of dependencies for compiled artifact \\(C\\).
-
-If dependency \\(d_i\\) becomes invalid, the engine must identify affected code.
-
-Crucially, we should not automatically invalidate every specialization whenever one property changes. Dependencies need sufficiently fine granularity to avoid unnecessary recompilation.
-
-That creates a design question: should dependencies be attached to individual object layouts, layout versions, properties, call sites, or some combination?
-
-We should investigate that before selecting a mechanism.
-
-## 6. Initial correctness requirements
-
-| ID       | Requirement                                                         |
-| -------- | ------------------------------------------------------------------- |
-| AOSS-001 | Specialization preserves UGB-visible semantics.                     |
-| AOSS-002 | Specialization cannot introduce guest-visible semantic entities.    |
-| AOSS-003 | Every specialization has a valid correctness basis.                 |
-| AOSS-004 | Heuristic observations cannot establish correctness.                |
-| AOSS-005 | Every guarded assumption has a defined failure path.                |
-| AOSS-006 | Mutations preserve object identity and aliasing semantics.          |
-| AOSS-007 | Dependencies are tracked for compiled artifacts.                    |
-| AOSS-008 | Invalidation cannot leave executing code using invalid assumptions. |
-| AOSS-009 | GC can correctly trace and relocate specialized entities.           |
-| AOSS-010 | Deoptimization reconstructs the required guest-visible state.       |
-| AOSS-011 | Specialization costs are included in profitability decisions.       |
-| AOSS-012 | General-purpose execution remains semantically complete.            |
-
-None of these requirements specifies the physical implementation yet.
-
-# 7. The next critical design decision: specialization granularity
-
-There are several possible levels at which AOSS can specialize.
-
-A. Per-object specialization
-
-Each individual object can receive its own specialized implementation.
-
-- Very fine-grained.
-- Potentially large metadata and code-management costs.
-- Useful when individual objects have unusual characteristics.
-
-B. Per-layout specialization
-
-Objects sharing a structural layout share a specialization.
-
-- Potentially amortizes compilation and metadata.
-- Natural fit for repeated object shapes.
-- Requires careful handling of layout transitions.
-
-C. Per-allocation-site specialization
-
-Objects created at a particular allocation site can share assumptions.
-
-- Can exploit construction patterns.
-- Does not guarantee all resulting objects remain equivalent.
-- Requires handling subsequent mutation and escaping.
-
-D. Combined specialization
-
-The engine uses multiple granularities, choosing according to the property being specialized.
-
-- More expressive.
-- More complicated dependency and invalidation model.
-- Requires a principled way to prevent redundant or conflicting specializations.
-
-My initial research direction is D, but that is not a conclusion. We need to establish whether the additional complexity actually pays for itself.
-
-The important distinction is that specialization granularity need not be identical for every optimization. A layout can be shared across many objects, while a call site can have its own target specialization and an individual object can have a unique representation.
-
-Next, we should investigate specialization granularity rigorously: the possible units of specialization, metadata overhead, code sharing, invalidation complexity, compilation cost, and the conditions under which each granularity wins. Only after that should we define the physical specialization metadata.
-
-No heap header design yet. We have enough ways to make that decision badly without rushing.
----
-
-## HEAP-1: Object Layout and Header Specification
-
-### 1. The Universal 64-bit Header
-
-Every heap entity (objects, arrays, closures, strings) begins with an identical 8-byte header. To accommodate a moving, concurrent GC without expanding the header, we partition the 64 bits into a 62-bit Layout Identity and a 2-bit GC State field.
-
-#### 1.1 Bit Allocation
-
-| Bits | Field | Description |
-|------|-------|-------------|
-| 62–63 | GC_State | 00: Valid LayoutID (Normal execution); 01: Being marked (Concurrent marking phase); 10: Reserved for future GC states; 11: Forwarding pointer (Evacuation phase) |
-| 0–61 | Payload | If GC_State == 00: 62-bit hash of the canonical layout. If GC_State == 11: 62-bit heap-relative offset to the new object location. |
-
-#### 1.2 Invariants
-
-**HEAP-001**: The LayoutID hash function is constrained to never produce a value where bits 62–63 are 11. (e.g., The hash is computed over 62 bits, and the top two bits are explicitly masked to 00 upon storage).
-
-**HEAP-002**: During normal mutator execution, the header is always read as a valid LayoutID. The mutator never observes GC_State != 00.
-
-**HEAP-003**: The GC may temporarily overwrite the header with a forwarding pointer (GC_State == 11) only during a stop-the-world evacuation phase or via a thread-local handshake, ensuring no mutator reads a torn or invalid state.
-
-### 2. Uniform Payload Layout: Objects vs. Arrays
-
-Because the header is universally 8 bytes, the payload for all entities begins at exactly offset 8. This creates beautiful uniformity for the JIT and the GC.
-
-#### 2.1 Regular Objects
-
-| Offset | Size | Content |
-|--------|------|---------|
-| 0 | 8 bytes | Header (LayoutID, GC_State == 00) |
-| 8 | 8 bytes | Field 0 (NV-1 64-bit NaN-boxed value or unboxed representation) |
-| 16 | 8 bytes | Field 1 |
-| ... | ... | ... |
-
-#### 2.2 Arrays
-
-Arrays share the exact same header. The "length" of the array is simply treated as the first field of the array's payload.
-
-| Offset | Size | Content |
-|--------|------|---------|
-| 0 | 8 bytes | Header (LayoutID identifies "Array of Type T", GC_State == 00) |
-| 8 | 8 bytes | Array Length (Unsigned 64-bit integer, or 48-bit immediate if bounded) |
-| 16 | 8 bytes | Element 0 |
-| 24 | 8 bytes | Element 1 |
-| ... | ... | ... |
-
-**Why this wins:**
-- The JIT can emit the exact same base-offset addressing mode (`[base + 8]`) to read either an object's first field or an array's length.
-- The GC's object-size calculation becomes trivial: `Size = Header(8) + Payload_Size`. For arrays, the LayoutID can encode the element type and a fixed overhead, and the length at offset 8 provides the dynamic multiplier.
-
-### 3. Synergy with NV-1: 48-bit Heap-Relative Offsets
-
-Recall from NV-1 that heap references are encoded as 48-bit offsets from a `heap_base`:
-
-```
-Native Address = heap_base + offset
-```
-
-We can now introduce a critical optimization: All heap entities are strictly 8-byte aligned.
-
-Because the offset is always a multiple of 8, the lower 3 bits of the offset are always zero.
-
-While the NV-1 specification allows a full 48-bit byte offset (256 TiB), the JIT and GC can internally treat the stored 48-bit value as a 45-bit scaled offset (multiplied by 8), or simply rely on the hardware's natural alignment.
-
-More importantly, this alignment guarantees that the 64-bit header at `heap_base + offset` is always naturally aligned for a single 64-bit load (`mov rax, [rbx + offset]`), which is the fundamental O(1) guard check for AOSS.
-
-### 4. GC Metadata: The Side-Table Approach
-
-Since the 64-bit header is fully committed to LayoutID and forwarding, we cannot steal bits for concurrent marking or remembered sets without violating the mutator's O(1) fast path.
-
-Therefore, we formally adopt Side Metadata for GC state:
-
-- **Mark Bitmap**: A dense bit array indexed by the 48-bit heap offset (shifted right by 3, due to 8-byte alignment). This requires only 2^45 bits ≈ 4 TB of virtual address space for the bitmap, which can be sparsely committed. The GC sets the bit corresponding to an object's offset during concurrent marking.
-- **Card Table / Remembered Set**: A byte-per-region table for generational write barriers, also indexed by the heap offset.
-- **Mutator Cost**: A write barrier sets a bit/byte in the side table. It does not modify the object header. This keeps the mutator fast and the header pristine.
-
-### 5. AOSS Integration: The Invalidation Handshake
-
-Let's trace a full lifecycle to prove this architecture holds together:
-
-1. **Allocation**: Mutator allocates an object. It computes the 62-bit LayoutID, sets GC_State = 00, and writes it to offset 0.
-2. **Execution**: JIT-compiled code executes. It guards a fast path with: `cmp [obj + 0], expected_LayoutID`. This is a single, aligned 64-bit load and compare.
-3. **Mutation**: Mutator adds a field, changing the shape. It computes New_LayoutID, and writes it to `[obj + 0]`. Simultaneously, it logs `(obj_offset, Old_LayoutID, New_LayoutID)` into the thread-local ShapeTransitionBuffer.
-4. **GC Phase**: GC reaches a safepoint. It scans the ShapeTransitionBuffer. For each Old_LayoutID, it queries the JIT's DependencyMap.
-5. **Invalidation**: JIT marks dependent CodeBlobs as DEOPT_PENDING.
-6. **Resumption**: Mutators resume. Any thread hitting the old compiled code will either deopt at the entry guard or at the next safepoint, falling back to generic code that can handle the new shape.
-
-No locks were held by the mutator during invalidation. No header bloat was introduced.
-
-### 6. Finalized HEAP-1 Layouts
-
-#### 6.1 Array Layout
-
-| Offset | Size | Content |
-|--------|------|---------|
-| 0 | 8 bytes | Header (62-bit LayoutID, 2-bit GC_State) |
-| 8 | 8 bytes | Length & Flags. Bits 0–47: 48-bit unsigned length. Bits 48–63: Reserved/Element Type Hint. |
-| 16 | 8 bytes | Element 0 (NV-1 value) |
-| 24 | 8 bytes | Element 1 |
-| ... | ... | ... |
-
-**Note**: The 48-bit length supports arrays up to 281 trillion elements. The first element is perfectly 8-byte aligned at offset 16.
-
-#### 6.2 String Layout (Compressed)
-
-| Offset | Size | Content |
-|--------|------|---------|
-| 0 | 8 bytes | Header (62-bit LayoutID, 2-bit GC_State) |
-| 8 | 8 bytes | Length & Encoding. Bits 0–47: 48-bit character count. Bits 48–63: Encoding flag (e.g., 0x0000 = Latin-1, 0x0001 = UTF-16). |
-| 16 | 1 or 2 bytes | Character Data (1 byte per char for Latin-1, 2 bytes for UTF-16). |
-| ... | ... | ... |
-
-**Note**: The character data starts at offset 16. For Latin-1, the string is highly compact. For UTF-16, it is standard. The LayoutID will reflect the specific string encoding to allow the JIT to emit specialized access paths.
+**Known Limitations:**
+- Region-class resolution depends on an alias-analysis subsystem not specified here
+- Observational-equivalence proofs for effect-preserving transformations are not discharged in this document (belong to optimizer subsystem)
 
 ---
 
-## NV-1: VM Value Representation
+## 1. Goals, Non-Goals, and Constraints
 
-### Core Value Model
+### Goals
 
-- **64-bit NaN-boxed values** — every VM value fits in a single 64-bit word
-- **48-bit heap-relative offsets** for references (not raw pointers)
-- **Native Address = heap_base + offset**
-- 16-bit tag space in the upper bits
-- Lower 48 bits carry the payload (integer, float bits, or heap offset)
+1. Capture data, control, and effect dependencies explicitly to enable aggressive global optimization (GVN, LICM, DCE).
+2. Strictly preserve the source language's observable side effects, memory model, and exception semantics.
+3. Provide a mathematically verifiable structure where invalid programs are rejected before optimization.
+4. Partition state tokens by memory region to avoid serializing independent memory operations.
+5. Support vector operations, atomics, and exception handling without special cases.
 
-### Representation Types (used in LLIR/MIR)
+### Non-Goals
 
-| Representation | Symbol | Physical Meaning | Register Class |
-|---|---|---|---|
-| Tagged | TAGGED | Full 64-bit NV-1 boxed value | GPR |
-| Integer | I64 | Native 64-bit signed integer | GPR |
-| Float | F64 | Native binary64 floating-point | FPR |
-| Ref Offset | REF_OFF | 48-bit heap-relative offset (lower 16 bits zero or sign-extended) | GPR |
-| Ref Raw | REF_RAW | Reconstructed native pointer (heap_base + offset) | GPR |
-| Constant | CONST | Compile-time known value (may be immediate or materialized) | Any |
-| Condition | COND | Boolean condition (may be a flag or a 0/1 integer) | GPR or flags |
+1. Target-specific instruction selection (handled in lowering/codegen).
+2. Source-level debugging information mapping (handled via orthogonal metadata).
+3. Alias analysis (separate subsystem; ET-SoN consumes its results).
 
-### Conversion Instructions (LLIR)
+### Constraints
 
-| Instruction | Input | Output | Semantics |
-|---|---|---|---|
-| BOX_INT(i) | I64 | TAGGED | Encode integer as NV-1 tagged immediate (or allocate boxed if overflow) |
-| UNBOX_INT(v) | TAGGED | I64 | Extract and sign-extend 48-bit integer payload |
-| TAG_TO_REF(v) | TAGGED | REF_OFF | Extract 48-bit heap offset from tagged reference |
-| REF_OFF_TO_RAW(off) | REF_OFF | REF_RAW | Compute heap_base + offset |
-| RAW_TO_REF_OFF(ptr) | REF_RAW | REF_OFF | Compute ptr - heap_base |
-| TAG_TO_F64(v) | TAGGED | F64 | Extract binary64 value (may require NaN normalization) |
-| F64_TO_TAG(f) | F64 | TAGGED | Encode float as NV-1 (canonicalize if NaN collides with tag space) |
-| REF_OFF_TO_TAG(off) | REF_OFF | TAGGED | Encode offset as tagged reference |
-| TAG_TO_REF_RAW(v) | TAGGED | REF_RAW | Compound: extract offset, then reconstruct pointer |
+- IR construction time must be O(|AST| · |R|), where |R| is the number of region classes.
+- IR memory footprint must not exceed O(|AST| · k), where k is a small constant factor for graph overhead.
+- Verifier must run in polynomial time O(|N| + |E|).
 
 ---
 
-## T0/T1: Baseline Compilation and Bytecode Representation
+## 6. Intermediate Representation: ET-SoN
 
-### 1. Bytecode Representation
+### 6.1 Purpose and Domain
 
-Since the VM is register-based, the bytecode must explicitly reference virtual registers.
+The ET-SoN IR is a directed, typed graph. It eliminates explicit basic blocks in favor of a "sea" of nodes connected by data, control, and effect edges. Its purpose is to decouple the logical operations of the program from their physical execution schedule, allowing the optimizer to float pure computations while strictly ordering effectful operations.
 
-#### 1.1 Method Frame and Register Allocation
+### 6.2 Mathematical Specification
 
-Every compiled method (or function) has a header defining its register usage:
-- `arg_count`: Number of arguments passed to the method.
-- `register_count`: Total number of virtual registers used by the method (including arguments).
-
-The interpreter allocates a frame of size `register_count * 8 bytes` on the VM stack. All virtual registers are initially stored as 64-bit NV-1 tagged values.
-
-#### 1.2 Instruction Encoding
-
-**Decision: Variable-length / Hybrid encoding (Candidate C)**
-
-- **Standard Instructions (1-byte registers)**: The opcode is followed by 1-byte register indices. This covers 95% of operations in typical methods, keeping the bytecode stream extremely compact and L1 I-cache friendly.
-- **Extended Instructions (Prefix + 2-byte registers)**: A specific prefix opcode (e.g., 0xFF) indicates that the following instruction uses 2-byte register indices.
-
-**Invariant T0-001**: The interpreter dynamically expands the VM frame if an extended instruction references a register index ≥ 256.
-
-### 2. T0: The Interpreter
-
-#### 2.1 Dispatch Mechanism: Computed Goto + Superinstructions
-
-- **Computed Goto**: The interpreter uses an array of labels (or a jump table) to dispatch directly to the handler for the next opcode, eliminating the branch prediction penalty of a switch statement.
-- **Superinstructions**: The bytecode stream can contain fused opcodes (e.g., LOAD_FIELD_AND_BRANCH, ADD_CONST_AND_STORE). The T0 profiler identifies frequent adjacent opcodes and dynamically rewrites the bytecode stream in memory to use superinstructions, reducing dispatch overhead by up to 30%.
-
-#### 2.2 Polymorphic Inline Caches (PICs) in T0
-
-T0 is not a dumb interpreter; it caches type feedback.
-
-- At every property access or method call, the bytecode instruction is paired with an Inline Cache (IC) slot in the method's metadata.
-- The IC slot holds an array of the last N (e.g., N=4) `(LayoutID, Offset/Target)` pairs.
-- **Execution**: T0 checks the object's LayoutID against the IC. If it hits, T0 directly loads the field or jumps to the target without performing a full property lookup. If it misses, T0 performs the generic lookup, updates the IC, and proceeds.
-- **Benefit**: This makes T0 exceptionally fast for monomorphic and low-polymorphism code, significantly delaying the need to tier-up to T1/T2.
-
-#### 2.3 Profiling for Tier-Up
-
-T0 must collect profiling data to decide when to trigger T1 or T2.
-- **Back-edge counters**: Loops increment a counter. When it hits a threshold, the method is queued for T1 compilation.
-- **Call-site counters**: Function calls increment a counter. When it hits a threshold, the method is queued for T1.
-- **Type/Shape feedback**: T0 records the LayoutID of objects accessed at specific bytecode instructions (Inline Caches). This data is passed to the optimizing tiers.
-
-### 3. T1: Stencil-Based Baseline Compiler (The Copy & Patch Architecture)
-
-This is a radical departure from traditional baseline compilers (like C1 or Maglev). T1 does not build an IR, does not run an instruction selector, and does not run a graph-coloring register allocator.
-
-T1's sole objective is minimum compilation latency. It achieves this by consuming pre-compiled machine code templates (Stencils).
-
-#### 3.1 The Stencil Concept
-
-At VM startup (or in a background thread), the engine pre-assembles thousands of Stencils. A stencil is a fully assembled, executable chunk of machine code for a specific bytecode operation, but with "holes" (relocations) left for runtime patching.
-
-There are two primary variants of stencils for register operations:
-- **Register-Register Stencil**: Assumes the VM virtual registers map to specific physical registers (e.g., v0 -> r8, v1 -> r9).
-- **Register-Stack Stencil**: Assumes one or both operands are spilled to the VM stack frame.
-
-#### 3.2 The Fixed-Map Physical Convention
-
-To make stencils work without a register allocator, T1 enforces a strict physical mapping for the first K virtual registers (e.g., K=8 or 16, depending on the target ISA's callee-saved registers).
-
-```
-VM_Reg_0 → Phys_Reg_R8
-VM_Reg_1 → Phys_Reg_R9
-...
-VM_Reg_K → Stack_Slot_0
-```
-
-#### 3.3 The Copy and Patch Algorithm
-
-When T1 compiles a method, it executes the following O(N) algorithm:
-
-1. **Allocate Code Buffer**: Reserve a contiguous block of executable memory.
-2. **Iterate Bytecode**: For each bytecode instruction:
-   - Determine if the operands are in the "Fast Physical Map" (registers < K) or spilled to the stack.
-   - Select the corresponding Stencil (e.g., ADD_R_R or ADD_R_STACK).
-   - **Copy**: memcpy the stencil's machine code bytes into the code buffer.
-   - **Patch**: Fill in the "holes" in the stencil with the actual stack offsets or branch targets.
-3. **Patch Branches**: Calculate the relative offsets for jumps and patch the branch instructions.
-4. **Relocate**: Apply final relocations to make the code executable.
-
-**Why this wins mathematically:**
-- Traditional T1 compilation requires parsing bytecode, building LLIR, running a linear-scan allocator, selecting instructions, and assembling. That is O(N log N) with high constant factors.
-- Stencil T1 is a simple memcpy and integer addition (for patching). It is effectively O(N) with a near-zero constant factor. Compilation latency drops from milliseconds to microseconds.
-
-### 4. Advanced Deoptimization: Regions and Guard Fusion
-
-Traditional deoptimization invalidates an entire CodeBlob (the whole compiled method) when a single assumption fails. This causes massive "deoptimization storms" and forces the recompilation of cold, unrelated code.
-
-We will implement Region-Based Deoptimization with Guard Fusion.
-
-#### 4.1 Defining Regions
-
-A CodeBlob is not a monolithic block of code; it is partitioned into Regions.
-- A Region is typically a natural loop, a straight-line block cluster, or a function body.
-- Each Region has a single Entry Point and an Exit Point.
-
-**Invariant DEOPT-001**: Control flow can only enter a Region at its Entry Point. (Internal branches loop back to the entry or stay within the region).
-
-#### 4.2 Selective Invalidation
-
-The AOSS DependencyMap is updated. Instead of mapping `LayoutID -> List<CodeBlob>`, it maps:
-
-```
-LayoutID → List<RegionDescriptor>
-```
-
-When the GC detects a shape transition and notifies the JIT:
-1. The JIT identifies the specific RegionDescriptors that depend on the old LayoutID.
-2. The JIT patches only the Entry Point of those specific regions. It overwrites the first few bytes of the region's entry with a jump to a Deoptimization Stub.
-3. The rest of the CodeBlob (other regions, other loops) continues to execute normally.
-
-#### 4.3 Guard Fusion (Minimizing Runtime Overhead)
-
-Specialization requires guard checks (e.g., `cmp [obj], LayoutID`). If a method has 10 specialized loops, checking the guard at the entry of every loop adds significant runtime overhead.
-
-Guard Fusion is an optimization applied during T2/T3 compilation (and selectively in T1 if profitable) to minimize guard checks.
-
-- **Intra-Region Fusion**: If a loop checks LayoutID_A at the entry, and then checks LayoutID_A again inside the loop body, the inner check is eliminated. The entry guard dominates the inner check.
-- **Inter-Region Fusion**: If Region A (a loop) and Region B (the subsequent straight-line code) both require LayoutID_A, and control flow strictly passes from A to B, the JIT fuses them into a single Region_AB. The guard is placed only at the entry of Region_AB.
-
-**Invariant DEOPT-002**: A fused region is invalidated as a single unit. If the assumption fails, the entire fused region deopts.
-
-#### 4.4 The Deoptimization Stub
-
-When a patched region entry is hit, execution jumps to a Deopt Stub.
-1. The stub captures the current physical register state and VM stack pointer.
-2. It looks up the Safepoint Metadata for the exact PC where the deopt occurred.
-3. It reconstructs the NV-1 tagged values for all live VM virtual registers.
-4. It transitions the thread's execution state back to T0 (the interpreter) or directly to a newly compiled, un-specialized T1 stencil path, resuming exactly at the bytecode instruction that failed the assumption.
-
-### 5. Summary of the Execution Contract
-
-| Component | Mechanism | Primary Advantage |
-|-----------|-----------|-------------------|
-| T0 Interpreter | Computed Goto, Superinstructions, PICs | Extremely fast cold paths; delays tier-up via type caching. |
-| T1 Compiler | Stencil Copy & Patch, Fixed Physical Map | Microsecond compilation latency; O(N) complexity. |
-| Deoptimization | Region-based invalidation, Guard Fusion | Zero deopt storms; minimal runtime guard overhead. |
-
----
-
-## T2/T3: Optimization Pipeline and IR Domain Mapping
-
-### The Complete Optimization Pass Taxonomy
-
-#### 1. Expression & Local Optimizations (Basic Block Level)
-
-- **Constant Folding**: Evaluating constant expressions at compile time.
-- **Constant Propagation**: Substituting variables with known constant values.
-- **Copy Propagation**: Replacing uses of a variable with the variable it was directly copied from.
-- **Common Subexpression Elimination (CSE)**: Replacing repeated identical computations with a single saved result.
-- **Local Value Numbering (LVN)**: Assigning unique "value numbers" to expressions within a single basic block to find redundancies.
-- **Dead Code Elimination (DCE)**: Removing instructions whose results are never used.
-- **Dead Store Elimination (DSE)**: Removing memory writes that are overwritten before being read.
-- **Algebraic Simplification**: Applying algebraic identities (e.g., `x * 1` → `x`).
-- **Strength Reduction**: Replacing expensive operations with cheaper ones (e.g., `x * 2` → `x << 1`).
-- **Tree Height Reduction**: Rearranging the evaluation order of an expression tree to minimize critical path length and maximize Instruction-Level Parallelism (ILP).
-- **DAG Compression / DAG Combining**: Collapsing redundant nodes in a Directed Acyclic Graph representation of instructions.
-- **Peephole Optimization**: Scanning a small "window" of generated instructions and replacing them with a shorter or faster equivalent sequence.
-
-#### 2. Global & Control Flow Optimizations
-
-- **Global Value Numbering (GVN)**: Extending LVN across basic block boundaries using dominance frontiers.
-- **Sparse Conditional Constant Propagation (SCCP)**: Simultaneously propagating constants and eliminating dead code by evaluating branches with known constant conditions.
-- **Partial Redundancy Elimination (PRE)**: Eliminating computations that are redundant on *some* (but not all) execution paths by inserting the computation on the missing paths.
-- **Lazy Code Motion (LCM)**: An optimal form of PRE that delays computations as late as possible and hoists them as early as necessary to minimize register pressure.
-- **Code Hoisting**: Moving computations as early as possible to ensure they are computed only once before a branching point.
-- **Code Sinking**: Moving computations as late as possible down the CFG to avoid executing them on paths where their result is not needed.
-- **Jump Threading**: Duplicating a block of code to turn an indirect or multi-hop branch into a direct, predictable branch.
-- **Tail Duplication**: Duplicating the successors of a block to expose more jump threading or inlining opportunities.
-- **Unreachable Code Elimination**: Removing basic blocks that have no incoming edges in the CFG.
-- **Dead Argument Elimination (DAE)**: Removing function parameters that are never used by the callee.
-- **Control Flow Simplification**: Merging trivial blocks, removing empty blocks, and simplifying branch conditions.
-
-#### 3. Loop Optimizations (The Largest Category)
-
-- **Loop Invariant Code Motion (LICM) / Loop Hoisting**: Moving computations that yield the same result on every iteration outside the loop body.
-- **Loop Unrolling**: Duplicating the loop body multiple times to reduce branch overhead and expose ILP.
-- **Unroll and Jam**: Unrolling an outer loop and "jamming" (fusing) the inner loops together to improve register reuse and cache locality.
-- **Loop Fusion / Loop Jamming**: Combining two adjacent loops that iterate over the same range into a single loop.
-- **Loop Fission / Loop Distribution**: Splitting a single loop into multiple loops to isolate independent statements, improving cache locality or enabling vectorization.
-- **Loop Interchange**: Swapping the order of nested loops to ensure the innermost loop accesses memory in a contiguous, cache-friendly stride.
-- **Loop Tiling / Loop Blocking**: Partitioning loop iterations into smaller "tiles" or "blocks" that fit entirely within the CPU cache.
-- **Loop Unswitching**: Moving a loop-invariant conditional branch outside the loop, duplicating the loop body for the `true` and `false` cases.
-- **Loop Versioning**: Creating multiple runtime versions of a loop, guarded by checks (e.g., aliasing checks), to allow aggressive optimization on the "safe" version.
-- **Loop Peeling**: Executing the first few (or last few) iterations of a loop outside the loop body to simplify the conditions inside the main loop.
-- **Loop Rerolling / Loop Collapsing**: The inverse of unrolling; detecting unrolled loop patterns and compressing them back into a compact loop to reduce I-cache pressure.
-- **Loop Inversion**: Converting a `while` loop into a `do-while` loop with a preceding conditional branch to reduce the number of branches executed.
-- **Induction Variable Elimination**: Removing redundant loop counters by expressing them as simple linear functions of a primary induction variable.
-- **Loop Strength Reduction**: Replacing expensive operations inside a loop (like multiplication) with cheaper ones (like addition) based on the loop induction variable.
-- **Loop Normalization / Canonicalization**: Transforming loops to have a lower bound of 0 and a step of 1 to simplify subsequent analyses.
-
-#### 4. Vectorization & Parallelization
-
-- **Loop Vectorization (Auto-vectorization)**: Transforming scalar loop operations into SIMD (Single Instruction, Multiple Data) instructions.
-- **Superword Level Parallelism (SLP) Vectorization**: Packing adjacent, independent scalar operations within a *single basic block* into SIMD instructions, even outside of loops.
-- **Predicated / Masked Vectorization**: Using hardware mask registers to safely vectorize loops with conditional branches or irregular memory accesses.
-- **Reduction Tree Optimization**: Reassociating commutative/associative operations (like summing an array) into a balanced tree to maximize SIMD utilization.
-- **Loop Parallelization / Auto-parallelization**: Inserting threading constructs (like OpenMP) into loops proven to have no cross-iteration dependencies.
-- **Thread-Level Speculation (TLS)**: Speculatively executing loop iterations in parallel, with hardware/software rollback mechanisms if a dependency violation is detected.
-
-#### 5. Interprocedural & Whole-Program Optimizations (IPO/WPO)
-
-- **Function Inlining / Inline Expansion**: Replacing a function call with the actual body of the called function.
-- **Partial Inlining**: Inlining only the "hot" (frequently executed) paths of a function, leaving the "cold" paths as a separate function call.
-- **Function Cloning / Clone Specialization**: Creating a specialized copy of a function optimized for a specific set of constant arguments or type contexts.
-- **Outline Extraction / Function Outlining**: The inverse of inlining; extracting cold, rarely executed code (like error handling) into a separate function to improve I-cache density of the hot path.
-- **Dead Function Elimination (DFE)**: Removing entire functions that are never called anywhere in the program.
-- **Identical Code Folding (ICF) / COMDAT Folding**: Merging separate functions that compile to the exact same machine code into a single shared instance.
-- **Interprocedural Constant Propagation**: Propagating constant arguments from a caller into the callee's body.
-- **Argument Promotion**: Replacing a pointer/reference argument with its individual scalar fields if the function only accesses those fields.
-- **Return Value Optimization (RVO) / Named Return Value Optimization (NRVO)**: Eliminating the temporary object created to hold a function's return value by constructing it directly in the caller's stack frame.
-- **Link-Time Optimization (LTO) / Whole-Program Optimization (WPO)**: Deferring optimization until the linking stage to allow IPO across separately compiled translation units.
-- **Profile-Guided Optimization (PGO) / Feedback-Directed Optimization (FDO)**: Using runtime profiling data to guide inlining, branching, and layout decisions.
-
-#### 6. Type, Alias, and Memory Optimizations
-
-- **Class Hierarchy Analysis (CHA)**: Building a graph of class inheritances to enable devirtualization.
-- **Rapid Type Analysis (RTA)**: A more precise, flow-insensitive type analysis that only considers classes that are actually instantiated.
-- **Variable Type Analysis (VTA)**: Tracking the flow of object types through variables to enable precise devirtualization.
-- **Devirtualization / Speculative Devirtualization**: Resolving dynamic dispatch (virtual methods, interfaces) into direct, static function calls.
-- **Points-to Analysis / Alias Analysis (e.g., Andersen's, Steensgaard's)**: Determining whether two pointers can possibly refer to the same memory location.
-- **Shape Analysis**: Analyzing the topological structure of heap-allocated data structures (e.g., proving a pointer points to an acyclic linked list).
-- **Escape Analysis**: Determining if an object's reference "escapes" the current method or thread.
-- **Scalar Replacement of Aggregates (SROA)**: Breaking down arrays or structs into individual scalar variables (registers) when they do not escape.
-- **Array Bounds Check Elimination (ABCE)**: Proving that array accesses are within valid bounds, allowing the compiler to remove runtime safety checks.
-- **Null Check Elimination**: Proving a pointer/reference cannot be null at a specific point, removing the runtime null check.
-- **Write Barrier Elision**: Removing garbage collector write barriers when escape analysis proves an object is newly allocated and cannot be seen by other threads.
-- **Read Barrier Elision**: Removing GC read barriers when thread-local or provably safe.
-- **Lock Elision / Lock Coarsening**: Removing or merging synchronization primitives when escape analysis proves an object is thread-local.
-- **Store Merging / Write Combining**: Combining multiple adjacent, narrow memory writes (e.g., four 1-byte stores) into a single wider memory write.
-- **Load-Store Forwarding / Store-Load Forwarding**: Replacing a memory load with a value from a preceding store to the same address.
-
-### IR Domain Mapping
-
-#### 1. VSDG Domain: Semantic & Dependence Analysis
-
-**Mandate**: Understand what is computed and why, independent of explicit control flow. Focus on value/state dependencies, side-effect ordering, and high-level semantic facts.
-
-**Assigned Passes:**
-- **Type & Alias Analysis**: Class Hierarchy Analysis (CHA), Rapid Type Analysis (RTA), Variable Type Analysis (VTA), Points-to/Alias Analysis, Shape Analysis.
-- **High-Level Specialization**: Speculative Devirtualization, Function Cloning / Clone Specialization, Partial Evaluation foundations.
-- **Lifetime & Escape**: Escape Analysis (determining if an object escapes the method/thread).
-- **Local Semantic Simplification**: Constant Folding, Algebraic Simplification, Strength Reduction (local), Tree Height Reduction (for ILP exposure).
-- **Functional Transformations**: Lambda Lifting, Closure Conversion, Strictness Analysis (if UGB semantics require it).
-
-**Why here?** VSDG excels at proving that "Operation A's result is independent of State B's mutation" without needing to traverse explicit basic blocks or dominance frontiers.
-
-#### 2. Sea of Nodes Domain: Global Graph & Control-Flow Optimization
-
-**Mandate**: Optimize how the computation is structured across explicit control flow. Focus on redundancy elimination, loop transformations, and guard management.
-
-**Assigned Passes:**
-- **Global Redundancy Elimination**: Global Value Numbering (GVN), Partial Redundancy Elimination (PRE), Lazy Code Motion (LCM), Common Subexpression Elimination (CSE).
-- **Loop Optimizations**: Loop Invariant Code Motion (LICM), Loop Unrolling, Loop Fusion/Fission, Loop Tiling, Loop Strength Reduction, Induction Variable Elimination, Loop Unswitching.
-- **Control Flow Manipulation**: Jump Threading, Tail Duplication, Control Flow Simplification, Unreachable Code Elimination.
-- **Speculative Execution Management**: Guard Insertion, Guard Fusion (treating guard checks as values to be GVN'd or PRE'd), Speculative Load Hoisting.
-- **Interprocedural**: Function Inlining, Partial Inlining, Dead Argument Elimination (DAE).
-
-**Why here?** PRE, LICM, and Guard Fusion fundamentally require dominance frontiers and explicit control dependence graphs. Sea of Nodes provides the region/phi-node infrastructure necessary to safely move code across basic block boundaries.
-
-#### 3. Low-Level IR (LLIR) Domain: Representation Commitment
-
-**Mandate**: Commit to explicit, machine-independent representations. Introduce architecture-neutral low-level details and prepare for physical lowering.
-
-**Assigned Passes:**
-- **Aggregates**: Scalar Replacement of Aggregates (SROA) (Note: Escape Analysis proves it's safe in VSDG; SROA physically breaks the struct/array into SSA scalars here).
-- **Safety Elision**: Array Bounds Check Elimination (ABCE), Null Check Elimination, Lock Elision, Write/Read Barrier Elision (based on VSDG escape proofs).
-- **Local Cleanup**: Dead Code Elimination (DCE), Dead Store Elimination (DSE), Copy Propagation, Local Value Numbering (LVN).
-- **Runtime Integration**: Explicit Deoptimization Point (Safepoint) insertion, Exception Edge materialization.
-
-**Why here?** LLIR is the last stage before machine specifics. It must resolve high-level abstractions (like "this object doesn't escape") into concrete SSA variables and explicit memory operations.
-
-#### 4. Machine IR (MIR) Domain: Physical Realization
-
-**Mandate**: Map LLIR to target-specific hardware constraints.
-
-**Assigned Passes:**
-- **Resource Allocation**: Register Allocation (Linear Scan for T1/T2, Graph Coloring/Iterated Coalescing for T3), Live Range Splitting, Stack Slot Coloring/Sharing.
-- **Instruction Level**: Instruction Selection (DAG/Tree Pattern Matching), Instruction Scheduling (List Scheduling), If-Conversion / Predication, Peephole Optimization, Branch Shortening.
-- **Target Specifics**: Delay Slot Filling (if applicable), Frame Pointer Omission.
-
-### The VSDG → Sea of Nodes Conversion Boundary
-
-This is the most critical handshake in the optimizing pipeline. If done poorly, we lose semantic guarantees or pay massive reconstruction costs.
-
-#### 1. Input Requirements (From VSDG)
-
-The VSDG must provide the Sea of Nodes constructor with:
-- **Value Nodes**: Pure computations with explicit data dependencies. Each value node is tagged with its proven type/shape facts (e.g., `Proven: LayoutID == 0x4A`).
-- **State/Memory Nodes**: Explicit tokens representing side-effect ordering (e.g., `Memory(State_in) -> Load -> Memory(State_out)`).
-- **Guarded Assumptions**: Explicit Assume nodes (e.g., `Assume(LayoutID == 0x4A)`), which the Sea of Nodes will later lower into actual control-flow guards.
-- **Region Boundaries**: High-level loop and exception region markers, without explicit branch instructions.
-
-#### 2. Output Guarantees (To Sea of Nodes)
-
-The resulting Sea of Nodes graph must guarantee:
-- **Strict SSA Form**: All values are defined exactly once. Phi nodes (φ) or Block Arguments are inserted at dominance frontiers for values that cross high-level region boundaries.
-- **Explicit Control Edges**: Every node is control-dependent on a specific region or basic block entry.
-- **Preserved Dependence**: All data and memory dependencies from the VSDG are strictly preserved. No reordering of side-effects is permitted.
-- **Guard Normalization**: All Assume nodes are converted into explicit Guard nodes that yield a boolean value and a control-flow edge to a deoptimization stub.
-
-#### 3. Information Lost / Transformed
-
-- **Lost**: The VSDG's implicit, global view of state. Sea of Nodes fragments this into explicit memory state tokens passed between basic blocks.
-- **Transformed**: Cyclic dependencies in VSDG (if used for loops) are unrolled or converted into explicit back-edges with Phi nodes in Sea of Nodes.
-
-### Synergy with AOSS and Region-Based Deoptimization
-
-- **Guard Fusion is PRE/GVN**: In Sea of Nodes, a `Guard(LayoutID == X)` is treated as a value-producing node. Global Value Numbering (GVN) will automatically identify redundant guards in the same region. Partial Redundancy Elimination (PRE) will hoist a guard out of a loop (Loop Unswitching) or fuse guards across region boundaries, perfectly matching your "Guard Fusion" requirement.
-- **SROA enables Unboxed Live Ranges**: VSDG's Escape Analysis proves an object doesn't escape. LLIR's SROA pass breaks it into scalar NV-1 values. MIR's Register Allocation keeps those scalars in physical registers, achieving the "Hybrid tagged and unboxed" execution model we defined in NV-1.
-- **Devirtualization + Inline Caching**: T0's Polymorphic Inline Cache (PIC) provides the profiling data. T2's Sea of Nodes uses Speculative Devirtualization to replace the indirect call with a direct call, guarded by a `Guard(LayoutID == X)`. If the GC invalidates this, the Region-Based Deopt patches only that specific call site's region.
-
----
-
-## VSDG-1: Node Taxonomy and Dependence Rules
-
-### 1. Fundamental Node Categories
-
-The VSDG represents computation as a directed graph where nodes are classified into five mutually exclusive categories:
-
-| Category | Symbol | Purpose | Produces |
-|----------|--------|---------|----------|
-| Value | V | Pure computations, data transformations | A 64-bit NV-1 value |
-| State | S | Side-effect ordering, memory operations | A state token (abstract) |
-| Control | C | Branching, merging, region boundaries | Control-flow tokens |
-| Guard | G | Speculative assumptions, runtime checks | Boolean + control edge to deopt |
-| Region | R | Loop headers, exception scopes, function boundaries | Region entry/exit tokens |
-
-### 2. Edge Types (Dependencies)
-
-Edges in the VSDG represent dependencies. There are four types:
-
-#### 2.1 Data Dependency (→d)
-
-- **From**: Value node Vi
-- **To**: Value node Vj or State node Sk
-- **Semantics**: Vj requires the result of Vi to execute.
-- **Example**: ADD(V1, V2) has data edges from V1 and V2.
-
-#### 2.2 State Dependency (→s)
-
-- **From**: State node Si
-- **To**: State node Sj or Value node Vk (for loads/stores)
-- **Semantics**: Sj must execute after Si. Represents side-effect ordering.
-- **Example**: STORE(addr, val) has a state edge from the previous memory state and produces a new memory state.
-
-#### 2.3 Control Dependency (→c)
-
-- **From**: Control node Ci or Region node Rj
-- **To**: Any node Nk
-- **Semantics**: Nk is control-dependent on Ci or Rj. It only executes if control reaches that point.
-- **Example**: A BRANCH(cond, true_target, false_target) node has control edges to both targets.
-
-#### 2.4 Guard Dependency (→g)
-
-- **From**: Guard node Gi
-- **To**: Any node Nj that relies on the assumption
-- **Semantics**: Nj is only valid if Gi's assumption holds. If the assumption fails, execution transfers to a deoptimization stub.
-- **Example**: A specialized field load guarded by `Assume(LayoutID == X)` has a guard edge from the Assume node.
-
-### 3. Specific Node Types
-
-#### 3.1 Value Nodes (V)
-
-| Node Type | Inputs | Outputs | Semantics |
-|-----------|--------|---------|-----------|
-| CONST(val) | None | V | Produces a compile-time constant NV-1 value |
-| ADD(a, b) | Va, Vb | V | NV-1 tagged addition with overflow handling |
-| SUB(a, b) | Va, Vb | V | NV-1 tagged subtraction |
-| MUL(a, b) | Va, Vb | V | NV-1 tagged multiplication |
-| DIV(a, b) | Va, Vb | V | NV-1 tagged division (may trap on zero) |
-| LOAD(addr) | Vaddr, Smem | V, Smem' | Loads a 64-bit NV-1 value from memory |
-| STORE(addr, val) | Vaddr, Vval, Smem | Smem' | Stores a 64-bit NV-1 value to memory |
-| CALL(target, args...) | Vtarget, Vargs..., Sstate | Vresult, Sstate' | Invokes a function (may be direct or indirect) |
-| PHI(v1, v2, ...) | V1, V2, ... | V | Merges values from different control paths (Sea of Nodes will materialize this) |
-| EXTRACT_TAG(v) | V | V | Extracts the 16-bit tag from an NV-1 value |
-| EXTRACT_PAYLOAD(v) | V | V | Extracts the 48-bit payload from an NV-1 value |
-| BOX_INT(i) | Vi | V | Converts a native integer to NV-1 tagged integer |
-| UNBOX_INT(v) | V | V | Converts an NV-1 tagged integer to native integer |
-
-#### 3.2 State Nodes (S)
-
-| Node Type | Inputs | Outputs | Semantics |
-|-----------|--------|---------|-----------|
-| MEMORY(state_in) | Sin | Sout | Represents the abstract memory state |
-| FRAME(state_in) | Sin | Sout | Represents the VM stack frame state |
-| EXCEPTION(state_in) | Sin | Sout | Represents exceptional control flow state |
-| WORLD(state_in) | Sin | Sout | Represents all external side effects (I/O, system calls) |
-
-#### 3.3 Control Nodes (C)
-
-| Node Type | Inputs | Outputs | Semantics |
-|-----------|--------|---------|-----------|
-| ENTRY | None | C | Function entry point |
-| EXIT(result) | Vresult, Sstate | None | Function exit, returns result |
-| BRANCH(cond, T, F) | Vcond, Cin | CT, CF | Conditional branch |
-| JUMP(target) | Cin | Ctarget | Unconditional jump |
-| MERGE(c1, c2, ...) | C1, C2, ... | Cout | Merges control flow from multiple predecessors |
-| LOOP_HEADER(body, exit) | Cbody, Cexit | Centry | Marks the entry of a loop |
-| LOOP_BACK(body) | Cbody | Cheader | Back-edge of a loop |
-
-#### 3.4 Guard Nodes (G)
-
-| Node Type | Inputs | Outputs | Semantics |
-|-----------|--------|---------|-----------|
-| ASSUME_LAYOUT(obj, expected_id) | Vobj, Vexpected | G | Asserts object's LayoutID matches expected |
-| ASSUME_TYPE(v, expected_tag) | Vv, Vexpected | G | Asserts NV-1 tag matches expected |
-| ASSUME_NONNULL(v) | Vv | G | Asserts value is not null |
-| ASSUME_BOUNDS(idx, len) | Vidx, Vlen | G | Asserts array index is within bounds |
-| ASSUME_ALIAS(a, b, alias) | Va, Vb, Valias | G | Asserts whether two pointers alias |
-
-Each guard node has an implicit control edge to a deoptimization stub if the assumption fails.
-
-#### 3.5 Region Nodes (R)
-
-| Node Type | Inputs | Outputs | Semantics |
-|-----------|--------|---------|-----------|
-| FUNCTION_REGION(entry, exit) | Centry, Cexit | R | Marks a function boundary |
-| LOOP_REGION(header, body, exit) | Cheader, Cbody, Cexit | R | Marks a loop boundary (for Region-Based Deopt) |
-| EXCEPTION_REGION(try, catch) | Ctry, Ccatch | R | Marks an exception handling scope |
-
-### 4. VSDG Invariants
-
-#### 4.1 Structural Invariants
-
-- **INV-VSDG-001**: Every value node has exactly one definition (SSA-like property, though VSDG is not strictly SSA yet).
-- **INV-VSDG-002**: State nodes form a total order within each state chain (memory, frame, exception, world).
-- **INV-VSDG-003**: Control nodes form a directed acyclic graph (DAG) except for explicit loop back-edges.
-- **INV-VSDG-004**: Guard nodes dominate all nodes that depend on them via guard edges.
-- **INV-VSDG-005**: Region nodes properly nest (no crossing region boundaries).
-
-#### 4.2 Semantic Invariants
-
-- **INV-VSDG-006**: All memory operations (LOAD, STORE) have explicit state dependencies on the MEMORY state chain.
-- **INV-VSDG-007**: All function calls have explicit state dependencies on the WORLD state chain (for I/O effects).
-- **INV-VSDG-008**: All speculative operations have explicit guard dependencies.
-- **INV-VSDG-009**: No node may execute if its control dependency is not satisfied.
-- **INV-VSDG-010**: Guard failure transfers control to a deoptimization stub that reconstructs the exact interpreter state.
-
-### 5. Loop Representation
-
-Loops in VSDG are represented using explicit LOOP_HEADER and LOOP_BACK nodes, forming a cycle in the control graph.
-
-**Example: Simple loop**
-```
-LOOP_HEADER(L1)
-  body:
-    ADD(V1, V2) -> V3
-    STORE(addr, V3)
-  LOOP_BACK(L1)
-EXIT
-```
-
-The cycle is: LOOP_HEADER -> body -> LOOP_BACK -> LOOP_HEADER.
-
-This explicit cycle representation allows the optimizer to:
-- Identify loop-invariant computations (nodes outside the cycle but dominating the loop).
-- Perform loop unrolling by duplicating the cycle.
-- Apply loop strength reduction by analyzing induction variables within the cycle.
-
-### 6. Exception Representation
-
-Exceptions are modeled using EXCEPTION_REGION nodes and the EXCEPTION state chain.
-
-**Example: Try-catch**
-```
-EXCEPTION_REGION(try_block, catch_block)
-  try_block:
-    CALL(target, args) -> result
-    // If CALL throws, control transfers to catch_block
-  catch_block:
-    HANDLE_EXCEPTION()
-```
-
-The CALL node has an implicit exceptional edge to the catch_block if the function throws. The VSDG does not need explicit exception edges for every operation; the EXCEPTION_REGION scope captures all exceptional control flow within it.
-
-### 7. Conversion Boundary: VSDG → Sea of Nodes
-
-The conversion from VSDG to Sea of Nodes performs the following transformations:
-
-#### 7.1 Input (VSDG)
-- Value nodes with data dependencies
-- State nodes with state dependencies
-- Control nodes with control dependencies (including cycles for loops)
-- Guard nodes with guard dependencies
-- Region nodes marking boundaries
-
-#### 7.2 Transformation Steps
-1. **Linearize Control Flow**: Convert the VSDG's control graph into an explicit Control Flow Graph (CFG) with basic blocks.
-2. **Insert Phi Nodes**: At dominance frontiers, insert PHI nodes to merge values from different control paths. This converts the VSDG into strict SSA form.
-3. **Materialize Guards**: Convert ASSUME_* guard nodes into explicit Guard nodes with boolean outputs and control edges to deoptimization stubs.
-4. **Flatten State Chains**: Convert the abstract state chains into explicit memory tokens passed between basic blocks.
-5. **Preserve Dependencies**: All data, state, control, and guard dependencies from the VSDG are strictly preserved in the Sea of Nodes graph.
-
-#### 7.3 Output (Sea of Nodes)
-- Strict SSA form with explicit phi nodes
-- Explicit basic blocks with control-flow edges
-- Explicit guard nodes with deoptimization targets
-- Explicit memory state tokens
-- All VSDG invariants preserved
-
-#### 7.4 Information Lost
-- The VSDG's implicit, global view of state is fragmented into explicit memory tokens.
-- Cyclic control dependencies are unrolled into explicit back-edges with phi nodes.
-- Region boundaries are preserved but may be fused or split by Sea of Nodes optimizations (e.g., Guard Fusion).
-
-### 8. Example: VSDG for a Simple Function
-
-**Source code (conceptual):**
-```
-function add_fields(obj, x, y):
-    field_a = obj.field_a
-    field_b = obj.field_b
-    return field_a + field_b + x + y
-```
-
-**VSDG representation:**
-```
-ENTRY
-LOAD(obj, MEMORY_0) -> V_obj, MEMORY_1
-ASSUME_LAYOUT(V_obj, expected_id) -> G1
-LOAD_FIELD(V_obj, offset_a, MEMORY_1) -> V_a, MEMORY_2  [guarded by G1]
-LOAD_FIELD(V_obj, offset_b, MEMORY_2) -> V_b, MEMORY_3  [guarded by G1]
-ADD(V_a, V_b) -> V_ab
-ADD(V_ab, x) -> V_abx
-ADD(V_abx, y) -> V_result
-EXIT(V_result, MEMORY_3)
-```
-
-**Dependencies:**
-- LOAD_FIELD nodes are data-dependent on V_obj
-- LOAD_FIELD nodes are state-dependent on MEMORY_1, MEMORY_2
-- LOAD_FIELD nodes are guard-dependent on G1
-- ADD nodes are data-dependent on their operands
-- EXIT is state-dependent on MEMORY_3
-
-This VSDG is then converted to Sea of Nodes, where the ASSUME_LAYOUT becomes an explicit guard with a deoptimization edge, and the LOAD_FIELD operations can be optimized (e.g., CSE if obj is proven not to mutate between loads).
-
----
-
-## Sea of Nodes-1: Graph Structure and Optimization Passes
-
-Following the strict Design A boundary, the Sea of Nodes (SoN) tier receives the semantically analyzed, dependence-rich graph from the VSDG and transforms it into an explicitly structured, control-flow-aware, Strict Static Single Assignment (SSA) graph.
-
-Its mandate is structural optimization: eliminating redundancy, moving code across control-flow boundaries, and fusing guards, without altering the fundamental semantic guarantees established by the VSDG.
-
-### 1. Core Graph Structure
-
-The SoN graph is a directed graph G = (N, E), partitioned into Basic Blocks (B).
-
-#### 1.1 Basic Blocks
-
-A basic block Bi is a sequence of nodes with:
-- A single Entry Point (a BlockHeader node).
-- A single Exit Point (a Branch, Jump, or Return node).
-- No internal control-flow transfers.
-
-#### 1.2 Node Types in SoN
-
-Nodes in SoN are categorized by the type of edge they produce/consume:
-- **Data Nodes (Nd)**: Pure computations (e.g., Add, Load, Call). Produce data values.
-- **Control Nodes (Nc)**: BlockHeader, If, Jump, Return. Produce control tokens.
-- **State/Memory Nodes (Ns)**: MemoryPhi, MemoryState. Produce abstract memory state tokens.
-- **Guard Nodes (Ng)**: GuardLayout, GuardType. Produce a boolean control edge (continuation) and a deoptimization edge (failure).
-
-#### 1.3 Edge Types
-
-- **Control Edges (→c)**: Connect Nc to Nc or Nc to the first node in a block. Define execution order.
-- **Data Edges (→d)**: Connect Nd to Nd. Define value dependencies.
-- **State Edges (→s)**: Connect Ns to Ns or Nd (for loads/stores). Define side-effect ordering.
-- **Phi Edges (→φ)**: Connect the last node of a predecessor block to a Phi node in the current block.
-
-### 2. Strict SSA and Phi Nodes
-
-To enable global optimization, all values must be in Strict SSA form.
-
-#### 2.1 Data Phi Nodes
-
-When a value v is defined in multiple predecessor blocks and used in a successor block Bmerge, a Data Phi Node is inserted at the entry of Bmerge:
-
-```
-v_merge = φ(v_pred1, v_pred2, …, v_predk)
-```
-
-**Invariant SON-001**: Every data value is defined exactly once. Phi nodes are the only exception, and they must reside at the dominance frontier of the defining blocks.
-
-#### 2.2 Memory Phi Nodes (Memory SSA)
-
-Unlike VSDG's abstract state chains, SoN makes memory state explicit to enable precise alias analysis and load/store optimization.
-
-When memory is mutated in divergent control paths, a Memory Phi Node merges the state:
-
-```
-mem_merge = φ_mem(mem_pred1, mem_pred2, …, mem_predk)
-```
-
-**Invariant SON-002**: Every Load and Store node takes an explicit MemoryState input and produces a new MemoryState output. This creates a precise, versioned history of memory, allowing the optimizer to prove that a Load is independent of a distant Store.
-
-### 3. Core Optimization Passes
-
-These passes operate on the SoN graph. They are ordered to maximize profitability and minimize redundant traversals.
-
-#### 3.1 Global Value Numbering (GVN) & Common Subexpression Elimination (CSE)
-
-**Objective**: Identify and eliminate redundant computations across the entire method.
-
-**Mechanism:**
-1. Traverse the graph in dominance order.
-2. Assign a "Value Number" to each node based on its opcode and the Value Numbers of its inputs (data and memory state).
-3. If a node N2 has the same opcode and identical input Value Numbers as an already-visited node N1, N2 is redundant.
-4. **Action**: Replace all uses of N2 with N1, and delete N2 (Dead Code Elimination).
-
-**Crucial for Guards**: `Guard(LayoutID == X)` is treated as a value-producing node. If two guards check the same condition and are on the same control path, GVN eliminates the second one. This is the foundational mechanism for Guard Fusion.
-
-#### 3.2 Partial Redundancy Elimination (PRE) & Lazy Code Motion (LCM)
-
-**Objective**: Eliminate computations that are redundant on some but not all execution paths, by inserting them on the missing paths to minimize register pressure.
-
-**Mechanism:**
-1. Identify an expression E computed in block B2, which is also computed in a predecessor B1.
-2. If E is loop-invariant or dominates a merge point, PRE hoists E to the dominance frontier.
-3. **LCM Refinement**: Instead of hoisting E as early as possible (which increases register pressure), LCM delays the insertion of E as late as possible while still guaranteeing it is computed before any use.
-
-**Application to Guards**: PRE is the primary engine for Inter-Region Guard Fusion. If Region A and Region B both require `Guard(LayoutID == X)`, and control flows strictly A → B, PRE will hoist the guard to the entry of Region A, fusing the checks and eliminating the redundant check in Region B.
-
-#### 3.3 Loop Optimizations
-
-Loops are identified via back-edges in the control graph. The following passes operate on loop regions:
-
-- **Loop Invariant Code Motion (LICM)**: Identifies nodes inside a loop whose inputs are defined outside the loop (or are loop-invariant Phis) and which have no side effects (no MemoryState mutation). Hoists them to the loop pre-header.
-- **Loop Unswitching**: If an If node inside a loop depends only on loop-invariant values, duplicate the loop body. One copy assumes the true branch, the other assumes the false branch. This exposes massive optimization opportunities (like vectorization or aggressive LICM) inside the duplicated bodies.
-- **Induction Variable Analysis & Strength Reduction**: Identifies variables that increment by a constant each iteration. Replaces expensive operations (e.g., `base + (i * stride)`) with a simple addition (`ptr = ptr + stride`) in the loop body.
-
-#### 3.4 Control Flow Simplification
-
-- **Jump Threading**: If a block ends in a conditional branch, and the condition is a known constant (via SCCP) or a Phi node that resolves to a constant along a specific path, duplicate the block's successors and thread the jump directly to the resolved target.
-- **Tail Duplication**: Duplicates the single successor of multiple blocks to expose more Jump Threading or Inlining opportunities.
-- **Unreachable Code Elimination**: Removes blocks with no incoming control edges after simplification.
-
-### 4. Synergy with AOSS and Region-Based Deoptimization
-
-The SoN tier is where the AOSS specialization model becomes physically manifest in the graph.
-
-- **Guard Insertion**: The VSDG provides ASSUME_LAYOUT nodes. SoN lowers these into explicit `GuardLayout(obj, expected_id, deopt_target)` nodes.
-- **Guard Fusion (via GVN/PRE)**: As described above, redundant guards are mathematically eliminated. A single guard at the entry of a fused region protects all subsequent specialized operations (e.g., direct field loads, devirtualized calls) within that region.
-- **Speculative Devirtualization**: An indirect Call node is replaced by a direct Call to a specific target, preceded by a `GuardType(receiver, expected_id)`. If the guard fails, it deopts. GVN ensures this guard is not duplicated if the receiver's type was already guarded earlier in the block.
-- **Trace Compilation Integration**: If optional tracing is enabled, a "trace" is simply a SoN graph extracted from the interpreter's hot path. It is inherently a single-entry, single-exit graph with heavy guard nodes at every type-sensitive operation. The exact same SoN passes (GVN, PRE, LICM) optimize the trace.
-
-### 5. Invariants and Conversion Boundary (SoN → LLIR)
-
-Before the graph is passed to Low-Level IR (LLIR), it must satisfy strict invariants. The SoN tier is not allowed to weaken VSDG's semantic guarantees.
-
-| Invariant | Description |
-|-----------|-------------|
-| SON-INV-01 | Strict SSA: Every data and memory value is defined exactly once. |
-| SON-INV-02 | Dominance: Every use of a value is dominated by its definition. |
-| SON-INV-03 | Side-Effect Preservation: The topological order of all MemoryState and WorldState mutations is identical to the VSDG's state chain order. No reordering of visible side effects is permitted. |
-| SON-INV-04 | Guard Completeness: Every speculative operation (devirtualized call, unchecked array load, unboxed field access) is strictly control-dependent on a valid Guard node that dominates it. |
-| SON-INV-05 | Deopt Reachability: Every Guard node has a valid, computable path to a deoptimization stub that can reconstruct the VSDG/interpreter state. |
-
-**What is Lost/Transformed in this Boundary?**
-- **Lost**: The VSDG's global, implicit view of state. It is now fragmented into explicit MemoryState tokens and Phi nodes.
-- **Transformed**: High-level VSDG Region nodes are mapped to explicit SoN control-flow structures (loop pre-headers, back-edges, exception handlers).
-
-### 6. Example: SoN Transformation of a Guarded Load
-
-**VSDG Input:**
-```
-LOAD_FIELD(obj, offset_a, MEMORY_1) [guarded by ASSUME_LAYOUT(obj, 0x4A)]
-```
-
-**SoN Output (after conversion and GVN/PRE):**
-```
-Block_PreHeader:
-    mem_0 = ...
-    guard_1 = GuardLayout(obj, 0x4A, deopt_stub_1)
-    Jump Block_Loop
-
-Block_Loop:
-    mem_1 = Phi(mem_0, mem_3)
-    // GVN proves obj's layout is still 0x4A here, no new guard needed.
-    // LICM hoisted this load out of the loop if offset_a is invariant.
-    val_a = LoadField(obj, offset_a, mem_1) [Control: guard_1]
-    ...
-```
-
----
-
-## LLIR-1: Low-Level IR and Representation Commitment
-
-The Low-Level IR is the critical transition boundary where abstract optimization meets physical reality. It receives the optimized, strict-SSA Sea of Nodes graph and transforms it into an explicitly scheduled, representation-committed, machine-independent instruction stream ready for target-specific lowering.
-
-This is where the Adaptive Representation Selection (ARS) model from NV-1 becomes physically manifest, where safepoints are materialized with precise metadata, and where the "hybrid tagged and unboxed" execution model is actually constructed.
-
-### 1. Core LLIR Structure
-
-LLIR abandons the graph-based representation of SoN in favor of an explicit linear instruction sequence organized into basic blocks.
-
-#### 1.1 Basic Blocks
-
-Each basic block Bi contains:
-- **Block Header**: Block ID, predecessor list, successor list, exception handler scope.
-- **Instruction Sequence**: A linear list of instructions I1, I2, …, In.
-- **Terminator**: The final instruction, which is always one of:
-  - `BRANCH(cond, true_target, false_target)`
-  - `JUMP(target)`
-  - `RETURN(value)`
-  - `DEOPT(safepoint_id, vm_state)`
-  - `THROW(exception_value)`
-
-#### 1.2 Instruction Format
-
-Every instruction Ik has the form:
-
-```
-Ik: opcode(op1, op2, …, opn) → (r1, r2, …, rm) [metadata]
-```
-
-Where:
-- opi are operands (registers, constants, or memory locations).
-- rj are result registers (virtual registers in LLIR, physical in MIR).
-- Metadata includes: representation types, safepoint info, side-effect flags, guard dependencies.
-
-### 2. Operand and Representation Model
-
-This is the heart of LLIR. Every operand and result has an explicit representation type chosen by ARS.
-
-#### 2.1 Representation Types
-
-| Representation | Symbol | Physical Meaning | Register Class |
-|---|---|---|---|
-| Tagged | TAGGED | Full 64-bit NV-1 boxed value | GPR |
-| Integer | I64 | Native 64-bit signed integer | GPR |
-| Float | F64 | Native binary64 floating-point | FPR |
-| Ref Offset | REF_OFF | 48-bit heap-relative offset (lower 16 bits zero or sign-extended) | GPR |
-| Ref Raw | REF_RAW | Reconstructed native pointer (heap_base + offset) | GPR |
-| Constant | CONST | Compile-time known value (may be immediate or materialized) | Any |
-| Condition | COND | Boolean condition (may be a flag or a 0/1 integer) | GPR or flags |
-
-#### 2.2 Representation Commitment Rules
-
-- **INV-LLIR-001**: Every virtual register has exactly one representation type for its entire live range within a single basic block. (Cross-block, a register may change representation if explicitly converted.)
-- **INV-LLIR-002**: Every instruction's operands must match the instruction's expected representation types. Mismatches require explicit conversion instructions.
-- **INV-LLIR-003**: REF_RAW values may only exist within a non-safepoint region (a sequence of instructions with no calls, back-edges, or explicit yield points). Crossing a safepoint requires converting back to REF_OFF.
-
-#### 2.3 Conversion Instructions
-
-When a value must change representation, explicit conversion instructions are inserted:
-
-| Instruction | Input | Output | Semantics |
-|---|---|---|---|
-| BOX_INT(i) | I64 | TAGGED | Encode integer as NV-1 tagged immediate (or allocate boxed if overflow) |
-| UNBOX_INT(v) | TAGGED | I64 | Extract and sign-extend 48-bit integer payload |
-| TAG_TO_REF(v) | TAGGED | REF_OFF | Extract 48-bit heap offset from tagged reference |
-| REF_OFF_TO_RAW(off) | REF_OFF | REF_RAW | Compute heap_base + offset |
-| RAW_TO_REF_OFF(ptr) | REF_RAW | REF_OFF | Compute ptr - heap_base |
-| TAG_TO_F64(v) | TAGGED | F64 | Extract binary64 value (may require NaN normalization) |
-| F64_TO_TAG(f) | F64 | TAGGED | Encode float as NV-1 (canonicalize if NaN collides with tag space) |
-| REF_OFF_TO_TAG(off) | REF_OFF | TAGGED | Encode offset as tagged reference |
-| TAG_TO_REF_RAW(v) | TAGGED | REF_RAW | Compound: extract offset, then reconstruct pointer |
-
-**INV-LLIR-004**: Conversion instructions are not optional. If an instruction expects I64 but receives TAGGED, the compiler must insert UNBOX_INT before the use.
-
-### 3. Lowering Rules: SoN → LLIR
-
-The conversion from SoN to LLIR performs the following transformations:
-
-#### 3.1 Phi Node Resolution
-
-SoN's strict SSA phi nodes are converted to parallel copy instructions at block boundaries:
-
-**SoN:**
-```
-Block_Merge:
-    v = Phi(v1, v2, v3)
-```
-
-**LLIR:**
-```
-Block_Pred1:
-    ...
-    COPY_PARALLEL(v <- v1)
-    JUMP Block_Merge
-
-Block_Pred2:
-    ...
-    COPY_PARALLEL(v <- v2)
-    JUMP Block_Merge
-
-Block_Merge:
-    // v is now defined by the parallel copy from the predecessor
-    ...
-```
-
-**INV-LLIR-005**: COPY_PARALLEL instructions are semantically atomic (all copies happen simultaneously). MIR's register allocator will resolve these into actual move sequences, handling overlaps correctly.
-
-#### 3.2 High-Level Operation Lowering
-
-SoN's abstract operations are lowered to explicit pointer arithmetic and memory operations:
-
-**SoN:**
-```
-val = LoadField(obj, offset_a, mem)
-```
-
-**LLIR:**
-```
-obj_off = TAG_TO_REF(obj)           // Extract 48-bit offset
-obj_ptr = REF_OFF_TO_RAW(obj_off)   // Reconstruct native pointer
-addr = ADD(obj_ptr, offset_a)       // Compute field address
-val_tagged = LOAD(addr)             // Load 64-bit NV-1 value
-```
-
-**INV-LLIR-006**: All memory operations (LOAD, STORE) operate on REF_RAW pointers. The compiler must ensure the pointer is reconstructed before the memory access and converted back to REF_OFF before any safepoint.
-
-#### 3.3 Guard Lowering
-
-SoN's Guard nodes become explicit branch instructions with deoptimization targets:
-
-**SoN:**
-```
-guard = GuardLayout(obj, 0x4A, deopt_stub_1)
-```
-
-**LLIR:**
-```
-obj_off = TAG_TO_REF(obj)
-obj_ptr = REF_OFF_TO_RAW(obj_off)
-layout_id = LOAD(obj_ptr)           // Load 64-bit header
-expected = CONST(0x4A)
-cmp = CMP(layout_id, expected)
-BRANCH_ON_FALSE(cmp, deopt_stub_1)  // Deopt if mismatch
-// Fall-through: obj is proven to have LayoutID 0x4A
-```
-
-**INV-LLIR-007**: Every deoptimization target is a separate basic block ending in a DEOPT instruction with a complete VM state reconstruction map.
-
-### 4. Scalar Replacement of Aggregates (SROA)
-
-Based on VSDG's escape analysis, LLIR breaks down aggregate objects into individual scalar values.
-
-#### 4.1 SROA Transformation
-
-**SoN (object does not escape):**
-```
-obj = ALLOC(layout, size)
-STORE_FIELD(obj, offset_0, val_0, mem)
-STORE_FIELD(obj, offset_1, val_1, mem)
-result = LOAD_FIELD(obj, offset_0, mem)
-```
-
-**LLIR (after SROA):**
-```
-// No allocation, no stores, no loads
-// val_0 and val_1 are kept in virtual registers
-result = val_0  // Direct forwarding
-```
-
-**INV-LLIR-008**: SROA is only permitted if VSDG has proven the object does not escape the current method or thread. If the object escapes, it must remain a heap-allocated aggregate.
-
-#### 4.2 Partial SROA
-
-If only some fields of an object are accessed, and the object does not escape, only those fields are scalar-replaced. The object is still allocated, but the accessed fields are kept in registers:
-
-**LLIR:**
-```
-obj = ALLOC(layout, size)
-STORE_FIELD(obj, offset_1, val_1, mem)  // Field 1 stored to heap
-// Field 0 kept in register, not stored
-result = val_0  // Direct use of register
-```
-
-### 5. Safety Elision
-
-Based on VSDG's proofs, LLIR removes runtime safety checks:
-
-#### 5.1 Array Bounds Check Elimination (ABCE)
-
-**SoN:**
-```
-len = LOAD_LENGTH(arr)
-idx = ...
-GUARD(idx < len, deopt_bounds)
-val = LOAD_ELEMENT(arr, idx)
-```
-
-**LLIR (if VSDG proves idx < len):**
-```
-// Guard removed
-val = LOAD_ELEMENT(arr, idx)
-```
-
-**INV-LLIR-009**: ABCE is only permitted if VSDG has mathematically proven the bounds condition. Heuristic predictions are not sufficient.
-
-#### 5.2 Null Check Elimination
-
-Similar to ABCE, null checks are removed if VSDG proves the value cannot be null.
-
-#### 5.3 Write Barrier Elision
-
-If VSDG's escape analysis proves an object is newly allocated and has not escaped the current thread, write barriers are elided:
-
-**SoN:**
-```
-STORE_FIELD(obj, offset, val, mem)
-WRITE_BARRIER(obj, val)  // Required for generational GC
-```
-
-**LLIR (if obj is proven thread-local and newly allocated):**
-```
-STORE_FIELD(obj, offset, val, mem)
-// Write barrier elided
-```
-
-**INV-LLIR-010**: Write barrier elision requires proof that the object is in the young generation and has not been seen by older-generation objects.
-
-### 6. Safepoint and Deoptimization Materialization
-
-This is where the JIT-GC contract is physically realized.
-
-#### 6.1 Safepoint Points
-
-A safepoint is any point where the GC may need to inspect or relocate live references. Safepoints occur at:
-- Function calls (the callee may trigger GC).
-- Loop back-edges (to allow GC to make progress during long-running loops).
-- Explicit yield points (for cooperative multitasking or GC requests).
-
-#### 6.2 Safepoint Metadata
-
-At each safepoint, LLIR attaches a SafepointRecord containing:
-- **Safepoint ID**: Unique identifier for this PC location.
-- **Live Register Map**: For each physical register (after MIR allocation), its representation type and its mapping to VM state:
-  ```
-  GPR_R8: TAGGED -> VM_Reg_3
-  FPR_F0: F64 -> (unboxed float, not a VM register)
-  GPR_R9: REF_OFF -> VM_Reg_5
-  ```
-- **Stack Map**: For each stack slot, its representation type and VM mapping.
-- **Deopt Target**: The bytecode PC and method ID to resume if deoptimization occurs.
-
-**INV-LLIR-011**: Every live REF_OFF or REF_RAW value at a safepoint must be explicitly recorded in the safepoint metadata. The GC must be able to locate and relocate all live references.
-
-**INV-LLIR-012**: REF_RAW values may not be live across a safepoint. If a raw pointer is needed after a safepoint, it must be reconstructed from the REF_OFF after the safepoint.
-
-#### 6.3 Deoptimization Stubs
-
-Each guard's failure path is a separate basic block ending in a DEOPT instruction:
-
-**LLIR:**
-```
-Block_Deopt_1:
-    // Capture current physical state
-    DEOPT(safepoint_id = 42, vm_state = {
-        VM_Reg_0: GPR_R8 (TAGGED),
-        VM_Reg_1: Stack_Slot_0 (TAGGED),
-        VM_Reg_2: FPR_F0 (F64),
-        ...
-    })
-```
-
-The DEOPT instruction is a pseudo-instruction that MIR will lower to a call to a runtime deoptimization handler. The handler uses the vm_state map to reconstruct the interpreter's stack frame and virtual registers, then resumes execution in T0 at the appropriate bytecode PC.
-
-**INV-LLIR-013**: Every DEOPT instruction must provide a complete, consistent mapping from physical state to VM state. No live VM value may be omitted.
-
-### 7. Calling Convention Commitment
-
-LLIR commits to a machine-independent calling convention:
-
-#### 7.1 Argument Passing
-- First N arguments (e.g., N=4 on x86-64, N=8 on AArch64) are passed in registers.
-- Remaining arguments are passed on the stack.
-- Argument representation: Each argument has an explicit representation type. The caller and callee must agree on the representation.
-
-#### 7.2 Return Values
-- Single return value is returned in a designated register (e.g., RAX on x86-64, X0 on AArch64).
-- Multiple return values (rare) are returned in a struct on the stack or in multiple registers.
-
-#### 7.3 Callee-Saved Registers
-- LLIR assumes a standard ABI where certain registers are callee-saved.
-- The register allocator (in MIR) will respect these constraints.
-
-**INV-LLIR-014**: All function calls must explicitly specify the representation types of arguments and return values. Mismatches between caller and callee are a compilation error.
-
-### 8. Invariants and Conversion Boundary (LLIR → MIR)
-
-Before LLIR is passed to MIR, it must satisfy strict invariants:
-
-| Invariant | Description |
-|-----------|-------------|
-| LLIR-INV-01 | Explicit Representations: Every operand and result has a concrete representation type. No abstract "value" types remain. |
-| LLIR-INV-02 | No Phi Nodes: All phi nodes have been converted to parallel copies at block boundaries. |
-| LLIR-INV-03 | Explicit Conversions: All representation changes are explicit conversion instructions. No implicit coercions. |
-| LLIR-INV-04 | Safepoint Metadata: Every safepoint has a complete, consistent safepoint record. |
-| LLIR-INV-05 | Deopt Completeness: Every deopt point has a complete VM state reconstruction map. |
-| LLIR-INV-06 | Memory Safety: All memory operations use REF_RAW pointers, and raw pointers are not live across safepoints. |
-| LLIR-INV-07 | Calling Convention: All calls specify explicit argument and return representations. |
-
-**What is Lost/Transformed in this Boundary?**
-- **Lost**: The SoN graph structure. LLIR is a linear instruction sequence, not a graph.
-- **Transformed**: Abstract memory state tokens are gone. Memory operations are now explicit loads and stores with no explicit state threading (MIR will handle dependency tracking for scheduling).
-- **Preserved**: All semantic guarantees from VSDG and SoN. All guard dependencies, all side-effect orderings, all speculative assumptions.
-
-### 9. Example: LLIR for a Guarded Field Access
-
-**SoN Input:**
-```
-guard = GuardLayout(obj, 0x4A, deopt_1)
-val = LoadField(obj, offset_8, mem) [guarded by guard]
-```
-
-**LLIR Output:**
-```
-Block_Entry:
-    obj_tagged = VM_Reg_0 (TAGGED)
-    obj_off = TAG_TO_REF(obj_tagged)
-    obj_ptr = REF_OFF_TO_RAW(obj_off)
-    layout_id = LOAD(obj_ptr)              // Load 64-bit header
-    expected = CONST(0x4A)
-    cmp = CMP(layout_id, expected)
-    BRANCH_ON_FALSE(cmp, Block_Deopt_1)    // Guard check
-    // Fall-through: obj is proven to have LayoutID 0x4A
-    field_addr = ADD(obj_ptr, 8)           // Compute field address
-    val_tagged = LOAD(field_addr)          // Load 64-bit NV-1 value
-    VM_Reg_1 = val_tagged                  // Store result
-    JUMP Block_Exit
-
-Block_Deopt_1:
-    DEOPT(safepoint_id = 7, vm_state = {
-        VM_Reg_0: GPR_R8 (TAGGED),
-        ...
-    })
-
-Block_Exit:
-    ...
-```
-
-**Safepoint Metadata (at the LOAD instruction, if it's a safepoint):**
-```
-SafepointRecord {
-    id: 7,
-    live_registers: [
-        {phys: GPR_R8, repr: TAGGED, vm: VM_Reg_0},
-        {phys: GPR_R9, repr: REF_RAW, vm: None},  // Temporary, not a VM reg
-        ...
-    ],
-    stack_map: [...],
-    deopt_target: {method: "foo", bytecode_pc: 0x1A}
-}
-```
-
----
-
-## MIR-1: Machine IR and Physical Realization
-
-The Machine IR is the final compilation tier, where LLIR's abstract, representation-committed instructions are transformed into concrete, executable machine code for the target architecture (x86-64, AArch64, or RV64).
-
-This is where virtual registers become physical registers, where LLIR's pseudo-instructions become real CPU instructions, and where the final bytes of native code are emitted.
-
-### 1. Core MIR Structure
-
-MIR abandons LLIR's linear instruction sequence in favor of a target-specific instruction graph with explicit physical constraints.
-
-#### 1.1 MIR Instruction Format
-
-Every MIR instruction Ik has the form:
-
-```
-Ik: target_opcode(op1, op2, …, opn) → (r1, r2, …, rm) [constraints]
-```
-
-Where:
-- opi are operands (physical registers, stack slots, or immediate constants).
-- rj are result physical registers.
-- Constraints include: register class restrictions, latency information, side effects, and scheduling dependencies.
-
-#### 1.2 Physical Register Model
-
-Each target architecture defines its physical register file:
-
-**x86-64:**
-- GPRs: RAX, RBX, RCX, RDX, RSI, RDI, RBP, RSP, R8–R15 (16 total)
-- FPRs: XMM0–XMM15 (16 total, 128-bit each)
-- Callee-saved: RBX, RBP, R12–R15 (6 GPRs)
-- Caller-saved: RAX, RCX, RDX, RSI, RDI, R8–R11 (10 GPRs)
-
-**AArch64:**
-- GPRs: X0–X30 (31 total, plus SP)
-- FPRs: Q0–Q31 (32 total, 128-bit each)
-- Callee-saved: X19–X28, X29 (FP), X30 (LR) (11 GPRs)
-- Caller-saved: X0–X18 (19 GPRs)
-
-**RV64:**
-- GPRs: X0–X31 (32 total, X0 is hardwired zero)
-- FPRs: F0–F31 (32 total, 64-bit each)
-- Callee-saved: X8–X9, X18–X27 (12 GPRs)
-- Caller-saved: X1–X7, X10–X17, X28–X31 (20 GPRs)
-
-#### 1.3 Register Classes
-
-Each operand and result is assigned a register class based on its representation type:
-
-| Representation | x86-64 Register Class | AArch64 Register Class | RV64 Register Class |
-|---|---|---|---|
-| TAGGED | GPR64 | GPR64 | GPR64 |
-| I64 | GPR64 | GPR64 | GPR64 |
-| F64 | FPR64 (XMM) | FPR64 (Q) | FPR64 (F) |
-| REF_OFF | GPR64 | GPR64 | GPR64 |
-| REF_RAW | GPR64 | GPR64 | GPR64 |
-| COND | FLAGS or GPR8 | GPR32 (WZR) | GPR32 |
-
-**INV-MIR-001**: Every operand and result must be assigned to a valid register class for the target architecture.
-
-### 2. Instruction Selection
-
-This phase maps LLIR's abstract instructions to target-specific machine instructions.
-
-#### 2.1 Selection Strategy
-
-We use DAG-based instruction selection (similar to LLVM's SelectionDAG or V8's TurboFan):
-1. Convert LLIR's linear instruction sequence into a Selection DAG (Directed Acyclic Graph).
-2. Match patterns in the DAG against target-specific instruction templates.
-3. Emit the selected machine instructions, respecting operand constraints and register classes.
-
-#### 2.2 Example: x86-64 Instruction Selection
-
-**LLIR:**
-```
-obj_ptr = REF_OFF_TO_RAW(obj_off)
-field_addr = ADD(obj_ptr, 8)
-val_tagged = LOAD(field_addr)
-```
-
-**x86-64 MIR (after selection):**
-```asm
-; obj_off is in GPR_R9
-lea r10, [r9 + 8]        ; r10 = obj_ptr + 8 (field address)
-mov rax, [r10]           ; rax = *field_addr (load 64-bit value)
-```
-
-**AArch64 MIR:**
-```asm
-; obj_off is in X9
-add x10, x9, #8          ; x10 = obj_off + 8
-ldr x0, [x10]            ; x0 = *x10 (load 64-bit value)
-```
-
-**RV64 MIR:**
-```asm
-; obj_off is in a3 (x13)
-addi a4, a3, 8           ; a4 = a3 + 8
-ld a0, 0(a4)             ; a0 = *a4 (load 64-bit value)
-```
-
-#### 2.3 Complex Pattern Matching
-
-Some LLIR instructions require multiple machine instructions:
-
-**LLIR:**
-```
-result = BOX_INT(i64_val)
-```
-
-**x86-64 MIR (if i64_val fits in 48 bits):**
-```asm
-mov rax, rdi             ; rax = i64_val
-mov rdx, 0xFFFC000000000000  ; rdx = tag prefix
-or rax, rdx              ; rax = tagged value
-```
-
-**x86-64 MIR (if overflow handling is needed):**
-```asm
-mov rax, rdi
-mov rcx, 0xFFFC000000000000
-test rax, 0xFFFF000000000000  ; Check if upper 16 bits are non-zero
-jnz .slow_path           ; Overflow: allocate boxed integer
-or rax, rcx              ; Fast path: tag it
-jmp .done
-.slow_path:
-    call allocate_boxed_int
-.done:
-```
-
-**INV-MIR-002**: Instruction selection must preserve all semantic guarantees from LLIR. No reordering of side effects, no elimination of guards, no incorrect NaN handling.
-
-### 3. Register Allocation
-
-This is the most complex phase in MIR. We must assign physical registers to all virtual registers (from LLIR) while respecting:
-- Register class constraints (GPR vs FPR)
-- Callee-saved vs caller-saved conventions
-- Register pressure (limited number of physical registers)
-- Spill code insertion (when registers are exhausted)
-
-#### 3.1 Allocation Strategy
-
-We use Linear Scan Register Allocation for T1 and T2 (fast, predictable), and Graph Coloring with Iterated Coalescing for T3 (higher quality, slower).
-
-**Linear Scan Algorithm (T1/T2):**
-1. **Compute Live Intervals**: For each virtual register, determine its live range (from definition to last use).
-2. **Sort Intervals**: Sort by start position.
-3. **Allocate Registers**: Iterate through intervals, assigning physical registers from the appropriate register class.
-4. **Spill on Pressure**: If no physical register is available, spill the interval with the furthest endpoint to a stack slot.
-5. **Insert Spill Code**: Insert MOV instructions to spill/reload values.
-
-**Graph Coloring Algorithm (T3):**
-1. **Build Interference Graph**: Nodes are virtual registers; edges connect registers with overlapping live ranges.
-2. **Simplify**: Remove low-degree nodes (easy to color).
-3. **Coalesce**: Merge nodes connected by copy instructions (if they don't create excessive interference).
-4. **Freeze**: If coalescing creates too much interference, freeze the node (give up on coalescing).
-5. **Spill**: If a node cannot be colored, spill it to a stack slot.
-6. **Select Colors**: Assign physical registers (colors) to unspilled nodes.
-7. **Iterate**: Repeat until all nodes are colored or spilled.
-
-#### 3.2 Spill Slot Management
-
-When a virtual register is spilled, it is assigned a stack slot:
-- **Slot Size**: 8 bytes (matching NV-1's 64-bit values).
-- **Slot Alignment**: 8-byte aligned.
-- **Slot Location**: In the method's stack frame, below the frame pointer.
-
-**INV-MIR-003**: Every spilled value must be reloaded before use. The register allocator must insert explicit MOV instructions for spill/reload.
-
-**INV-MIR-004**: Spill slots must be recorded in the safepoint metadata (from LLIR) so the GC can scan them for references.
-
-#### 3.3 Example: Register Allocation
-
-**LLIR (before allocation):**
-```
-v1 = TAG_TO_REF(obj_tagged)
-v2 = REF_OFF_TO_RAW(v1)
-v3 = LOAD(v2)
-v4 = ADD(v3, 1)
-```
-
-**MIR (after Linear Scan, x86-64):**
-```asm
-; v1 -> R9, v2 -> R10, v3 -> RAX, v4 -> RAX (reused)
-mov r9, rdi              ; v1 = obj_tagged (assume obj_tagged is in RDI)
-lea r10, [r9 + 0]        ; v2 = v1 + heap_base (simplified)
-mov rax, [r10]           ; v3 = *v2
-add rax, 1               ; v4 = v3 + 1
-```
-
-**MIR (after spilling, if R10 is unavailable):**
-```asm
-mov r9, rdi
-mov [rsp - 8], r9        ; Spill v1 to stack
-lea rax, [r9 + 0]        ; v2 = v1 + heap_base
-mov [rsp - 16], rax      ; Spill v2 to stack
-mov rax, [rax]           ; v3 = *v2
-add rax, 1               ; v4 = v3 + 1
-```
-
-### 4. Instruction Scheduling
-
-After register allocation, instructions are reordered to maximize Instruction-Level Parallelism (ILP) and minimize pipeline stalls.
-
-#### 4.1 Scheduling Strategy
-
-We use List Scheduling:
-1. **Build Dependency Graph**: Nodes are instructions; edges represent data dependencies, control dependencies, and memory dependencies.
-2. **Compute Priorities**: Assign priorities based on latency, critical path length, and register pressure.
-3. **Schedule Instructions**: Iteratively select the highest-priority ready instruction and emit it.
-4. **Respect Constraints**: Do not reorder instructions across safepoints, guards, or side-effect boundaries.
-
-#### 4.2 Example: Instruction Scheduling
-
-**Before Scheduling:**
-```asm
-mov rax, [r9]            ; Load A (latency: 4 cycles)
-mov rbx, [r10]           ; Load B (latency: 4 cycles)
-add rcx, rax, rbx        ; Add A + B (depends on loads)
-mov rdx, [r11]           ; Load C (latency: 4 cycles)
-mul rdx, rcx             ; Multiply (depends on add and load C)
-```
-
-**After Scheduling (loads moved earlier to hide latency):**
-```asm
-mov rax, [r9]            ; Load A
-mov rbx, [r10]           ; Load B
-mov rdx, [r11]           ; Load C (moved up, independent)
-add rcx, rax, rbx        ; Add A + B (waits for loads)
-mul rdx, rcx             ; Multiply (waits for add and load C)
-```
-
-**INV-MIR-005**: Instruction scheduling must preserve all semantic guarantees. No reordering of memory operations across potential aliases, no reordering across guards or safepoints.
-
-### 5. Final Code Emission
-
-The final phase converts MIR instructions into executable machine code bytes.
-
-#### 5.1 Emission Process
-
-1. **Encode Instructions**: Convert each MIR instruction into its binary encoding (opcode, operands, immediates).
-2. **Resolve Relocations**: Patch branch targets, external symbol addresses, and constant pool references.
-3. **Align Code**: Insert NOPs to align basic blocks and loop headers for optimal instruction fetch.
-4. **Mark Executable**: Set memory protection to executable (via mprotect or equivalent).
-
-#### 5.2 Relocation Types
-
-| Relocation Type | Description | Example |
-|---|---|---|
-| R_BRANCH | Relative branch offset | JMP target_label |
-| R_ABS64 | Absolute 64-bit address | MOV rax, [external_symbol] |
-| R_RIP_REL | RIP-relative addressing (x86-64) | MOV rax, [rip + offset] |
-| R_PAGE | Page-relative addressing (AArch64) | ADR x0, label |
-| R_CONST | Constant pool reference | LDR x0, =constant_value |
-
-#### 5.3 Code Layout
-
-The final CodeBlob layout:
-```
-[ Code Header ]
-  - Method ID
-  - Code size
-  - Safepoint records
-  - Deoptimization maps
-  - GC metadata
-
-[ Executable Code ]
-  - Machine instructions
-
-[ Constant Pool ]
-  - Literal constants (e.g., 64-bit floats, large integers)
-
-[ Exception Table ]
-  - Exception handler ranges and targets
-```
-
-**INV-MIR-006**: All relocations must be resolved before the code is marked executable. Unresolved relocations are a fatal compilation error.
-
-### 6. Integration with AOSS and Region-Based Deoptimization
-
-MIR must respect the AOSS specialization model and region-based deoptimization:
-
-#### 6.1 Guard Code Generation
-
-Guards from LLIR become explicit comparison and branch instructions:
-
-**LLIR:**
-```
-cmp = CMP(layout_id, expected)
-BRANCH_ON_FALSE(cmp, Block_Deopt_1)
-```
-
-**x86-64 MIR:**
-```asm
-cmp rax, 0x4A            ; Compare layout_id with expected
-jne .deopt_stub_1        ; Jump to deopt if not equal
-```
-
-#### 6.2 Deoptimization Stub Emission
-
-Each DEOPT instruction from LLIR becomes a small code stub:
-
-**x86-64 MIR:**
-```asm
-.deopt_stub_1:
-    ; Save all live registers to a known location
-    mov [rsp - 8], rax
-    mov [rsp - 16], rbx
-    ...
-    ; Call runtime deoptimization handler
-    lea rdi, [rsp - 128]   ; Pointer to saved state
-    mov rsi, safepoint_id  ; Safepoint ID
-    call deopt_handler
-```
-
-The deopt_handler uses the safepoint metadata (from LLIR) to reconstruct the interpreter state and resume execution in T0.
-
-#### 6.3 Region Boundaries
-
-MIR must preserve region boundaries for selective invalidation:
-- Each region has a unique Region ID.
-- The region's entry point is marked in the code header.
-- When AOSS invalidates a region, the JIT patches the first few bytes of the region's entry with a jump to the deopt stub.
-
-**INV-MIR-007**: Region boundaries must be preserved in the final code. The JIT must be able to patch a region's entry point without affecting other regions.
-
-### 7. Invariants and Final Contract
-
-Before the code is emitted, MIR must satisfy strict invariants:
-
-| Invariant | Description |
-|-----------|-------------|
-| MIR-INV-01 | Physical Registers: All virtual registers have been assigned to physical registers or spilled to stack slots. |
-| MIR-INV-02 | Register Classes: All operands and results are in valid register classes for the target architecture. |
-| MIR-INV-03 | Calling Convention: All function calls respect the target ABI (callee-saved registers, argument passing, return values). |
-| MIR-INV-04 | Safepoint Metadata: All safepoints have complete, accurate metadata (register maps, stack maps, deopt targets). |
-| MIR-INV-05 | Relocations: All relocations are resolved. No unresolved symbols or branch targets. |
-| MIR-INV-06 | Region Boundaries: All region boundaries are preserved and marked in the code header. |
-| MIR-INV-07 | Semantic Preservation: All semantic guarantees from LLIR (and transitively from VSDG and SoN) are preserved. |
-
-### 8. Example: Complete MIR Pipeline
-
-**LLIR Input:**
-```
-Block_Entry:
-    obj_tagged = VM_Reg_0 (TAGGED)
-    obj_off = TAG_TO_REF(obj_tagged)
-    obj_ptr = REF_OFF_TO_RAW(obj_off)
-    layout_id = LOAD(obj_ptr)
-    expected = CONST(0x4A)
-    cmp = CMP(layout_id, expected)
-    BRANCH_ON_FALSE(cmp, Block_Deopt_1)
-    field_addr = ADD(obj_ptr, 8)
-    val_tagged = LOAD(field_addr)
-    VM_Reg_1 = val_tagged
-    JUMP Block_Exit
-
-Block_Deopt_1:
-    DEOPT(safepoint_id = 7, vm_state = {...})
-
-Block_Exit:
-    ...
-```
-
-**x86-64 MIR Output (after instruction selection, register allocation, and scheduling):**
-```asm
-Block_Entry:
-    ; obj_tagged is in RDI (VM_Reg_0)
-    lea r9, [rdi + 0]              ; obj_off = obj_tagged (simplified)
-    lea r10, [r9 + heap_base]      ; obj_ptr = obj_off + heap_base
-    mov rax, [r10]                 ; layout_id = *obj_ptr
-    cmp rax, 0x4A                  ; Compare with expected
-    jne .deopt_stub_7              ; Deopt if mismatch
-    lea r11, [r10 + 8]             ; field_addr = obj_ptr + 8
-    mov rax, [r11]                 ; val_tagged = *field_addr
-    mov rsi, rax                   ; VM_Reg_1 = val_tagged (in RSI)
-    jmp .exit
-
-.deopt_stub_7:
-    ; Save live registers
-    mov [rsp - 8], rdi
-    mov [rsp - 16], rsi
-    ...
-    lea rdi, [rsp - 128]
-    mov rsi, 7                     ; Safepoint ID
-    call deopt_handler
-
-.exit:
-    ...
-```
-
-**Code Header:**
-```
-CodeHeader {
-    method_id: "foo",
-    code_size: 128,
-    regions: [
-        {id: 1, entry_offset: 0, deopt_stub_offset: 64}
-    ],
-    safepoints: [
-        {id: 7, pc_offset: 48, register_map: [...], stack_map: [...]}
-    ]
-}
-```
-
----
-
-## FFI-1: Polyglot Trampoline and Universal Engine Integration
-
-### 1. The Universal Engine Concept
-
-This is not a single-language VM. It is a universal execution engine that can host multiple language runtimes (JavaScript, Python, Ruby, Lua, custom DSLs, etc.) simultaneously, with near-zero overhead when crossing language boundaries.
-
-The key insight: FFI is not a special case. An FFI call is just another function call in the IR. The trampoline is just another kind of function prologue/epilogue. The same VSDG→SoN→LLIR→MIR pipeline handles everything.
-
-### 2. FFI Trampoline Architecture
-
-#### 2.1 Trampoline Generation (Copy-and-Patch at Compile Time)
-
-Just as T1 uses stencils for baseline compilation, the FFI system uses FFI Stencils for marshaling code.
-
-**FFI Stencil**: A pre-assembled machine code template for converting between NV-1 and an external ABI, with holes for runtime patching.
-
-**Example: JavaScript → C FFI**
-
-JavaScript call: `js_func(c_func, arg1, arg2)`
-
-**Generated Trampoline (x86-64):**
-```asm
-; Marshal arg1 (NV-1 tagged) → C int
-mov rax, [rsp + 16]        ; Load NV-1 arg1
-test rax, 0xFFFC000000000000  ; Check if tagged integer
-jne .slow_path_arg1        ; Not an integer: slow path
-mov rdi, rax               ; rdi = C int (first arg)
-and rdi, 0x0000FFFFFFFFFFFF   ; Extract 48-bit payload
-jmp .marshal_arg2
-.slow_path_arg1:
-    call js_to_c_int_slow      ; Runtime helper for boxed/float/etc.
-    mov rdi, rax
-
-.marshal_arg2:
-; Marshal arg2 (NV-1 tagged) → C pointer
-mov rax, [rsp + 24]        ; Load NV-1 arg2
-test rax, 0xFFFC000000000000
-jne .slow_path_arg2
-mov rsi, rax
-and rsi, 0x0000FFFFFFFFFFFF
-add rsi, heap_base         ; Reconstruct native pointer
-jmp .call_c
-.slow_path_arg2:
-    call js_to_c_ptr_slow
-    mov rsi, rax
-
-.call_c:
-; Call C function
-call [c_func_ptr]          ; Indirect call to C function
-mov rdx, rax               ; Save C return value
-
-; Marshal C int return → NV-1 tagged
-mov rax, rdx
-mov rcx, 0xFFFC000000000000
-or rax, rcx                ; Tag as integer
-ret
-```
-
-#### 2.2 Trampoline Stencil Types
-
-| Stencil Type | Purpose | Example |
-|---|---|---|
-| TAGGED_TO_C_INT | NV-1 integer → C int | JavaScript 42 → C 42 |
-| TAGGED_TO_C_PTR | NV-1 reference → C void* | JavaScript object → C pointer |
-| TAGGED_TO_C_DOUBLE | NV-1 float → C double | JavaScript 3.14 → C 3.14 |
-| C_INT_TO_TAGGED | C int → NV-1 integer | C 42 → JavaScript 42 |
-| C_PTR_TO_TAGGED | C void* → NV-1 reference | C pointer → JavaScript object |
-| C_DOUBLE_TO_TAGGED | C double → NV-1 float | C 3.14 → JavaScript 3.14 |
-| PYTHON_OBJ_TO_TAGGED | Python object → NV-1 | Python int → JavaScript number |
-| TAGGED_TO_PYTHON_OBJ | NV-1 → Python object | JavaScript number → Python int |
-
-#### 2.3 Trampoline Generation Algorithm
-
-At compile time, the FFI system:
-1. **Analyzes the call site**: Determines source language types and target language types.
-2. **Selects stencils**: Chooses the appropriate marshaling stencils for each argument and return value.
-3. **Copies and patches**: Assembles the trampoline by copying stencils and patching holes (e.g., heap base, function pointer, slow-path targets).
-4. **Inserts GC barriers**: If the foreign function may allocate or trigger GC, insert write barriers and safepoints.
-5. **Emits the trampoline**: The trampoline is a small, standalone code blob that can be called like any other function.
-
-**INV-FFI-001**: Every FFI trampoline must be generated at compile time. No runtime code generation for trampolines.
-
-**INV-FFI-002**: Every FFI trampoline must respect the target ABI (calling convention, register usage, stack alignment).
-
-**INV-FFI-003**: Every FFI trampoline must integrate with the safepoint system. If the foreign function may block or allocate, the trampoline must reach a safepoint before the call.
-
-### 3. GC Integration with Foreign Objects
-
-#### 3.1 Foreign Object Pinning
-
-When passing a reference to a foreign function, the object may need to be pinned (prevented from moving) if the foreign code retains the pointer:
-
-**LLIR:**
-```
-obj_tagged = VM_Reg_0
-obj_off = TAG_TO_REF(obj_tagged)
-obj_ptr = REF_OFF_TO_RAW(obj_off)
-PIN(obj_ptr)               ; Prevent GC from moving this object
-CALL_FOREIGN(c_func, obj_ptr)
-UNPIN(obj_ptr)             ; Allow GC to move again
-```
-
-**MIR (x86-64):**
-```asm
-; Pin the object by adding it to a thread-local pin table
-lea rdi, [obj_ptr]
-call gc_pin_object
-
-; Call foreign function
-call [c_func_ptr]
-
-; Unpin the object
-lea rdi, [obj_ptr]
-call gc_unpin_object
-```
-
-**INV-FFI-004**: Pinned objects must be tracked in a thread-local pin table. The GC must scan this table and avoid relocating pinned objects.
-
-#### 3.2 Write Barriers for Foreign Mutations
-
-If a foreign function mutates a heap object (e.g., writes to a field), it must invoke a write barrier:
-
-**C code:**
-```c
-void set_field(void* obj, void* value) {
-    ((uint64_t*)obj)[1] = (uint64_t)value;  // Write to field
-    gc_write_barrier(obj, value);           // Notify GC
-}
-```
-
-The `gc_write_barrier` function updates the remembered set and marks the object as modified for the concurrent collector.
-
-**INV-FFI-005**: Foreign code that mutates heap objects must invoke write barriers. Failure to do so is a correctness violation.
-
-### 4. Exception Translation
-
-Different languages have different exception models. The FFI trampoline must translate exceptions:
-
-**JavaScript → C:**
-- JavaScript exceptions are NV-1 tagged values.
-- C uses return codes or errno.
-- The trampoline catches JavaScript exceptions and converts them to C error codes.
-
-**C → JavaScript:**
-- C uses return codes or setjmp/longjmp.
-- JavaScript uses try-catch with NV-1 exception objects.
-- The trampoline catches C errors and throws JavaScript exceptions.
-
-**Example: C → JavaScript Exception Translation**
-```asm
-; Call JavaScript function
-call js_func
-test rax, rax              ; Check if exception occurred
-jnz .handle_exception
-ret                        ; Normal return
-
-.handle_exception:
-    ; rax contains the exception object (NV-1 tagged)
-    ; Convert to C error code
-    mov rdi, rax
-    call js_exception_to_c_error
-    mov rax, -1                ; Return error code
-    ret
-```
-
-**INV-FFI-006**: Exception translation must preserve the semantic contract of both languages. A JavaScript exception must not silently become a C success code.
-
-**INV-FFI-007**: Cross-language inlining (Universal Engine 6.1) is permitted only when the SemanticCompatibilityMatrix check (FFI-1 section 5) proves exception visibility, ordering, value semantics, resource discipline, GC visibility, and continuation compatibility for the specific call site. An unproven inline is a specification violation even when mechanically cheap.
-
----
-
-### 5. The SemanticCompatibilityMatrix (Corrected Addition)
-
-The Universal Engine section (6.1/6.2) and the trampoline architecture establish that mechanical boundary overhead can approach zero. What the 1.0 text lacked is the formal precondition checklist for when cross-language inlining is legal at all (finding FFI-1, resolved). "Near-zero overhead if semantic adapters are eliminable" requires a proof object that says the adapters ARE eliminable. That proof is the SemanticCompatibilityMatrix, and AOSS must consult it before any cross-language inlining is attempted. If the matrix cannot prove semantic equivalence for a boundary, inlining is aborted and the trampoline remains, regardless of how cheap the mechanical marshaling would be.
-
-**Definition.** For an ordered pair of language contexts (caller L1, callee L2), the matrix is the set of compatibility facts the boundary must establish:
-
-| Dimension | Fact required for inlining | Failure action |
-|---|---|---|
-| Exception visibility | Every exception L2 can raise is either caught inside the callee, or L1 has a handler prepared to catch its translated form; the exception-class mapping is total for the callee's raise set | Abort inline; keep the trampoline's exception adapter |
-| Global-state ordering | L2's writes to state observable by L1 (globals, shared objects, FFI-visible memory) respect L1's evaluation-order expectations; no reordering hazard across the inlined body | Abort inline |
-| Value semantics | The argument and return value domains used at the call site have identical concrete semantics in both languages (integer width/wrap policy, float NaN policy per NV-1 section 4, string encoding, reference identity) | Narrow to the proven domain via specialization, or abort |
-| Resource discipline | Capabilities/authorities the callee requires are a subset of what the caller passes; no ambient authority is acquired inside (UGB-INV-01) | Abort inline |
-| GC visibility | Allocation and safepoint behavior of the inlined body remains compatible with the caller's safepoint map; no foreign thread-state transition remains | Rewrite safepoints during inlining, or abort |
-| Continuation | Control never resumes L2 after a throws path that L1 does not model (no finally/ensure halves escaping the inlined region) | Abort inline |
-
-**Mechanics.** The matrix is computed per call site from the callee's summary (raise set, effect summary, value-domain profile) and the caller's context (handlers in scope, evaluation-order constraints). The ForeignCall node (REVISED section 6) carries source_semantics, target_semantics, and exception_adapter fields precisely so this computation has the data it needs. The AOSS check is a pure function: check_matrix(caller_ctx, callee_summary) returns Ok(inline_plan) or Err(reason). The reason is recorded in the compilation log so a rejected inline is diagnosable.
-
-**Rule.** A cross-language inline without a proven matrix entry is a specification violation, even if it appears to work for the tested cases.
-
----
-
-## T2-T5: Optimizing Tier Specification
-
-### 1. Tier Overview
-
-| Tier | Purpose | Optimization Level | Compilation Strategy |
-|------|---------|-------------------|---------------------|
-| T0 | Interpreter | None | Bytecode interpretation |
-| T1 | Baseline Compiler | None | Stencil copy-and-patch |
-| T2 | Optimizing Compiler | Moderate | VSDG→SoN→LLIR→MIR (first pass) |
-| T3 | Aggressive Optimizer | High | VSDG→SoN→LLIR→MIR (more passes, speculative) |
-| T4 | Trace Compiler | Very High | Extract hot traces, compile with same pipeline |
-| T5 | Whole-Program Optimizer | Maximum | Cross-module optimization, PGO |
-
-### 2. T2: Optimizing Compiler
-
-#### 2.1 Purpose
-T2 is the first optimizing tier. It takes methods that have been identified as hot (via T0/T1 profiling) and compiles them with moderate optimization.
-
-#### 2.2 Compilation Pipeline
-```
-Bytecode → VSDG → SoN → LLIR → MIR → Native Code
-```
-
-#### 2.3 Optimization Passes (Moderate)
-- **VSDG**: Escape analysis, basic constant folding, type inference.
-- **SoN**: GVN, CSE, LICM, basic guard insertion.
-- **LLIR**: SROA (for non-escaping objects), bounds check elimination (if provable).
-- **MIR**: Linear scan register allocation, basic instruction scheduling.
-
-#### 2.4 Compilation Latency Target
-T2 should compile at ~100 KB/s (10x slower than T1, but 10x faster than T3).
-
-#### 2.5 Tier-Up Trigger
-A method tiers up from T1 to T2 when:
-- Back-edge counter exceeds threshold (e.g., 10,000 iterations).
-- Call-site counter exceeds threshold (e.g., 1,000 calls).
-- T1 profiling reveals stable types/shapes (making optimization profitable).
-
-### 3. T3: Aggressive Optimizer
-
-#### 3.1 Purpose
-T3 is the aggressive optimization tier. It takes very hot methods and applies speculative optimization, devirtualization, and advanced transformations.
-
-#### 3.2 Compilation Pipeline
-```
-Bytecode → VSDG → SoN → LLIR → MIR → Native Code
-```
-(Same pipeline as T2, but with more passes and higher optimization thresholds.)
-
-#### 3.3 Optimization Passes (Aggressive)
-- **VSDG**: Advanced escape analysis, shape analysis, alias analysis.
-- **SoN**: PRE, loop unswitching, speculative devirtualization, guard fusion, inlining.
-- **LLIR**: Advanced SROA, write barrier elision, lock elision.
-- **MIR**: Graph coloring register allocation, advanced instruction scheduling, if-conversion.
-
-#### 3.4 Speculative Optimization
-T3 makes speculative assumptions based on profiling data:
-- "This call site always targets ClassA.method" → Devirtualize.
-- "This object always has LayoutID 0x4A" → Specialize field access.
-- "This array is always dense" → Eliminate bounds checks.
-
-If the assumption fails, the code deoptimizes (via region-based deopt) and falls back to T2 or T1.
-
-#### 3.5 Compilation Latency Target
-T3 should compile at ~10 KB/s (10x slower than T2, but produces much faster code).
-
-#### 3.6 Tier-Up Trigger
-A method tiers up from T2 to T3 when:
-- Execution time in T2 exceeds threshold (e.g., 100ms).
-- T2 profiling reveals highly stable types/shapes (making aggressive optimization profitable).
-- The method is on the critical path (e.g., startup, user input handling).
-
-### 4. T4: Trace Compiler
-
-#### 4.1 Purpose
-T4 is the trace-based specialization tier. It identifies hot linear execution paths (traces) across function boundaries and compiles them with extreme optimization.
-
-#### 4.2 Trace Extraction
-The interpreter (T0) or baseline compiler (T1) records execution traces:
-1. Start recording at a hot loop header or function entry.
-2. Record every bytecode instruction executed.
-3. Stop recording at a loop back-edge, function return, or trace length limit.
-
-**Example Trace:**
-```
-Loop header (iteration 1)
-  Load field A
-  Add constant
-  Store field B
-  Call function X
-  Load field C
-  Return
-Loop header (iteration 2)
-  ...
-```
-
-#### 4.3 Trace Compilation
-The trace is converted to VSDG, optimized with the same SoN→LLIR→MIR pipeline, and emitted as native code.
-
-**Key difference**: A trace is a single-entry, single-exit graph with no internal branches (except for loop back-edges). This allows extremely aggressive optimization:
-- No control-flow merging → no phi nodes → simpler GVN.
-- Linear execution → easy LICM and strength reduction.
-- Heavy guard insertion → every type-sensitive operation is guarded.
-
-#### 4.4 Guard Density
-Traces have many guards (one at every type-sensitive operation). If any guard fails, the trace deoptimizes.
-
-**Example:**
-```
-guard1 = GuardLayout(obj, 0x4A)
-val = LoadField(obj, offset_8)  // Specialized load
-guard2 = GuardType(val, TAGGED_INT)
-result = Add(val, 1)            // Specialized add
-guard3 = GuardLayout(obj, 0x4A)  // Redundant, will be fused by SoN
-StoreField(obj, offset_16, result)
-```
-
-SoN's GVN and PRE passes will fuse redundant guards, reducing runtime overhead.
-
-#### 4.5 Compilation Latency Target
-T4 should compile at ~1 KB/s (slowest tier, but produces the fastest code for hot traces).
-
-#### 4.6 Tier-Up Trigger
-A trace is compiled by T4 when:
-- The trace is executed frequently (e.g., 10,000 times).
-- The trace has stable types/shapes (making specialization profitable).
-
-### 5. T5: Whole-Program Optimizer with Supercompilation
-
-#### 5.1 T5's Mandate
-T5 is not just another optimization pass. It is a program transformation engine that can:
-- Apply all 100+ deterministic optimization passes from the taxonomy
-- Perform supercompilation (driving the program with abstract inputs)
-- Perform partial evaluation (specializing with respect to known inputs)
-- Generate residual programs that are faster than any hand-written code
-- Eliminate interpretive overhead entirely for hot paths
-
-#### 5.2 T5 vs T2-T4
-
-| Aspect | T2-T4 | T5 |
-|--------|-------|-----|
-| Scope | Individual methods or traces | Entire program or large subsets |
-| Optimization Strategy | Conventional passes (GVN, PRE, LICM, etc.) | All passes + supercompilation + partial evaluation |
-| Speculation | Speculative devirtualization, type specialization | Full program specialization based on profiling |
-| Compilation Time | Milliseconds to seconds | Minutes to hours (offline) |
-| Code Quality | Good to excellent | Theoretical maximum |
-| Use Case | JIT compilation | Production builds, offline optimization |
-
-#### 5.3 Supercompilation in T5
-
-**What is Supercompilation?**
-
-Supercompilation (pioneered by Valentin Turchin) is a semantics-driven transformation that:
-1. Drives the program with abstract inputs (symbolic values)
-2. Records the resulting execution trace (a "configuration")
-3. Generalizes the configuration to handle concrete inputs
-4. Folds the generalized configuration back into the program
-5. Eliminates all interpretive overhead (no runtime dispatch, no dynamic checks)
-
-**Example:**
-```python
-def power(x, n):
-    if n == 0:
-        return 1
-    else:
-        return x * power(x, n - 1)
-```
-
-After supercompilation with n=3:
-```python
-def power_x_3(x):
-    return x * x * x  # All recursion eliminated, no runtime checks
-```
-
-**Supercompilation in Our Architecture:**
-
-T5 uses supercompilation to transform the VSDG/SoN graph:
-
-**Input VSDG:**
-```
-CALL(power, x, n)
-  if n == 0:
-    return 1
-  else:
-    return x * CALL(power, x, n - 1)
-```
-
-**Supercompilation Process:**
-1. Drive the program with abstract inputs: x = ?, n = 3
-2. Record the execution:
-   - n == 3 → false → x * CALL(power, x, 2)
-   - n == 2 → false → x * x * CALL(power, x, 1)
-   - n == 1 → false → x * x * x * CALL(power, x, 0)
-   - n == 0 → true → return 1
-3. Generalize: Replace 3 with n, but keep the structure
-4. Fold: Generate x * x * x for n = 3
-
-**Output VSDG:**
-```
-; Specialized for n = 3
-result = MUL(x, x)
-result = MUL(result, x)
-RETURN(result)
-```
-
-**Supercompilation Benefits:**
-- Eliminates recursion: Recursive calls are unrolled and simplified
-- Eliminates dispatch: Dynamic dispatch is replaced with direct calls
-- Eliminates interpretive overhead: No runtime type checks, no dynamic binding
-- Produces optimal code: The residual program is as fast as hand-written code
-
-#### 5.4 Partial Evaluation in T5
-
-**What is Partial Evaluation?**
-
-Partial evaluation specializes a program with respect to some known inputs (static inputs), generating a residual program that is faster for the remaining unknown inputs (dynamic inputs).
-
-**Example:**
-```python
-def interpret(program, input):
-    for instruction in program:
-        if instruction.op == "ADD":
-            input = input + instruction.arg
-        elif instruction.op == "MUL":
-            input = input * instruction.arg
-    return input
-```
-
-After partial evaluation with a known program:
-```python
-def specialized_program(input):
-    input = input + 5      # From program[0]
-    input = input * 3      # From program[1]
-    input = input + 2      # From program[2]
-    return input
-```
-
-The interpreter loop is eliminated. The residual program is a direct computation.
-
-**Partial Evaluation in Our Architecture:**
-
-T5 uses partial evaluation to specialize the engine itself:
-- **Input**: The VSDG representation of a method, with some inputs known (e.g., from profiling)
-- **Process**:
-  1. Identify static inputs (e.g., constants, stable types, known call targets)
-  2. Drive the VSDG with these static inputs
-  3. Generate a residual VSDG that only depends on dynamic inputs
-  4. Optimize the residual VSDG with all other passes
-
-**Example:**
-```
-; Original VSDG
-obj = LOAD(obj_ref)
-if obj.layout == 0x4A:
-    val = LOAD_FIELD(obj, offset_8)
-else:
-    val = GENERIC_LOAD(obj, "field")
-result = ADD(val, 1)
-```
-
-After partial evaluation (knowing obj.layout == 0x4A from profiling):
-```
-; Residual VSDG
-obj = LOAD(obj_ref)
-val = LOAD_FIELD(obj, offset_8)  ; Direct field access, no check
-result = ADD(val, 1)
-```
-
-The layout check is eliminated. The residual program is specialized for the known layout.
-
-#### 5.5 T5's Complete Optimization Pipeline
-
-T5 applies every optimization pass in a carefully orchestrated sequence:
-
-**Phase 1: Semantic Analysis (VSDG)**
-- All type analyses: CHA, RTA, VTA
-- All alias analyses: Andersen's, Steensgaard's
-- Escape analysis (comprehensive)
-- Shape analysis (proving data structure invariants)
-- Strictness analysis (if applicable)
-- Partial evaluation (specialize with respect to known inputs)
-- Supercompilation (drive with abstract inputs, generalize, fold)
-
-**Phase 2: Global Optimization (SoN)**
-- All redundancy elimination: GVN, CSE, PRE, LCM
-- All loop optimizations: LICM, unrolling, unswitching, fusion, fission, tiling, interchange, strength reduction, induction variable elimination
-- All control flow optimizations: Jump threading, tail duplication, unreachable code elimination
-- All interprocedural optimizations: Inlining (aggressive), partial inlining, function cloning, dead argument elimination
-- Guard insertion and fusion (comprehensive)
-- Speculative devirtualization (aggressive)
-
-**Phase 3: Representation Commitment (LLIR)**
-- All safety elision: ABCE, null check elimination, write/read barrier elision, lock elision
-- All aggregate optimizations: SROA (comprehensive), scalar replacement
-- All local optimizations: DCE, DSE, copy propagation, LVN, algebraic simplification, strength reduction
-- Representation selection (ARS, comprehensive)
-
-**Phase 4: Physical Realization (MIR)**
-- All register allocation: Graph coloring with iterated coalescing, live range splitting, stack slot coloring
-- All instruction selection: DAG-based pattern matching, target-specific optimizations
-- All instruction scheduling: List scheduling, delay slot filling (if applicable)
-- All peephole optimizations: Target-specific instruction combining
-- All backend optimizations: If-conversion, branch shortening, frame pointer omission
-
-**Phase 5: Whole-Program Optimization**
-- Cross-module inlining: Inline across module boundaries
-- Dead function elimination: Remove unused functions
-- Identical code folding: Merge identical functions
-- Profile-guided optimization: Use profiling data to guide all decisions
-- Link-time optimization: Optimize the entire program as a unit
-
-#### 5.6 T5's Compilation Strategy
-
-T5 is not just "run all passes once." It uses an iterative, fixed-point strategy:
-
-**Iterative Optimization:**
-1. Apply all VSDG passes
-2. Convert to SoN
-3. Apply all SoN passes
-4. If the graph changed, go back to step 1 (VSDG can benefit from SoN optimizations)
-5. Convert to LLIR
-6. Apply all LLIR passes
-7. Convert to MIR
-8. Apply all MIR passes
-9. If any pass made a significant change, go back to step 3 (SoN can benefit from LLIR/MIR optimizations)
-10. Emit final code
-
-**Fixed-Point Detection:**
-
-T5 continues iterating until:
-- No pass makes any change (true fixed point), OR
-- A maximum iteration count is reached (e.g., 10 iterations), OR
-- The improvement falls below a threshold (e.g., < 1% code size reduction)
-
-**Pass Ordering:**
-
-The order of passes matters. T5 uses a heuristically determined order based on:
-- Which passes enable other passes (e.g., inlining enables more inlining)
-- Which passes are most profitable (e.g., supercompilation early, peephole late)
-- Which passes interact well (e.g., GVN before PRE)
-
-#### 5.7 T5's Compilation Latency and Use Cases
-
-**Compilation Latency:**
-
-T5 is offline (not JIT). It is used for:
-- Production builds: Optimize the entire program before deployment (minutes to hours)
-- Idle-time optimization: Optimize during idle periods (e.g., overnight)
-- Profile-guided rebuilds: Rebuild with profiling data after warm-up
-
-**Code Quality:**
-
-T5 produces the theoretical maximum code quality:
-- All interpretive overhead eliminated (via supercompilation)
-- All dynamic checks eliminated (via partial evaluation)
-- All redundancy eliminated (via GVN, PRE, etc.)
-- All loops optimized (via LICM, unrolling, etc.)
-- All functions inlined (where profitable)
-- All registers optimally allocated (via graph coloring)
-
-**Code Size:**
-
-T5 may produce larger code due to:
-- Aggressive inlining (duplicating function bodies)
-- Loop unrolling (duplicating loop bodies)
-- Specialization (multiple versions of functions for different types)
-
-However, T5 can also reduce code size via:
-- Dead code elimination
-- Identical code folding
-- Outlining cold paths
-
-#### 5.8 T5 Integration with the Rest of the Architecture
-
-**T5 and AOSS:**
-T5 uses AOSS's specialization metadata to guide optimization:
-- If AOSS has identified a stable shape, T5 specializes for that shape
-- If AOSS has identified a stable call target, T5 devirtualizes the call
-- If AOSS has identified a stable type, T5 eliminates type checks
-
-**T5 and FFI:**
-T5 can inline FFI trampolines if both languages are compiled by the same engine:
-- The trampoline is eliminated
-- The two languages are merged into a single, optimized function
-- Zero overhead for cross-language calls
-
-**T5 and Region-Based Deopt:**
-T5 respects region boundaries:
-- Each region can be independently optimized
-- If a region's assumptions are invalidated, only that region deopts
-- T5 can fuse regions to reduce guard overhead (via PRE/GVN)
-
-#### 5.9 Example: T5 Supercompilation of a Recursive Function
-
-**Original VSDG:**
-```
-function factorial(n):
-    if n == 0:
-        return 1
-    else:
-        return n * factorial(n - 1)
-```
-
-**T5 Supercompilation with n = 5:**
-1. Drive with abstract input n = 5
-2. Record execution:
-   - n == 5 → false → 5 * factorial(4)
-   - n == 4 → false → 5 * 4 * factorial(3)
-   - n == 3 → false → 5 * 4 * 3 * factorial(2)
-   - n == 2 → false → 5 * 4 * 3 * 2 * factorial(1)
-   - n == 1 → false → 5 * 4 * 3 * 2 * 1 * factorial(0)
-   - n == 0 → true → return 1
-3. Generalize and fold:
-   - Result: 5 * 4 * 3 * 2 * 1 = 120
-
-**Residual VSDG:**
-```
-function factorial_5():
-    return 120  ; All recursion eliminated, computed at compile time
-```
-
-**After MIR:**
-```asm
-mov rax, 120
-ret
-```
-
-The entire recursive function is replaced with a single constant return. This is the power of supercompilation.
-
-### 6. Universal Engine: Cross-Language Optimization
-
-The key insight: T2-T5 can optimize across language boundaries.
-
-#### 6.1 Cross-Language Inlining
-
-If a JavaScript function calls a Python function, and both are compiled by T3, the optimizer can inline the Python function into the JavaScript function:
-
-**Before inlining:**
-```
-JavaScript:
-    call python_func(arg)
-
-Python:
-    return arg + 1
-```
-
-**After inlining (in T3's SoN graph):**
-```
-JavaScript:
-    ; Inline Python function body
-    result = Add(arg, 1)
-```
-
-The FFI trampoline is eliminated. The two languages are now a single, optimized function.
-
-#### 6.2 Cross-Language Specialization
-
-If a JavaScript function always passes an integer to a Python function, T3 can specialize the Python function for integer arguments:
-
-**Before specialization:**
-```
-Python:
-    def add(x, y):
-        return x + y  ; Generic add (handles int, float, string, etc.)
-```
-
-**After specialization (in T3):**
-```
-Python_int_int:
-    ; Specialized for integer arguments
-    result = AddInt(x, y)  ; Fast integer add
-```
-
-The JavaScript caller is updated to call Python_int_int instead of the generic add.
-
-#### 6.3 Near-Zero-Overhead FFI (Corrected)
-
-If both languages are compiled by the same engine, cross-language calls can be inlined with the trampoline eliminated, but only when the SemanticCompatibilityMatrix (FFI-1 section 5) proves the boundary's semantic adapters eliminable for that call site. The previous unqualified claim of "zero overhead" is retracted; the defensible contract is: mechanical overhead approaches zero when, and only when, the matrix proof succeeds. The trampoline remains when:
-- The foreign function is not compiled by this engine (e.g., a native C library).
-- The foreign function is too large or complex to inline.
-- The SemanticCompatibilityMatrix check fails (exception models, evaluation-order hazards, value-domain mismatches, resource discipline, GC visibility, or continuation compatibility).
-
-### 7. Summary: The Complete Tier Structure
-
-| Tier | Purpose | Pipeline | Optimization | Latency | Use Case |
-|------|---------|----------|-------------|---------|----------|
-| T0 | Interpreter | None | None | Fastest | Cold code, startup, deopt fallback |
-| T1 | Baseline Compiler | Stencil | None | Very fast | Warm-up, moderate-use code |
-| T2 | Optimizing Compiler | VSDG→SoN→LLIR→MIR | Moderate | Fast | Hot code, first optimization pass |
-| T3 | Aggressive Optimizer | VSDG→SoN→LLIR→MIR | High | Slow | Very hot code, speculative optimization |
-| T4 | Trace Compiler | VSDG→SoN→LLIR→MIR | Very high | Very slow | Hottest traces, cross-function optimization |
-| T5 | Whole-Program Optimizer | VSDG→SoN→LLIR→MIR | Maximum | Offline | Production builds, PGO |
-
-FFI Trampoline: Generated at compile time using copy-and-patch. Near-zero overhead when both languages are compiled by the same engine.
-
----
-
-## CRITICAL ASSESSMENT
-
-### 🟢 Genuine Strengths (The Good Ideas)
-
-#### 1. Stencil-Based T1 (Copy-and-Patch)
-This is the strongest idea in the entire architecture. Apple's research (Chevalier-Boisvert et al.) has shown this approach can achieve sub-millisecond compilation latency while producing code within 2-3x of optimized JITs. This is real and valuable.
-
-#### 2. Region-Based Deoptimization with Guard Fusion
-Traditional method-level deopt causes "deopt storms" (e.g., V8's historic problems with `arguments` object). Partitioning code into regions and fusing guards via PRE/GVN is a legitimate improvement over current systems.
-
-#### 3. GC-Driven Invalidation
-Offloading shape-transition invalidation to the GC via a thread-local buffer is clever. It keeps the mutator fast and batches invalidations naturally.
-
-#### 4. NaN Boxing + 48-bit Offsets
-Space-efficient. 64-bit values with compressed heap references is proven (JavaScriptCore uses similar schemes).
-
-### 🔴 Critical Flaws (Where the Design Breaks Down)
-
-#### 1. VSDG → Sea of Nodes Conversion is a Fundamental Mistake
-This is the single biggest architectural error. The design acknowledges the overlap in Section 3 but then proposes "Design A: Distinct Optimization Domains" as if naming the problem solves it.
-
-**Reality:** Both IRs track value dependencies, state dependencies, memory effects, and control dependencies. Converting between them:
-- Duplicates optimization infrastructure (you need GVN-like analysis in VSDG AND SoN)
-- Loses information at the boundary (the file admits "implicit global view of state is fragmented")
-- Adds O(N) conversion cost for no optimization benefit
-
-**What real compilers do:** Graal, SpiderMonkey Ion, and V8 TurboFan all use a single graph IR. LuaJIT skips graphs entirely and goes straight to SSA. No production compiler maintains two overlapping graph representations.
-
-**Impact:** T2/T3 compilation latency will be 2-3x slower than competing JITs due to redundant graph construction and conversion overhead.
-
-#### 2. 64-bit Header with Only LayoutID is Unrealistic
-The design commits the entire 64-bit header to LayoutID (62 bits) + GC state (2 bits). This leaves zero room for:
-- Lock bits (for synchronized objects)
-- Identity hash code caching
-- Mark bits for non-side-table GC strategies
-- Forwarding pointers during concurrent evacuation (the design uses 2 bits for this, but 62 bits for a forwarding offset is insufficient for large heaps)
-
-**Real-world comparison:** V8 uses 32-64 bit headers with tag, size, map pointer, and GC bits. Java's HotSpot uses 96-128 bit headers. Your design is too aggressive and will require constant header expansion or complex workarounds.
-
-#### 3. T5 Supercompilation is Academically Interesting but Practically Useless
-The file claims T5 can "eliminate all interpretive overhead" and produce "theoretical maximum" code via supercompilation.
-
-**Reality:** Supercompilation (Turchin's algorithm) only works well for:
-- Pure functional programs
-- Programs with simple recursion
-- Programs without side effects, exceptions, or GC
-
-For real-world code (with loops, exceptions, dynamic dispatch, I/O), supercompilation:
-- Doesn't terminate or takes exponential time
-- Produces code larger than the original due to aggressive unrolling
-- Cannot handle the VSDG/SoN graph's complexity (memory state, guards, deopt points)
-
-**Impact:** T5 will either hang on real programs or produce marginally better code than T3 at 1000x the compilation cost. It's not a "universal optimizer" — it's a research curiosity that doesn't scale.
-
-#### 4. Stencil T1 is Too Rigid
-The "fixed physical map" (first K virtual registers → physical registers) breaks down for:
-- Methods with >K registers (requires spilling, which stencils don't handle well)
-- Complex control flow (stencils are linear, not graph-based)
-- Exception handling (requires dynamic stack unwinding info)
-
-**Real-world comparison:** V8's Maglev and HotSpot's C1 use linear-scan register allocation, which handles arbitrary register counts and control flow. Stencils are great for simple code but degrade quickly.
-
-#### 5. "Polyglot Universal Engine" with "Zero-Overhead FFI" is Misleading
-The design claims cross-language calls can be inlined to zero overhead if both languages are compiled by the same engine.
-
-**Reality:** Different languages have incompatible semantics:
-- Exception models: JavaScript uses try-catch with objects, C uses return codes, Python uses exceptions with tracebacks
-- Memory models: Python has reference counting, JavaScript has tracing GC, Rust has ownership
-- Calling conventions: Different ABIs, different stack layouts
-
-Inlining a Python function into JavaScript requires translating exception handling, GC barriers, and type systems. This is not "zero overhead" — it's a massive engineering effort that produces code slower than a well-optimized FFI trampoline.
-
-### 📊 Realistic Performance Comparison
-
-| Metric | This Design | V8/SpiderMonkey | LuaJIT |
-|--------|-------------|-----------------|--------|
-| T0 Interpreter | Fast (computed goto) | Fast (Ignition) | Very fast (trace-based) |
-| T1 Compilation Latency | **Excellent** (stencils) | Good (Maglev) | N/A |
-| T2/T3 Code Quality | **Mediocre** (due to VSDG→SoN overhead) | Excellent | Excellent |
-| T2/T3 Compilation Latency | **Slow** (dual-graph conversion) | Fast | Very fast |
-| Deopt Overhead | **Good** (region-based) | Poor (method-level) | Poor (trace-level) |
-| Memory Footprint | **High** (AOSS metadata, region maps) | Moderate | Low |
-| Startup Time | **Slow** (complex initialization) | Fast | Very fast |
-| Peak Performance | **70-80% of V8** | 100% | 90-95% of V8 |
-
-### 🎯 What Would Actually Happen
-
-If you built this:
-1. **Months 1-6:** T0 interpreter works well. T1 stencils are fast but hit limitations with complex code.
-2. **Months 6-12:** VSDG→SoN conversion becomes a bottleneck. Compilation latency is 2-3x slower than expected.
-3. **Months 12-18:** AOSS metadata overhead causes memory pressure. Region-based deopt works but guard fusion is hard to implement correctly.
-
-### ✅ Recommendations
-
-If you want to build a competitive JIT:
-1. Drop VSDG. Use a single graph IR (Sea of Nodes or similar). The VSDG→SoN conversion is a net loss.
-2. Expand the object header to 96 or 128 bits. The space savings aren't worth the complexity.
-3. Keep T1 stencils but add a fallback to linear-scan for complex methods.
-
-### 🏁 Final Verdict
-
-**Innovation Score:** 8/10 (stencils, region-based deopt, GC-driven invalidation are genuinely novel)
-
-**Practical Viability:** 4/10 (VSDG→SoN conversion, 64-bit header, T5 supercompilation are showstoppers)
-
----
-
-## REVISED ARCHITECTURE (Post-Critique Corrections)
-
-### What Survives
-
-These remain strong ideas:
-- Register-based VM
-- NaN-boxed value model
-- Stencil/copy-and-patch T1
-- Computed-goto interpreter with superinstructions
-- Polymorphic inline caches
-- Region-based deoptimization
-- Guard fusion
-- Adaptive representation selection
-- AOSS as a real subsystem
-- Polyglot FFI trampolines generated by copy-and-patch
-- T2–T5 sharing the same compiler infrastructure
-- T5 having supercompilation available, but bounded
-
-### What Must Change
-
-These earlier choices are not production-safe as stated:
-- Separate VSDG → Sea of Nodes conversion as mandatory pipeline
-- 64-bit object header containing only LayoutID/GC bits as universal default
-- Raw layout hash as sole correctness identity
-- GC-only delayed invalidation for all specialization dependencies
-- Unbounded T5 supercompilation / "theoretical maximum" claim
-- "Zero-overhead FFI" without qualifying semantic adapters
-- Fixed physical-register-map T1 without fallback
-
-### 1. VSDG Should Not Be a Separate Mandatory Graph IR
-
-The critique is right that a mandatory VSDG → SoN conversion is likely a net loss.
-
-The original Design A had a valid motivation: separate semantic dependence analysis from control-flow optimization. But the implementation should not require two full overlapping graph representations.
-
-**Revised decision:**
-
-Use a single canonical optimizing graph IR, with VSDG as a semantic/dependence view or overlay, not a separate lowering stage.
-
-So instead of:
-```
-Bytecode → VSDG → Sea of Nodes → LLIR → MIR
-```
-
-we use:
-```
-Bytecode / Trace / Foreign frontend
-  → Unified semantic SSA graph
-    with VSDG-style dependence overlays
-  → optimized graph scheduling / restructuring
-  → LLIR
-  → MIR
-```
-
-The "four IR levels" can still exist conceptually, but VSDG is no longer a duplicated physical graph.
-
-**Revised IR roles:**
-
-| Level | Revised role |
-|-------|-------------|
-| VSDG | Dependence/fact overlay on the unified graph: value, state, memory, effects, aliasing, exceptions, specialization assumptions |
-| Sea of Nodes / unified graph | Canonical optimizing SSA graph with control, data, memory, guards, regions |
-| LLIR | Explicit representations, calls, safepoints, deopt maps, lowered memory operations |
-| MIR | Target instructions, register constraints, allocation, scheduling, emission |
-
-This preserves the useful part of VSDG without paying for a second graph.
-
-**New rule:**
-
-VSDG owns analyses, not a separate mandatory representation.
-
-That means:
-- no full VSDG graph construction followed by full SoN reconstruction;
-- no duplicate GVN-like infrastructure;
-- no lossy "global state view fragmented at conversion boundary";
-- no O(N) graph translation just to change terminology.
-
-The compiler can expose a VSDG view for analysis/debugging, but the physical node storage is shared.
-
-**Overlay mutation API (required definition).** The overlay's operational vagueness is resolved here (finding VSDG-OVERLAY, resolved). The contract between the base graph and the overlay is:
-
-1. **Single-writer transactional mutation.** All base-graph mutations occur inside an explicit transaction: Graph::edit(|tx| ...). Outside a transaction the graph and every attached overlay are immutable. There is no side-channel mutation path.
-2. **Overlay reads are illegal inside transactions.** During Graph::edit, overlay queries return Err(OverlayLocked) and assert in debug builds. A pass that needs overlay facts must read them before entering the transaction or re-read after commit. No pass can act on overlay state while that state is stale mid-mutation.
-3. **Event log, not callbacks, during mutation.** The transaction records primitive events (NodeInserted, NodeReplaced, EdgeDeleted, EdgeRetargeted, GuardAdded, RegionSplit) with their operands. It does not invoke overlay logic reentrantly.
-4. **Commit-time synchronization.** On tx.commit(), the graph applies events to registered overlays in event order. Each overlay implements on_event(&Event) and reports is_stale(). An overlay that cannot maintain an invariant incrementally marks itself stale and is rebuilt from the base graph on next read. The overlay is a cache; the base graph is the truth.
-5. **Read-only overlay by default during SoN passes.** Optimization passes (GVN, PRE, LICM, guard fusion) run against the base graph and treat overlays as read-only side facts. A pass that invalidates an overlay fact (e.g., GVN redirects an edge) performs the mutation inside a transaction; commit refreshes the overlay. A pass may also explicitly detach an overlay before a long restructuring phase and re-attach afterwards.
-6. **Versioning.** Both graph and overlay carry monotonic revision counters. overlay.revision() == graph.revision() implies the overlay reflects the current graph. Any consumer verifies freshness in O(1) before trusting overlay facts.
-
-Under this contract, GVN operates on the base graph; overlay facts it consumes are re-validated by revision after its transactions commit. An edge deletion in the base graph is delivered to the overlay as an EdgeDeleted event at commit, so the overlay is never silently out of date across a transaction boundary.
-
-### 2. Layout Hashes Cannot Be Raw Correctness Identities
-
-A hash of a field layout is useful, but a raw hash is not a proof of layout identity.
-
-A collision must never permit:
-```
-object has Layout B
-guard expects Layout A
-hash(A) == hash(B)
-specialized code loads wrong offset
-```
-
-That would be a memory-safety bug.
-
-**Revised decision:**
-
-Use hashes for content addressing and lookup, but the runtime must intern layouts into canonical descriptors.
-
-```
-layout_hash = Hash(canonical_layout_description)
-
-LayoutRegistry:
-    hash → list of canonical LayoutDescriptor*
-```
-
-The actual stored identity should be one of:
-- canonical LayoutDescriptor*,
-- canonical compressed layout handle,
-- canonical 64-bit LayoutID allocated after collision resolution.
-
-The hash may be cached, but it is not the sole identity.
-
-**Correct guard model:**
-
-Fast guard:
-```
-cmp [obj + layout_offset], expected_layout_handle
-jne deopt
-```
-
-Where expected_layout_handle uniquely identifies a canonical layout descriptor.
-
-Hash comparison may be used as a fast reject in some paths, but not as the only correctness check.
-
-**Revised rule:**
-
-Hashes accelerate identity. They do not establish identity.
-
-### 3. The 64-bit Header is Too Aggressive as the Universal Default
-
-A 64-bit header can work in a constrained engine if almost everything is in side tables. But for a general-purpose polyglot engine with:
-- moving GC,
-- concurrent marking,
-- locks,
-- identity hashes,
-- foreign interop,
-- arrays,
-- strings,
-- closures,
-- dynamic object shapes,
-- deoptimization metadata,
-
-a universal 64-bit header becomes a constant fight.
-
-Also, overwriting the header with forwarding information complicates layout guards. If compiled code expects to read a LayoutID from the header, the GC cannot arbitrarily replace that word while mutators are running unless there is a read barrier or a strict phase protocol.
-
-**Revised default header:**
-
-Use a 128-bit default object header.
-
-```
-Object:
-+0   LayoutID / LayoutDescriptor handle     64 bits
-+8   Auxiliary metadata word                64 bits
-+16  Payload begins
-```
-
-```
-Array:
-+0   LayoutID / LayoutDescriptor handle     64 bits
-+8   Auxiliary metadata word                64 bits
-+16  Length + encoding/flags                64 bits
-+24  Elements begin
-```
-
-```
-String (compressed):
-+0   LayoutID / LayoutDescriptor handle     64 bits
-+8   Auxiliary metadata word                64 bits
-+16  Length + encoding/flags                64 bits
-+24  Character data begins
-```
-
-**Auxiliary word:**
-
-The auxiliary word can contain or reference:
-- GC epoch/state,
-- size class,
-- allocation kind,
-- forwarding side-table index,
-- lock state,
-- identity-hash state,
-- remembered-set/card hints,
-- foreign lifetime flags.
-
-Large or rare metadata lives in side tables.
-
-For example:
-```
-aux bits:
-    has_identity_hash?
-    has_lock_sidecar?
-    forwarding_mode?
-    size_class
-    gc_epoch
-    remembered_set_hint
-```
-
-**Optional compact mode:**
-
-A 64-bit header can remain as an optional compact object mode for restricted objects:
-```
-Compact object:
-    no lock sidecar
-    no identity hash unless externalized
-    no foreign pinning
-    fixed layout
-    side-metadata GC only
-```
-
-But it should not be the universal object model.
-
-**Revised rule:**
-
-Default correctness and interoperability first. Compact headers are a specialization, not the foundation.
-
-### 4. GC-Driven Invalidation Must Become GC-Assisted Invalidation
-
-This is a subtle but important correctness issue.
-
-The earlier design said:
-- mutator changes object layout;
-- mutator logs transition;
-- GC later invalidates dependent code.
-
-That is not always safe.
-
-If compiled code depends only on a per-object guard, then changing the object's layout is okay because the next guard check fails.
-
-But if compiled code depends on a global fact such as:
-```
-Layout L is stable
-all objects of kind K have field x at offset O
-call target T cannot change
-array representation R is globally invariant
-```
-
-then waiting until the next GC to invalidate code can be incorrect.
-
-**Revised dependency classes:**
-
-| Dependency type | Example | Invalidation timing |
-|---|---|---|
-| Local guarded fact | obj.layout == L at this access | Guard failure is sufficient |
-| Code-local invariant | this region assumes obj.layout remains L after entry | Region must guard or deopt on mutation |
-| Global dependency | all Layout L objects have field x at offset O | Must invalidate before violating publication |
-
-**Revised invalidation protocol:**
-
-The mutator cannot always defer correctness to GC.
-
-Instead:
-```
-Shape transition / semantic mutation
-  → update object metadata atomically
-  → log transition
-  → if dependency requires immediate invalidation:
-      trigger region invalidation or safepoint handshake
-  → GC later batches cleanup, retirement, and metadata reclamation
-```
-
-The GC can still help with:
-- batching,
-- deduplication,
-- code retirement,
-- stale metadata reclamation,
-- dependency table compaction,
-- finding unreachable code blobs.
-
-But the GC is not the sole correctness mechanism.
-
-**Revised rule:**
-
-GC may batch invalidation work, but semantic publication must not expose invalidated assumptions to unchecked compiled code.
-
-This preserves the original performance idea without making it unsound.
-
-### 5. T1 Stencils Need a Real Fallback Path
-
-Stencil T1 remains one of the best parts of the design.
-
-But the fixed physical map cannot be the whole story.
-
-A pure fixed-map stencil compiler will struggle with:
-- high register pressure,
-- complex control flow,
-- exception regions,
-- OSR entry,
-- debug instrumentation,
-- FFI calls,
-- large methods,
-- uncommon branches,
-- deopt reconstruction.
-
-**Revised T1 structure:**
-
-Use three baseline paths:
-```
-T1a: pure copy-and-patch stencils
-T1b: stencils + simple location allocation / patchable spill slots
-T1c: fallback baseline compiler with linear-scan
-```
-
-**T1a:**
-
-For simple hot methods:
-```
-bytecode → stencil copy → patch immediates/offsets/branches → code
-```
-
-**T1b:**
-
-For larger methods:
-```
-bytecode
-  → stencil selection with operand-location descriptors
-  → patch spill/reload variants
-  → emit code
-```
-
-**T1c:**
-
-For complex methods:
-```
-bytecode
-  → lightweight CFG
-  → simple LLIR
-  → linear-scan
-  → machine code
-```
-
-This avoids the "stencils degrade badly after K registers" failure mode.
-
-**Revised rule:**
-
-T1 is stencil-first, not stencil-only.
-
-That keeps the latency win without making complex methods pathological.
-
-### 6. Polyglot FFI is Not Automatically Zero-Overhead
-
-The critique is right that "zero-overhead FFI" is misleading unless carefully qualified.
-
-There are two different costs:
-- mechanical call overhead
-- semantic adaptation overhead
-
-The engine can often eliminate the first. It cannot magically eliminate the second.
-
-**Mechanical overhead** includes:
-- register moves,
-- ABI adaptation,
-- stack rearrangement,
-- boxing/unboxing,
-- trampoline call/return,
-- handle setup.
-
-Copy-and-patch trampolines are excellent for reducing this.
-
-**Semantic overhead** includes:
-- exception translation,
-- object lifetime translation,
-- foreign memory ownership,
-- dynamic type conversion,
-- traceback preservation,
-- mutation barriers,
-- thread-state transitions,
-- safepoint coordination,
-- reference-counting ↔ tracing-GC bridging,
-- capability/security checks.
-
-These are real semantics. They cannot be optimized away unless proven unnecessary.
-
-**Revised FFI model:**
-
-The universal engine should represent foreign calls as explicit semantic nodes:
-```
-ForeignCall {
-    target_abi,
-    source_semantics,
-    target_semantics,
-    argument_adapters,
-    return_adapter,
-    exception_adapter,
-    lifetime_policy,
-    gc_safepoint_policy,
-    memory_effect_summary
-}
-```
-
-If both sides are lowered into the same semantic graph and adapters are proven redundant, the call may inline to near-zero overhead. Otherwise, the trampoline remains.
-
-**Correct claim:**
-
-Not: "Polyglot FFI is zero overhead."
-
-But: "Polyglot calls use the same compiler infrastructure, and mechanical boundary overhead can approach zero when semantic adapters are eliminable."
-
-That is the defensible version.
-
-### 7. T5 Supercompilation Must Be Bounded and Selective
-
-The critique is right that unbounded supercompilation as a general "ultimate optimizer" is not realistic.
-
-Supercompilation is powerful, but it has severe practical issues:
-- nontermination,
-- explosive specialization,
-- huge residual code,
-- difficulty with effects,
-- difficulty with exceptions,
-- difficulty with foreign calls,
-- poor cost predictability.
-
-So T5 should not be "run supercompilation on everything until maximum optimization."
-
-**Revised T5:**
-
-T5 is an offline or idle-time portfolio optimizer with access to every deterministic pass, including:
-- whole-program analysis,
-- aggressive inlining,
-- partial evaluation,
-- bounded supercompilation,
-- deforestation/fusion,
-- specialization,
-- global code layout,
-- identical code folding,
-- cross-language optimization,
-- profile-guided restructuring.
-
-But every aggressive transformation has a budget.
-
-**Supercompilation constraints:**
-
-T5 supercompilation should require:
-- fuel limit
-- residual code size limit
-- specialization depth limit
-- termination/generalization checks
-- effect boundary restrictions
-- deopt/exception compatibility
-- profitability check
-- fallback to ordinary optimization
-
-**Good targets:**
-- pure numeric kernels,
-- parser/interpreter loops with known program structure,
-- small recursive functions,
-- DSL interpreters,
-- format serializers/deserializers,
-- known immutable data transformations,
-- monomorphic call chains,
-- stable FFI adapter chains.
-
-**Bad targets:**
-- arbitrary effectful application code,
-- highly dynamic megamorphic call sites,
-- foreign calls with unknown behavior,
-- exception-heavy code,
-- large loops with unpredictable exits,
-- code whose residual size explodes.
-
-**Revised T5 rule:**
-
-Supercompilation is a tool in T5, not the definition of T5.
-
-And we should explicitly retract: "theoretical maximum code quality." That is not a serious production claim.
-
-### 8. Revised Tier Structure
-
-The tiers should be understood as different budgets and frontends over the same engine, not separate compilers.
-
-```
-T0: Interpreter
-T1: Stencil baseline
-T2: Fast optimizing method compiler
-T3: Aggressive optimizing method/region compiler
-T4: Trace frontend using same optimizer
-T5: Offline / idle whole-program portfolio optimizer
-```
-
-**T0:**
-- computed goto;
-- superinstructions;
-- PICs;
-- lightweight type/layout feedback;
-- bytecode verification and profiling;
-- deopt fallback target.
-
-**T1:**
-- stencil-first;
-- copy-and-patch bytecode to machine code;
-- optional simple location allocation;
-- fallback linear-scan baseline for complex methods;
-- region metadata emitted from the start.
-
-**T2:**
-- unified graph IR;
-- cheap GVN/CSE;
-- simple escape analysis;
-- simple ARS;
-- guard insertion/fusion;
-- limited inlining;
-- linear-scan allocation.
-
-Goal: good code quickly.
-
-**T3:**
-- same graph IR;
-- stronger alias/escape analysis;
-- speculative devirtualization;
-- AOSS specialization;
-- partial escape analysis;
-- loop optimizations;
-- stronger ARS;
-- graph-coloring or advanced split/live-range allocation when profitable.
-
-Goal: hot code fast.
-
-**T4:**
-- trace frontend;
-- records hot cross-function paths;
-- lowers into same graph IR;
-- optimized as a specialized region;
-- exits guarded;
-- not necessarily "above" T3.
-
-Goal: specialize hot paths that method compilation handles poorly.
-
-**T5:**
-- whole-program or large-subprogram optimizer;
-- all deterministic passes available;
-- bounded partial evaluation;
-- bounded supercompilation;
-- cross-language semantic inlining where legal;
-- global code layout;
-- profile-guided specialization;
-- offline/idle-time only.
-
-Goal: maximum practical improvement under explicit budgets.
-
-### 9. Revised Architecture Summary
-
-The corrected architecture is:
-
-```
-┌─────────────────────────────┐
-│ UGB / language frontends     │
-│ bytecode / traces / FFI      │
-└──────────────┬──────────────┘
-               │
-               T0 interpreter
-               │
-               T1 stencil baseline
-               │
-               ▼
-┌────────────────────────────────────┐
-│ Unified optimizing graph IR         │
-│                                    │
-│ - SSA values                       │
-│ - control/effect/memory edges       │
-│ - VSDG-style dependence overlays    │
-│ - AOSS facts/guards/dependencies    │
-│ - region/deopt metadata             │
-└────────────────┬───────────────────┘
-                 │
-                 LLIR
-                 │
-                 MIR
-                 │
-                 native code
-```
-
-VSDG survives as a semantic discipline, not a duplicated graph stage.
-
-T5 survives as a budgeted portfolio optimizer, not an unbounded academic transformation engine.
-
-The object model survives, but with a more realistic default header.
-
-FFI survives, but with explicit semantic adapters.
-
-### 10. Updated Decision Ledger
-
-| Subsystem | Previous direction | Revised direction |
-|---|---|---|
-| VSDG | Separate IR before SoN | Dependence/fact overlay on unified graph |
-| SoN | Separate graph target | Canonical optimizing graph |
-| Layout identity | Raw layout hash | Interned canonical layout handle, hash-assisted |
-| Object header | 64-bit universal header | 128-bit default, optional compact mode |
-| GC invalidation | GC-driven delayed invalidation | GC-assisted; immediate publication safety where required |
-| T1 | Fixed stencil map only | Stencil-first with T1b/T1c fallback |
-| FFI | "Zero-overhead" polyglot | Near-zero mechanical overhead when semantic adapters eliminable |
-| T5 | Ultimate supercompiler | Offline portfolio optimizer with bounded supercompilation |
-| Tier compiler sharing | Partly specified | Explicitly one shared compiler core |
-| Region deopt | Keep | Keep, but tie to precise dependency publication rules |
-
-### Bottom Line
-
-The critique is correct that the earlier design, if implemented literally, would probably lose to mature production JITs.
-
-But the architecture can be made much more competitive by making these changes:
-1. Drop mandatory VSDG → SoN conversion.
-2. Use one canonical graph IR with VSDG-style overlays.
-3. Use canonical layout descriptors, not raw hashes, for correctness.
-4. Use 128-bit default headers or a fully specified side-metadata protocol.
-5. Make invalidation publication-safe, not merely GC-delayed.
-6. Keep stencil T1, but add fallback baseline compilation.
-7. Treat polyglot FFI as semantic adaptation, not just ABI marshaling.
-8. Make T5 powerful but bounded.
-
----
-
-## OSR-1: On-Stack Replacement Protocol Specification
-**Version 1.0 · Core Execution Contract**
-
-### 1. Fundamental Model & Triggers
-OSR allows the engine to transfer execution from a lower tier (T0/T1) to a higher tier (T2/T3/T4) *while a method is actively executing*, without waiting for the method to return.
-
-#### 1.1 OSR Trigger Points
-- **T0 (Interpreter)**: Back-edge counters (for loops) and call-site counters. When a threshold is crossed, the interpreter invokes the OSR trampoline.
-- **T1 (Stencil Baseline)**: T1 stencils contain a relative jump from each loop back-edge to the CodeBlob's single shared OSR Trampoline Stub (see OSR-1 section 6). The stub, not the stencil, owns the counter, which lives in the Metadata Pool. If tripped, the stub invokes trigger_osr.
-- **T2/T3**: Generally do not trigger OSR to higher tiers; they rely on standard method-entry tier-ups or trace recording (T4).
-
-#### 1.2 The OSR Target
-The target of an OSR transition is a specific **Bytecode PC** (usually a loop header or a hot call site). The compiler must generate a specialized entry point that accepts the interpreter's state and transitions it into the optimized graph's state.
-
----
-
-### 2. The OSR Entry Node (Unified Graph IR)
-In the Unified Graph IR, OSR is not a magical runtime hack; it is a first-class control-flow construct.
-
-#### 2.1 The `OSR_ENTRY` Block
-For every bytecode PC that is a valid OSR target, the compiler generates a special basic block: `OSR_ENTRY_<pc>`.
-- **Inputs**: A single pointer to the current VM frame (`vm_frame_ptr`).
-- **Outputs**: The initial values for all variables that are **live** at the target bytecode PC.
-- **Control Flow**: It acts as a predecessor to the target block (e.g., the loop header).
-
-#### 2.2 Integration with Loop Phis
-When OSR-ing into a loop, the loop header contains Phi nodes (φ) merging values from the pre-header and the loop back-edge. 
-The `OSR_ENTRY` block acts as a "virtual pre-header." It extracts the current values from the VM frame and feeds them directly into the loop's Phi nodes, initializing the loop's state for the optimized code.
-
----
-
-### 3. State Mapping & ARS Integration (The Hard Part)
-This is where OSR interacts with Adaptive Representation Selection (ARS). T0 stores everything as 64-bit `TAGGED` (NaN-boxed) values. T2/T3 may expect unboxed `I64`, `F64`, or `REF_OFF` values.
-
-#### 3.1 Extraction and Conversion
-The `OSR_ENTRY` block must emit instructions to load the VM frame slots and convert them to the representations expected by the optimized graph.
-```text
-; Example: T3 expects an unboxed float (F64) for variable v1
-v1_tagged = LOAD_VM_FRAME(vm_frame_ptr, offset_0)
-v1_f64 = TAG_TO_F64(v1_tagged)  ; Extract binary64
-```
-
-#### 3.2 Representation Mismatch Guards
-What if T3 assumed `v1` is always a float, but at the exact moment of OSR, the VM frame holds an integer? 
-We cannot silently corrupt the execution. The `OSR_ENTRY` block must emit a **Guard**:
-```text
-v1_tagged = LOAD_VM_FRAME(vm_frame_ptr, offset_0)
-v1_is_float = CHECK_TAG(v1_tagged, FLOAT_TAG)
-GUARD(v1_is_float, deopt_osr_mismatch) ; Deopt if assumption fails
-v1_f64 = TAG_TO_F64(v1_tagged)
-```
-If the guard fails, execution deoptimizes back to T0. T0 will resume interpretation. (The engine must track "OSR deopt failures" to prevent infinite recompilation loops).
-
----
-
-### 4. Guard Handling & Control Flow at OSR Entry
-When we OSR into the middle of a method, we bypass the method's normal entry point. This means we bypass the **Region Entry Guards** (e.g., `obj.layout == X`).
-
-#### 4.1 The Dominator Guard Injection
-We cannot execute specialized operations (like direct field loads) without verifying their assumptions. 
-During the VSDG/SoN lowering phase, the compiler queries the graph: *"What guards dominate the OSR target block?"*
-The compiler then **injects those exact guards** into the `OSR_ENTRY` block.
-
-```text
-OSR_ENTRY_loop_header:
-  ; 1. Extract state & check representations (ARS)
-  obj_tagged = LOAD_VM_FRAME(...)
-  GUARD_TAG(obj_tagged, REF_TAG, deopt_mismatch)
-  obj_off = TAG_TO_REF(obj_tagged)
-  
-  ; 2. Re-execute dominating region guards
-  obj_ptr = REF_OFF_TO_RAW(obj_off)
-  layout_id = LOAD(obj_ptr)
-  GUARD(layout_id == 0x4A, deopt_layout_changed) ; Re-check layout!
-  
-  ; 3. Jump to the actual loop header
-  JUMP loop_header
-```
-This ensures that even though we entered via the side door, all semantic assumptions remain mathematically proven.
-
----
-
-### 5. LLIR & MIR Lowering
-#### 5.1 LLIR Lowering
-In LLIR, the `OSR_ENTRY` block is lowered into explicit memory loads from the VM frame, explicit conversion instructions (`UNBOX_*`, `TAG_TO_*`), and explicit guard branches. 
-- **Invariant OSR-LLIR-01**: Every live variable at the OSR PC must have a corresponding `LOAD_VM_FRAME` and conversion sequence in the `OSR_ENTRY` block.
-- **Invariant OSR-LLIR-02**: The `OSR_ENTRY` block must end with a jump to the target block or its immediate dominator.
-
-#### 5.2 MIR Lowering & The OSR Stub
-In MIR, the `OSR_ENTRY` block becomes a physical **OSR Stub** in the code cache.
-- The Register Allocator treats the `OSR_ENTRY` block as a root. It allocates physical registers for the unboxed values.
-- The stub ends with a jump to the optimized loop's physical address.
-- **Safepoint Metadata**: The OSR stub itself is a safepoint. If a GC happens exactly while the OSR stub is executing (rare, but possible), the GC must know how to scan the VM frame.
-
----
-
-### 6. T1 Stencil OSR Mechanism
-T1 uses Copy-and-Patch stencils, so it doesn't have a graph to insert `OSR_ENTRY` blocks into. How does T1 do OSR?
-
-#### 6.1 The T1 OSR Trampoline (Corrected: Stencil Purity)
-
-The 1.0 mechanism embedded a 32-bit counter inside the T1 stencil code stream. That causes a stencil-pool explosion and is corrected here (finding T1-OSR, resolved).
-
-A counter in the code stream requires pre-compiled "stencil-with-counter" variants for every register mapping and spill state that a back-edge can occur in. The Stencil Pool grows combinatorially with the fixed physical map width, destroying the memory footprint and startup advantages of copy-and-patch.
-
-The corrected mechanism keeps stencils pure and moves the counter outside them:
-
-1. **Pure stencils**: a stencil contains no counters and no counter increment code. Its back-edge terminator is a relative jump to the CodeBlob's OSR Trampoline Stub. Stencil selection remains a pure function of the bytecode operand locations.
-2. **Shared OSR Trampoline Stub**: each T1 CodeBlob carries exactly one OSR Trampoline Stub at its end, emitted once per blob during T1 assembly, not per stencil instance. The stub saves caller-saved physical registers, loads the back-edge counter from the method's Metadata Pool entry, decrements it, and, on trip, calls trigger_osr(method_id, bytecode_pc, vm_frame_ptr) with the metadata-supplied PC. On non-trip, it restores registers and jumps back to the loop head through a patchable back-link.
-3. **Counter in the Metadata Pool**: the counter is a writable 32-bit slot in the Metadata Pool, addressed by the stub. It is thread-local (PROF-1 section 3.1) and needs no atomicity.
-4. **Post-OSR patching**: after T2 emits the OSR Stub, the runtime patches the T1 back-edge jump to target the T2 OSR Stub directly. The T1 trampoline and its metadata counter become cold and are reclaimed by the Code Cache sweeper (CODE-1 section 7).
-
-Pool accounting: stencils per bytecode opcode remain O(operand-location variants). The OSR mechanism adds one stub per CodeBlob and one metadata slot per loop, both O(methods), not O(variants).
-
-### 7. Deoptimization from OSR Code
-If the optimized (OSR-compiled) code hits a failing guard *inside* the loop, it must deoptimize back to T0.
-
-#### 7.1 State Reconstruction
-The deoptimization mechanism is identical to standard deopt, but with one caveat: the physical registers now hold **unboxed** values (e.g., `F64`), while T0 expects **tagged** values (`TAGGED`).
-- The Safepoint Map (generated in LLIR) explicitly records the representation of every physical register at the deopt PC.
-- The Deopt Stub reads the map, sees that `FPR_F0` holds an `F64`, and emits the boxing logic (`F64_TO_TAG`) before writing the value back to the T0 VM frame.
-
----
-
-### 8. OSR Invariants
-To guarantee correctness, the following invariants must hold:
-
-| ID | Invariant |
+| Requirement | Specification |
 |---|---|
-| **OSR-INV-01** | **State Completeness**: The `OSR_ENTRY` block must extract and convert *every* variable that is live at the target bytecode PC. No live VM value may be left uninitialized. |
-| **OSR-INV-02** | **Guard Dominance**: The `OSR_ENTRY` block must re-evaluate all guards that dominate the target PC in the optimized graph. Specialized operations must never execute without their assumptions being verified post-OSR. |
-| **OSR-INV-03** | **Representation Safety**: If ARS selects an unboxed representation for an OSR live variable, a type-check guard must be emitted in the `OSR_ENTRY` block. Mismatches must deoptimize, never corrupt. |
-| **OSR-INV-04** | **Deopt Reversibility**: The safepoint map for any PC reachable from an `OSR_ENTRY` block must accurately map physical unboxed registers back to tagged VM frame slots. |
-| **OSR-INV-05** | **No Infinite OSR Loops**: If an OSR transition immediately deoptimizes due to a representation/guard mismatch at the entry block, the runtime must mark the method/PC as "OSR-unstable" and prevent further OSR attempts for that specific profile. |
-| **OSR-INV-06** | **Stencil Purity**: T1 stencils must not contain profiling counters, OSR state, or per-method writable data. All counters live in the Metadata Pool and are accessed only through shared stubs. A stencil variant created solely to host a counter is a specification violation. |
+| **Domain** | P_valid: The set of well-typed, name-resolved source programs post-front-end. |
+| **Codomain** | G_IR: The set of valid ET-SoN graphs. |
+| **Definitions** | G = (N, E, Σ, Γ). N: Nodes. E: Edges. Σ: Node signatures. Γ: Global type/effect environment. |
+| **Preconditions** | The source program P has passed lexical, syntactic, and static semantic analysis. |
+| **Postconditions** | The resulting graph G satisfies Valid_IR(G) (defined in 6.6). |
+| **Invariants** | Type consistency, effect kind consistency, control-flow well-formedness, state-token well-formedness, schedulability, effect-kind monotonicity, FP-flag validity. |
+| **Relations** | Data dependence (→_d), control dependence (→_c), state dependence (→_s), exception dependence (→_except). |
+| **Failure behavior** | If P ∉ P_valid, the front-end rejects P. If IR construction encounters an unresolvable structural contradiction, it emits an InternalCompilerError. |
+| **Complexity** | Construction: O(|V_s| · |R| + |E_s|) time and space, where V_s, E_s are source AST nodes and edges, |R| is region-class count. |
+| **Correctness** | ⟦P⟧_S = ⟦Lower(G)⟧_T. The IR must preserve the observational equivalence of the source program. |
+
+### 6.3 Graph Structure
+
+The IR is a directed graph G = (N, E).
+
+**Node partition.** N = N_pure ∪ N_ctrl ∪ N_eff, disjoint.
+
+**Edge partition.** E = E_data ∪ E_ctrl ∪ E_state ∪ E_except, disjoint.
+
+- E_data ⊆ N × N — data flow.
+- E_ctrl ⊆ N_ctrl × N_ctrl — control flow.
+- E_state ⊆ N_eff × N_eff — state-token flow (memory and synchronization ordering).
+- E_except ⊆ N_eff × N_ctrl — exceptional control flow (only from Invoke/Throw to handler Regions).
+
+**State-token partitioning.** State tokens are not global. They are partitioned by *region class* r ∈ R, where R is a finite set determined by alias analysis. Each effectful node n declares, for each region class r it may touch, whether its interaction is read, write, or atomic with a given ordering. The state-token edges are therefore per-region: for each region class r that n touches, n has one state-in_r and one state-out_r.
+
+This means the state subgraph is a set of parallel chains, one per region class, threaded through effectful nodes that touch that region. Independent regions do not serialize each other.
+
+**State Phis.** At each Region node (control merge), for each region class r, there is a corresponding state-Phi_r node that merges the incoming state tokens from each predecessor. State-Phis are themselves effectful nodes with effect kind {MemRead} (they are pure observers of the state, not modifiers).
+
+### 6.4 Type System and Effect Lattice
+
+**Data types** T: standard lattice with subtyping ≤_T. Includes at minimum:
+- Integer types: Int8, Int16, Int32, Int64, UInt8, UInt16, UInt32, UInt64
+- Floating-point types: Float32, Float64
+- Boolean: Bool
+- Pointer types: Ptr<T> for any T
+- Aggregate types: Tuple<T₁, …, Tₙ>, Array<T, n>
+- Function types: Fn<T_args → T_ret>
+- State token type: State_r for each region class r
+
+Subtyping rules: standard structural subtyping for aggregates, nominal subtyping for user-defined types.
+
+**Effect lattice.** Let K = {MemRead, MemWrite, Alloc, Call, Trap, Barrier} be the finite set of primitive effect kinds. An effect is a subset E ⊆ K. The effect lattice is the powerset lattice:
+
+    L_ε = (℘(K), ⊆, ∪, ∩, ∅, K)
+
+- ⊥ = ∅ (pure)
+- ⊤ = K
+- Join = union, meet = intersection
+
+MemRead and MemWrite are incomparable by construction. This is not a design choice; it is a consequence of the powerset structure.
+
+**Node signatures.** Every node n has a signature Σ(n) = (τ⃗_in, τ⃗_out, E, F), where:
+
+- τ⃗_in, τ⃗_out ∈ T* — data types.
+- E ∈ ℘(K) — the effect kind of n.
+- F — additional flags (defined per node class below).
+
+If E = ∅, n has no state-token edges. If E ≠ ∅, n has one state-in_r and state-out_r for each region class r it touches.
+
+**Conflict relation.** The lattice order does not determine ordering requirements. Ordering is determined by a separate relation Conflict(n₁, n₂) ∈ {true, false}, defined as:
+
+    Conflict(n₁, n₂) =
+        MayAlias(region(n₁), region(n₂)) ∧
+        (MemWrite ∈ E(n₁) ∨ MemWrite ∈ E(n₂)) ∧
+        (MemRead ∈ E(n₁) ∨ MemRead ∈ E(n₂))
+        ∨ (Barrier ∈ E(n₁) ∨ Barrier ∈ E(n₂))
+        ∨ AtomicConflict(n₁, n₂)
+
+where:
+- MayAlias(r₁, r₂) is provided by the alias-analysis subsystem.
+- AtomicConflict(n₁, n₂) encodes the C11/Java memory-ordering constraints for atomic operations:
+  - If either is atomic with ordering ∈ {acquire, release, seq_cst}, they conflict.
+  - If both are relaxed atomics touching the same location, they conflict.
+  - Otherwise, they do not conflict.
+
+Two nodes require a state edge between them if and only if they conflict. State edges are added during IR construction based on this relation; they are not added between non-conflicting nodes.
+
+This separates the *effect kind* (what a node does, for analysis) from the *ordering requirement* (what must be sequenced, for correctness).
+
+### 6.5 Node Semantics
+
+#### Control nodes (N_ctrl)
+
+- **Start.** Produces initial arguments and the initial state tokens s₀_r for each region class r. E = ∅. Signature: Σ(Start) = (∅, (τ⃗_args, State_r₁, …, State_rₖ), ∅, ∅).
+
+- **Region(c₁, …, cₖ).** Control merge. E = ∅. Signature: Σ(Region) = ((Ctrl, …, Ctrl), Ctrl, ∅, ∅).
+
+- **Phi(region, v₁, …, vₖ).** Data merge. E = ∅. Signature: Σ(Phi) = ((Ctrl, τ, …, τ), τ, ∅, ∅).
+
+- **StatePhi_r(region, s₁, …, sₖ).** State merge for region class r. E = {MemRead}. The output state token is the join of the inputs; no memory is modified. Signature: Σ(StatePhi_r) = ((Ctrl, State_r, …, State_r), State_r, {MemRead}, ∅).
+
+- **If(c, b).** Produces two control outputs. E = ∅. Signature: Σ(If) = ((Ctrl, Bool), (Ctrl, Ctrl), ∅, ∅).
+
+- **Return(c, v⃗, s⃗).** Terminates with values. E = ∅. Signature: Σ(Return) = ((Ctrl, τ⃗_ret, State_r₁, …, State_rₖ), ∅, ∅, ∅).
+
+- **Stop(c, s⃗).** Terminates without values (void). E = ∅. Signature: Σ(Stop) = ((Ctrl, State_r₁, …, State_rₖ), ∅, ∅, ∅).
+
+#### Pure computation nodes (N_pure)
+
+Integer, floating-point, boolean, cast, and aggregate construction/destruction nodes. E = ∅.
+
+**Integer operations.** Add, Sub, Mul, Div, Rem, And, Or, Xor, Shl, Shr. Standard wraparound semantics for overflow unless the source language specifies otherwise. Division by zero is undefined behavior (traps in checked mode).
+
+**Floating-point operations.** Add, Sub, Mul, Div, Sqrt, Fma, Neg, Abs, Min, Max, Compare. Every FP node carries a flag set F ⊆ {NSZ, NINF, NNAN, ARCP, CONTRACT, REASSOC, AFN}. The semantics:
+
+- F = ∅: strict IEEE 754. All exceptions visible, no reassociation, no contraction, signed zeros distinguished, NaNs and infinities preserved.
+- Each flag f ∈ F licenses a specific set of transformations:
+  - NSZ (No Signed Zeros): +0 and -0 are interchangeable.
+  - NINF (No Infinities): infinities do not arise.
+  - NNAN (No NaNs): NaNs do not arise.
+  - ARCP (Allow Reciprocal): 1.0/x may be replaced by a reciprocal approximation.
+  - CONTRACT: expressions may be contracted (e.g., a*b+c → fma(a,b,c)).
+  - REASSOC: reassociation is permitted.
+  - AFN (Approximate Functions): approximate versions of sin, cos, exp, etc. are permitted.
+  - AFN implies all other flags.
+- The default for source-level FP operations is F = ∅ unless the source language explicitly opts into relaxed semantics.
+
+**Cast operations.** IntToFloat, FloatToInt, IntCast (widening/narrowing), PtrCast. Truncation is defined by the source language (usually low-bit truncation for integers, undefined for out-of-range float-to-int).
+
+**Aggregate operations.** TupleExtract, TupleInsert, ArrayGet, ArraySet.
+
+#### Effectful nodes (N_eff)
+
+- **Load(s⃗_in, p).** Reads memory at p. E = {MemRead}. Produces value v and s⃗_out. The state-out tokens equal the state-in tokens for all region classes except the one containing p's target; for that region, s_out reflects the read (observationally identical to s_in, but the edge enforces ordering against intervening writes). Signature: Σ(Load) = ((State_r₁, …, State_rₖ, Ptr<T>), (State_r₁, …, State_rₖ, T), {MemRead}, ∅).
+
+- **Store(s⃗_in, p, v).** Writes v to p. E = {MemWrite}. Produces s⃗_out where the region containing p is updated. Signature: Σ(Store) = ((State_r₁, …, State_rₖ, Ptr<T>, T), (State_r₁, …, State_rₖ), {MemWrite}, ∅).
+
+- **AtomicLoad(s⃗_in, p, ord).** E = {MemRead, Barrier}. ord ∈ {relaxed, acquire, seq_cst}. Signature: Σ(AtomicLoad) = ((State_r₁, …, State_rₖ, Ptr<T>), (State_r₁, …, State_rₖ, T), {MemRead, Barrier}, {ord}).
+
+- **AtomicStore(s⃗_in, p, v, ord).** E = {MemWrite, Barrier}. ord ∈ {relaxed, release, seq_cst}. Signature: Σ(AtomicStore) = ((State_r₁, …, State_rₖ, Ptr<T>, T), (State_r₁, …, State_rₖ), {MemWrite, Barrier}, {ord}).
+
+- **AtomicRMW(s⃗_in, p, v, op, ord).** E = {MemRead, MemWrite, Barrier}. op ∈ {add, sub, and, or, xor, xchg, min, max}. ord ∈ {relaxed, acquire, release, acq_rel, seq_cst}. Signature: Σ(AtomicRMW) = ((State_r₁, …, State_rₖ, Ptr<T>, T), (State_r₁, …, State_rₖ, T), {MemRead, MemWrite, Barrier}, {op, ord}).
+
+- **CompareExchange(s⃗_in, p, expected, desired, succ_ord, fail_ord).** E = {MemRead, MemWrite, Barrier}. succ_ord, fail_ord ∈ {relaxed, acquire, release, acq_rel, seq_cst}. Signature: Σ(CompareExchange) = ((State_r₁, …, State_rₖ, Ptr<T>, T, T), (State_r₁, …, State_rₖ, T, Bool), {MemRead, MemWrite, Barrier}, {succ_ord, fail_ord}).
+
+- **Allocate(s⃗_in, size, align).** E = {Alloc}. Produces pointer and s⃗_out. The allocated memory is in a fresh region class (determined by escape analysis). Signature: Σ(Allocate) = ((State_r₁, …, State_rₖ, Int64, Int32), (State_r₁, …, State_rₖ, Ptr<T>), {Alloc}, ∅).
+
+- **Invoke(s⃗_in, target, args⃗, exception_handler).** E = {Call}. Produces return values and s⃗_out. If the callee throws, control transfers to exception_handler (a Region) instead of producing return values. The exception edge is a control edge from Invoke to the handler Region. Signature: Σ(Invoke) = ((State_r₁, …, State_rₖ, Ptr<Fn>, τ⃗_args), (State_r₁, …, State_rₖ, τ⃗_ret), {Call}, ∅).
+
+- **Throw(s⃗_in, exception).** E = {Trap}. Transfers control to the nearest enclosing exception handler via an exception edge. Does not produce a state-out (it is a control terminator). Signature: Σ(Throw) = ((State_r₁, …, State_rₖ, Ptr<Exception>), ∅, {Trap}, ∅).
+
+- **Trap(s⃗_in, reason).** E = {Trap}. Terminates execution abnormally and unrecoverably. No exception handler is invoked. Used for assertion failures, undefined-behavior detection, and unreachable-code markers. Does not produce state-out. Signature: Σ(Trap) = ((State_r₁, …, State_rₖ, Int32), ∅, {Trap}, {reason}).
+
+- **Safepoint(s⃗_in, deopt_meta).** E = {Barrier}. Marks a point where the runtime may deoptimize. deopt_meta maps each live value to its source-level location. Used for tiered compilation. Signature: Σ(Safepoint) = ((State_r₁, …, State_rₖ), (State_r₁, …, State_rₖ), {Barrier}, {deopt_meta}).
+
+#### Exceptional control flow
+
+Exception edges are a fourth edge kind E_except ⊆ N_eff × N_ctrl, distinct from E_ctrl. Only Invoke and Throw have exception edges. The target of an exception edge is always a Region that heads an exception handler. Exception edges do not carry state tokens; the handler Region's state Phis receive their inputs from the exceptional predecessor's state-out.
+
+### 6.6 Validity Invariants
+
+Valid_IR(G) holds iff all of the following hold:
+
+**1. Type consistency.** For every data edge (u, v), τ_out(u) ≤_T τ_in(v) at the corresponding position.
+
+**2. Effect consistency.** For every state edge (u, v) on region class r, both u and v have E ≠ ∅, and the region class r is in the footprint of both u and v.
+
+**3. Control well-formedness.**
+- Every Region has k ≥ 1 control inputs.
+- Every Phi has k data inputs, where k is the number of control inputs of its controlling Region.
+- Every StatePhi_r has k state-in_r inputs, where k is the number of control inputs of its controlling Region.
+- The control graph is reachable from Start and terminates at Return, Stop, or Throw.
+
+**4. State-token well-formedness.**
+- For each region class r, the state-r subgraph is a set of chains and cycles.
+- Every cycle in the state-r subgraph passes through at least one StatePhi_r. (This is the loop-carried-state invariant; it replaces the incorrect acyclicity requirement of v0.)
+- No state-r chain terminates except at Return, Stop, or Throw.
+
+**5. Schedulability.** There exists a schedule S: N → Regions such that:
+- For every data edge (u, v), S(u) dominates S(v) in the control graph, or u is a data input to a Phi at S(v).
+- For every state edge (u, v) on region r, S(u) precedes S(v) in every control path containing both.
+- For every exception edge (u, v), S(u) is the Invoke node and S(v) is the handler Region.
+- For every effectful node n, S(n) is a Region where n's memory footprint is well-defined (i.e., alias analysis can resolve the region class at that point).
+
+This is the generalized dominance condition from Click's IR. It replaces the hand-waved invariant 5 of v0.
+
+**6. Effect-kind monotonicity.** For every effectful node n, E(n) is exactly the union of the primitive kinds implied by n's opcode. (E.g., AtomicRMW always has {MemRead, MemWrite, Barrier}; it cannot be weakened.)
+
+**7. FP-flag validity.** For every FP node n with flag set F, F ⊆ {NSZ, NINF, NNAN, ARCP, CONTRACT, REASSOC, AFN}. If AFN ∈ F, then all other flags are also in F (AFN is the union of all relaxations).
+
+### 6.7 Representation and Cost Model
+
+**Node layout.** Nodes are allocated in a generational arena. Each node has a fixed header (ID, opcode, E, F, region-class footprint bitmask) followed by a variable-length edge array. Inline capacity: 4 edges; overflow spills to a secondary heap array.
+
+**Edge representation.** Integer indices into a global node table. No separate edge objects.
+
+**State-Phi cost.** Each Region with k control predecessors and touching r region classes requires r state-Phi nodes, each with k inputs. Total state-Phi count is O(|Regions| · |R| · avg_predecessors). For typical code |R| is small (3–8 region classes after alias analysis), so this is a modest constant factor over a single-token design.
+
+**Traversal cost.** Iterating over a node's edges is O(1) per edge, with pointer-chasing cost proportional to arena fragmentation. State edges are stored contiguously per region class to improve locality for alias-aware passes.
+
+**Modification cost.** Adding or removing an edge may reallocate the node's edge array. Passes that perform many incremental modifications should batch changes or use a worklist that defers edge mutations.
+
+**Memory complexity.** O(|N| · (H + Ē · W)), where H is header size, Ē is average edge count, W is word size. State-Phis add a factor of O(|R|) to the node count at control merges.
+
+**Construction cost.** O(|AST| · |R|) time and space, dominated by region-class resolution during front-end lowering.
 
 ---
 
-### Summary of the OSR Flow
-1. **T0 Interpreter** hits a back-edge counter.
-2. **T0** calls `trigger_osr`.
-3. **T2 Compiler** builds the Unified Graph, identifies the loop, and generates an `OSR_ENTRY` block.
-4. **ARS** decides loop variables should be unboxed. `OSR_ENTRY` emits unboxing logic and type guards.
-5. **Graph Optimizer** identifies dominating layout guards and injects them into `OSR_ENTRY`.
-6. **MIR** emits the physical OSR Stub and patches the T0/T1 back-edge.
-7. **Execution** seamlessly jumps into the optimized loop, fully unboxed and guarded.
-8. If a guard fails inside the loop, **Deopt** boxes the values back to `TAGGED` and resumes T0.
----
+# Vector IR — Complete Design Document (v1)
 
-## PROF-1: Continuous Profiling & PGO Infrastructure
-**Version 1.0 · Core Execution Contract**
+## 0. Document Control and Design Scope
 
-### 1. Fundamental Design Philosophy
-The profiling infrastructure must satisfy three competing constraints:
-1. **Near-Zero Mutator Overhead**: Profiling must not degrade the performance of T2/T3 hot code. Atomic counter increments on every loop iteration cause severe cache-line bouncing and pipeline stalls.
-2. **High-Fidelity Feedback**: The compiler needs accurate type, shape, and control-flow data to drive AOSS specialization, ARS (Adaptive Representation Selection), and guard insertion.
-3. **Decoupled Collection and Analysis**: Mutator threads collect raw data asynchronously. Compiler threads analyze aggregated data. They never block each other.
+**Component:** Intermediate Representation (Vector IR)
 
-### 2. Profile Data Taxonomy
-We categorize profile data into five distinct domains. Each domain requires different collection strategies.
+**Version:** 1.0
 
-| Domain | Data Collected | Primary Consumer |
-| :--- | :--- | :--- |
-| **Control Flow** | Back-edge counts, call-site counts, branch outcomes (taken/not-taken). | Tier-up triggers, T5 code layout, T5 loop unrolling. |
-| **Type & Shape (AOSS)** | Receiver types, LayoutIDs, property access shapes, call targets. | AOSS specialization, ARS unboxing, Guard insertion. |
-| **Allocation** | Allocation sites, object sizes, escape hints (thread-local vs. global). | T2/T3 Escape Analysis, Write Barrier elision, T5 allocation hoisting. |
-| **Deoptimization** | Deopt reasons, frequencies, penalty counters per region/guard. | Preventing deopt storms, adjusting speculation confidence. |
-| **Memory/Vector** | Array access strides, alignment, element homogeneity. | T3 Auto-vectorization, SLP, Array unboxing. |
+**Role:** Post-vectorization representation. Receives scalar ET-SoN, encodes all vectorization decisions explicitly, and provides maximum information density to downstream analyses (instruction selection, register allocation, code generation) before lowering to Machine IR.
 
-### 3. Collection Mechanisms (Minimizing Overhead)
-We do not use a single mechanism for all tiers. The collection strategy evolves as code gets hotter.
+**Design Status:** Complete specification.
 
-#### 3.1 T0/T1: Instrumentation (Thread-Local Counters)
-T0 (Interpreter) and T1 (Stencil Baseline) use explicit instrumentation.
-- **Thread-Local Buffers (TLB)**: Each thread maintains a local array of counters. Mutators increment their local TLB. This avoids atomic operations and cache-line contention entirely.
-- **Flushing**: At safepoints (or via a periodic timer interrupt), the TLB is flushed and merged into the global `MethodProfile`.
-- **T1 Stencil Integration**: T1 stencils for back-edges include a `INCREMENT_TLB(offset)` instruction. Because it's a thread-local memory write, it is extremely cheap (1-2 cycles).
+**Scope:** This document defines the graph structure, type system, node semantics, and validity invariants of the Vector IR. It does not define:
+- The vectorization analysis that transforms ET-SoN into Vector IR (separate subsystem)
+- The target machine (which Vector IR maps into via backend lowering)
+- The scalar ET-SoN (which is the input to vectorization)
 
-#### 3.2 T2/T3: Inline Caches, Sampled Back-Edge Counters & PMU
+**Normative References:**
+- LLVM Vectorization Guide (for loop structure representation)
+- Intel ISPC language model (for explicit masking and gang abstraction)
+- ARM SVE architecture (for width-polymorphic vector types)
+- Click, C. "A Simple, Fast Dominance Algorithm" (for scheduling conditions)
 
-Once code reaches T2/T3, full instrumentation of every edge is gone. The 1.0 text stated that edge counters are stopped entirely and that control-flow feedback comes from Inline Caches plus hardware sampling. That is insufficient, and it is corrected here (finding PROF-1, resolved).
-
-T4 (the trace compiler) requires an accurate signal for which loops are hot enough to justify trace recording. PMU/PEBS sampling gives statistical PC histograms whose skew is too large to reliably identify short, tight loops: a 3-instruction loop and a 30-instruction loop with equal iteration counts produce very different sample densities, and low-frequency sampling routinely misses tight loops entirely. Inline cache misses say nothing about loop iteration counts. Both signals are retained for type feedback and code layout, but neither is a back-edge counter.
-
-The corrected contract: T2/T3 retain a lightweight, sampled back-edge counter per loop:
-
-- **Emission**: the optimizing backend emits, on each loop back-edge, a decrement of a dedicated register preloaded from the loop's profile slot and a predicted-not-taken branch to the sample handler every N iterations (sampling mask, e.g. N=64). The steady-state cost is one decrement and one not-taken branch per iteration, which is 1-2 cycles and does not use atomics (PROF-INV-01 preserved: the counter is thread-local, so no LOCK prefix is involved).
-- **Sample handler**: reloads the register from the profile slot for the next window, folds the window count into the thread-local profile buffer, and, when the accumulated count crosses the T4 trigger threshold, enqueues a trace-recording request for that loop header.
-- **Register pressure**: the counter occupies one dedicated scratch register. If register pressure in a loop is extreme, the register allocator may spill exactly this counter across the loop; spilling a value touched once per N iterations is acceptable, and the fallback is to sample via the loop's existing safepoint instead.
-- **What is NOT retained**: per-edge instrumentation, branch-outcome counters, and call-site counting in T2/T3 code. Those remain IC- and PMU-derived.
-
-Tier-up consumers of the sampled counters:
-- T4 trace recording requests (primary consumer).
-- T2 to T3 promotion corroboration when execution-time sampling is ambiguous.
-
-### 4. Profile Storage & Architecture
-The profile data is structured hierarchically to support both online JIT and offline T5 PGO.
-
-#### 4.1 Method-Level Profile
-Attached to the `MethodDescriptor`. Contains:
-- **Counters**: Aggregated back-edge and call-site counts.
-- **IC History**: A ring buffer of the last $N$ observed LayoutIDs/Types for each call/access site.
-- **Deopt Log**: A map of `RegionID -> DeoptReason -> Count`.
-
-#### 4.2 Global/Module-Level Profile
-Aggregated data for whole-program analysis (used by T5).
-- **Call Graph**: Edges weighted by call-site counts.
-- **Class Hierarchy Analysis (CHA) Weights**: Which subclasses are actually instantiated and called.
-- **Serialized Format**: Can be dumped to disk at shutdown for offline T5 PGO.
-
-#### 4.3 The IC Stub Array (Side-Table)
-Instead of embedding IC state directly in the executable code (which bloats the code cache and complicates patching), we use a side-table.
-- The compiled code contains a `LOAD_IC_STUB(index)` instruction.
-- The IC Stub Array holds the current state (Monomorphic, Polymorphic, Megamorphic) and the associated fast-path code pointers.
-- **Benefit**: IC state can be updated, shared across different compiled versions of the same method, and garbage-collected independently of the code cache.
-
-### 5. Integration with Optimization Tiers
-
-#### 5.1 Tier-Up Triggers
-Tier-ups are driven by the global `MethodProfile`.
-- **T0 $\rightarrow$ T1**: Triggered when a T0 TLB counter exceeds `THRESHOLD_T1` (e.g., 1,000).
-- **T1 $\rightarrow$ T2**: Triggered when the T1 TLB counter exceeds `THRESHOLD_T2` (e.g., 10,000) AND the IC history shows stable types (monomorphic or low-polymorphism).
-- **T2 $\rightarrow$ T3**: Triggered when execution time in T2 exceeds a threshold, OR when T2 deoptimizes due to a megamorphic site, prompting T3 to compile a highly specialized version with aggressive guards.
-
-#### 5.2 Driving AOSS and ARS
-- **AOSS**: The compiler queries the IC History for an object access. If 99% of observations are `LayoutID_A`, AOSS emits a `GuardLayout(LayoutID_A)` and specializes the field offset.
-- **ARS**: The compiler queries the type profile for a variable. If the profile proves it is 100% `F64` (unboxed float), ARS commits to the `F64` representation in LLIR, eliminating NV-1 boxing/unboxing.
-
-### 6. The Deoptimization Feedback Loop (Crucial)
-If T3 speculates on a profile and deoptimizes, we must update the profile to prevent an infinite "deopt storm" (compile $\rightarrow$ deopt $\rightarrow$ compile $\rightarrow$ deopt).
-
-#### 6.1 Deopt Penalties
-When a region deopts, the runtime executes a `RECORD_DEOPT(region_id, reason)` stub before jumping to T0.
-- The `MethodProfile` increments the deopt counter for that specific `RegionID` and `Reason`.
-- **Confidence Decay**: The profile applies a penalty to the specific type/shape assumption that failed.
-- **Recompilation Guard**: When the compiler is invoked again, it checks the deopt counter. If it exceeds `MAX_DEOPTS`, the compiler **bans** that specific speculation and forces a generic, un-specialized path (or a safer, heavily guarded path).
-
-### 7. T5 Offline PGO Integration
-T5 operates offline or during idle time. It consumes the serialized Global Profile to perform transformations that are too expensive for online JIT.
-
-#### 7.1 Profile-Guided Code Layout
-T5 uses the control-flow profile to sort basic blocks.
-- **Hot/Cold Splitting**: Blocks with high execution frequency are placed sequentially in the "Hot" section (improving I-cache locality and branch prediction). Blocks with low frequency (error handling, rare deopts) are moved to the "Cold" section.
-
-#### 7.2 Profile-Guided Inlining
-T5 uses the weighted call graph to decide inlining.
-- Instead of just inlining "small" functions, T5 inlines functions that are called frequently *from hot paths*, even if they are moderately large.
-- **Cloning**: If a function is called with different type profiles from different sites, T5 clones the function, specializing each clone for its specific call-site profile.
-
-#### 7.3 Profile-Guided Loop Unrolling
-T5 uses back-edge counts and loop-body size to calculate the optimal unrolling factor, balancing I-cache pressure against loop overhead.
-
-### 8. PROF-1 Invariants
-To guarantee correctness and performance, the following invariants must hold:
-
-| ID | Invariant |
-| :--- | :--- |
-| **PROF-INV-01** | **No Atomic Contention on Hot Paths**: T2/T3 compiled code must never execute atomic instructions (e.g., `LOCK XADD`) for profiling. Profiling is done via IC misses or statistical sampling. |
-| **PROF-INV-02** | **Thread-Local Safety**: TLB flushes must only occur at safepoints or via thread-local handshake, ensuring no data races during the merge. |
-| **PROF-INV-03** | **Deopt Prevention**: If a specific speculation deoptimizes more than $K$ times, the compiler must permanently disable that speculation for the method. |
-| **PROF-INV-04** | **IC Consistency**: The IC Stub Array must be updated atomically with respect to the mutator. A mutator must never see a partially updated IC state. |
-| **PROF-INV-05** | **Profile Completeness**: The T0/T1 profile must capture all live virtual registers' types at safepoints to ensure T2/T3 ARS has complete information. |
-| **PROF-INV-06** | **T5 Serialization Safety**: The global profile can be serialized for T5 without stopping the world, using a copy-on-write or double-buffering mechanism. |
-| **PROF-INV-07** | **Back-Edge Sampling Presence**: Every T2/T3-compiled loop must carry the sampled back-edge counter (section 3.2). A T2/T3 code path with uncounted loop back-edges is incorrect, because T4 trace recording cannot discover hot loops from PMU sampling or IC misses alone. |
-| **PROF-INV-08** | **Sampling Budget**: The sampled counter may cost at most one decrement and one not-taken branch per iteration. It must not introduce atomics, locks, or store traffic to shared memory on the steady-state path. |
----
-
-## CODE-1: Code Cache & Executable Memory Management
-**Version 1.0 · Core Execution Contract**
-
-### 1. Fundamental Design Philosophy
-Executable memory is the most constrained and expensive resource in a modern JIT. Operating systems strictly enforce W^X (Write XOR Execute) security policies, and executable pages cannot be easily shared or swapped. 
-The architecture must satisfy four competing constraints:
-1. **Strict W^X Compliance**: Memory must never be simultaneously writable and executable.
-2. **Metadata Separation**: Executable pages must contain *only* instructions and read-only constants. Metadata (safepoint maps, dependencies) must live in standard read-write memory.
-3. **Fragmentation Resistance**: The code cache must not fragment into unusable slivers over long-running sessions.
-4. **Concurrent Safety**: Compiler threads must allocate and patch code while mutator threads execute it, without data races or ICache coherency failures.
+**Known Limitations:**
+- Vectorization legality proofs (dependence analysis, alias analysis) are not discharged in this document — they belong to the vectorization-analysis subsystem
+- Target-specific vector width selection is deferred to Machine IR lowering
 
 ---
 
-### 2. Memory Topology: The Four Heaps
-We do not use a single monolithic "Code Cache". We segregate memory by lifetime, mutability, and access patterns.
+## 1. Goals, Non-Goals, and Constraints
 
-| Heap Name | Protection | Contents | Allocation Strategy |
-| :--- | :--- | :--- | :--- |
-| **Stencil Pool** | Read-Only, Execute (RX) | Pre-compiled T1 Stencils, shared across all threads. | Allocated once at startup. Never freed. |
-| **Code Pool** | RX (with RW alias) | T1b/T1c/T2/T3/T4 emitted machine code. | Bump-pointer with TLABs. Evictable. |
-| **Stub Pool** | RX (with RW alias) | Deopt stubs, OSR stubs, FFI trampolines, PIC miss stubs. | Bump-pointer. Evictable. |
-| **Metadata Pool** | Read-Write (RW) | CodeBlob headers, Safepoint maps, Region descriptors, AOSS dependencies. | Standard RW allocator. Tied to Code Pool lifecycle. |
+### Goals
 
-**Why separate Metadata?**
-If a 10KB T3 method has 2KB of safepoint/dependency metadata, embedding it in the Code Pool wastes 20% of your scarce executable memory. By placing the `CodeBlobHeader` and `SafepointRecords` in the Metadata Pool, the Code Pool remains dense with pure instructions, maximizing I-Cache efficiency.
+1. Encode all vectorization decisions explicitly in the graph structure: loop bounds, induction variables, vector operations, masks, reductions, shuffles, gather/scatter patterns.
+2. Preserve all data-flow, control-flow, and effect dependencies from ET-SoN.
+3. Provide width-polymorphic vector types that defer concrete width selection to the backend.
+4. Make alignment, stride, and contiguity information explicit on all memory operations.
+5. Represent per-lane exception behavior and masking semantics precisely.
+6. Enable downstream analyses to perform instruction selection, register allocation, and code generation without re-discovering vectorization opportunities.
+
+### Non-Goals
+
+1. Perform vectorization analysis (separate subsystem; Vector IR is the output).
+2. Target-specific instruction selection (handled in Machine IR).
+3. Scalar optimization (handled in ET-SoN before vectorization).
+
+### Constraints
+
+- Vector IR construction time must be O(|ET-SoN| · k), where k is the number of loops vectorized.
+- IR memory footprint must not exceed O(|ET-SoN| · c), where c is a small constant factor for vector-node overhead.
+- Verifier must run in polynomial time O(|N| + |E|).
+- All vectorization decisions must be explicit — no implicit vectorization.
 
 ---
 
-### 3. Virtual Memory & W^X Protocol
-To satisfy OS security models (macOS `MAP_JIT`, Linux `SELinux/PaX`, Windows `CFG`), we use a **Dual-Mapping Protocol**.
+## 6. Intermediate Representation: Vector IR
 
-#### 3.1 Dual-Mapping Mechanism
-When the engine requests a new page of executable memory from the OS (via `mmap` or `VirtualAlloc`), it maps the *same underlying physical memory* twice into the process's virtual address space:
-1. **RW View**: Used *only* by compiler threads and the patcher to write instructions and patch branches.
-2. **RX View**: Used *only* by mutator threads to execute the code.
+### 6.1 Purpose and Domain
 
-This eliminates the need for costly `mprotect` system calls (which trigger TLB shootdowns and stall all cores) when transitioning between writing and executing.
+The Vector IR is a directed, typed graph that extends ET-SoN with explicit vector operations, loop structure, and width-polymorphic types. Its purpose is to encode all vectorization decisions made by the vectorization analysis, providing a complete and explicit representation of vectorized code that downstream passes can consume without re-analyzing the program.
 
-#### 3.2 Apple Silicon (AArch64) Special Case
-On macOS/iOS, dual-mapping is restricted. We must use the `MAP_JIT` flag and the thread-local write toggle:
-```c
-pthread_jit_write_protect_np(0); // Enable RW for this thread
-// ... write instructions ...
-pthread_jit_write_protect_np(1); // Re-enable RX
-sys_icache_invalidate(start, length); // Crucial: sync ICache
+The Vector IR is the output of vectorization applied to ET-SoN. It makes explicit:
+- Loop structure (headers, latches, exits, induction variables)
+- Vector operations (SIMD arithmetic, comparisons, conversions)
+- Masking (predicated execution, lane selection)
+- Reductions (sum, product, min, max with explicit operators and identities)
+- Shuffles (lane permutation, blending, broadcasting)
+- Gather/scatter (non-contiguous memory access with explicit index vectors)
+- Alignment and contiguity (memory access patterns)
+
+### 6.2 Mathematical Specification
+
+| Requirement | Specification |
+|---|---|
+| **Domain** | G_ETSoN: The set of valid ET-SoN graphs post-optimization. |
+| **Codomain** | G_VecIR: The set of valid Vector IR graphs. |
+| **Definitions** | G = (N, E, Σ, Γ, L). N: Nodes. E: Edges. Σ: Node signatures. Γ: Global type environment. L: Loop nest structure. |
+| **Preconditions** | The input ET-SoN graph G_ETSoN satisfies Valid_IR(G_ETSoN). The vectorization analysis has determined which loops and operations to vectorize. |
+| **Postconditions** | The resulting graph G satisfies Valid_VecIR(G) (defined in 6.6). |
+| **Invariants** | Type consistency, effect consistency, control-flow well-formedness, loop-structure well-formedness, vector-width consistency, mask consistency, reduction well-formedness, schedulability. |
+| **Relations** | Data dependence (→_d), control dependence (→_c), state dependence (→_s), exception dependence (→_except), loop-carried dependence (→_lc). |
+| **Failure behavior** | If G_ETSoN ∉ Valid_IR, the vectorization analysis rejects it. If Vector IR construction encounters an unresolvable structural contradiction, it emits an InternalCompilerError. |
+| **Complexity** | Construction: O(|N_ETSoN| · |L|) time and space, where |L| is the number of vectorized loops. |
+| **Correctness** | ⟦G_ETSoN⟧ = ⟦G_VecIR⟧. The Vector IR must preserve the observational equivalence of the input ET-SoN graph. |
+
+### 6.3 Graph Structure
+
+The IR is a directed graph G = (N, E, L).
+
+**Node partition.** N = N_pure ∪ N_vec ∪ N_ctrl ∪ N_eff, where:
+- N_pure: scalar pure operations (unchanged from ET-SoN)
+- N_vec: vector operations (arithmetic, memory, reduction, shuffle, mask)
+- N_ctrl: control flow (scalar and vector control, including loop structure)
+- N_eff: scalar effectful operations (unchanged from ET-SoN)
+
+**Edge partition.** E = E_data ∪ E_ctrl ∪ E_state ∪ E_except ∪ E_loop, disjoint.
+- E_data ⊆ N × N — data flow (scalar and vector values)
+- E_ctrl ⊆ N_ctrl × N_ctrl — control flow
+- E_state ⊆ N_eff × N_eff — state-token flow (memory and synchronization ordering)
+- E_except ⊆ N_eff × N_ctrl — exceptional control flow
+- E_loop ⊆ N_ctrl × N_ctrl — loop structure edges (header → body, body → latch, latch → header/exit)
+
+**Loop structure.** The loop structure L is a forest of loop nests. Each loop ℓ ∈ L has:
+- header(ℓ): the LoopHeader node
+- latch(ℓ): the LoopLatch node
+- exit(ℓ): the set of LoopExit nodes
+- body(ℓ): the set of nodes dominated by header(ℓ) and post-dominated by latch(ℓ)
+- parent(ℓ): the enclosing loop (if any)
+- induction_vars(ℓ): the set of induction variables (Phi nodes with constant stride)
+- trip_count(ℓ): the trip count (if statically known) or a symbolic expression
+
+**State-token partitioning.** Inherited from ET-SoN: state tokens are partitioned by region class r ∈ R. Vector memory operations (vector load/store, gather/scatter) participate in the same state-token chains as scalar memory operations, with the same conflict relation.
+
+### 6.4 Type System
+
+**Scalar types.** Inherited from ET-SoN: Int8, Int16, Int32, Int64, UInt8, ..., Float32, Float64, Bool, Ptr<T>, Tuple, Array, Fn, State_r.
+
+**Vector types.** Vec<T, N> where:
+- T is a scalar element type (Int32, Float64, etc.)
+- N is the vector width, which can be:
+  - A concrete positive integer (e.g., Vec<Int32, 4>)
+  - A symbolic width variable w ∈ W (e.g., Vec<Int32, w>)
+  - A width expression (e.g., Vec<Int32, 2·w>)
+
+Width variables allow the IR to represent width-polymorphic vector code. The backend selects concrete widths during lowering.
+
+**Mask types.** Mask<N> where N is the vector width. Masks are first-class values that represent lane predicates.
+
+**Type consistency rules.**
+- Vector operations require all vector operands to have the same width: if op: Vec<T₁, N₁> × Vec<T₂, N₂> → Vec<T₃, N₃>, then N₁ = N₂ = N₃.
+- Mask operations require the mask width to match the vector width: if masked_op: Mask<N> × Vec<T, N> → Vec<T, N>, the mask width N must match.
+- Scalar-to-vector broadcasting: broadcast: T → Vec<T, N> for any N.
+- Vector-to-scalar extraction: extract: Vec<T, N> × Int → T, where the index is in [0, N).
+- Vector-to-scalar reduction: reduce: Vec<T, N> → T (see reduction nodes below).
+
+**Width constraints.** Width variables w ∈ W are subject to constraints:
+- w ≥ 1 (positive width)
+- w is a power of 2 (for most targets) or w is a multiple of the target's minimum vector width
+- Constraints are collected during vectorization and solved during backend lowering
+
+### 6.5 Node Semantics
+
+#### Scalar nodes (N_pure, N_ctrl, N_eff)
+
+Inherited from ET-SoN without modification. Scalar operations coexist with vector operations in the same graph.
+
+#### Loop structure nodes (N_ctrl)
+
+- **LoopHeader(loop_id, induction_vars⃗, trip_count).** Marks the entry to a loop. Produces control output and the initial values of induction variables. E = ∅. Signature: Σ(LoopHeader) = ((Ctrl, τ⃗_init), (Ctrl, τ⃗_iv), ∅, {loop_id, trip_count}).
+
+- **LoopLatch(loop_id, induction_vars⃗).** Marks the loop back-edge. Consumes the updated induction variable values and produces control output to the header (if loop continues) or to an exit (if loop terminates). E = ∅. Signature: Σ(LoopLatch) = ((Ctrl, τ⃗_iv_next), (Ctrl, Ctrl), ∅, {loop_id}).
+
+- **LoopExit(loop_id).** Marks a loop exit point. Consumes control from the latch (when loop terminates) and produces control output to the post-loop code. E = ∅. Signature: Σ(LoopExit) = ((Ctrl,), Ctrl, ∅, {loop_id}).
+
+- **InductionVar(header, init, stride).** A Phi node at the loop header that represents an induction variable. init is the initial value, stride is the loop-invariant increment. E = ∅. Signature: Σ(InductionVar) = ((Ctrl, τ, τ), τ, ∅, {header}).
+
+#### Vector arithmetic nodes (N_vec)
+
+All vector arithmetic nodes operate on vector types and carry the same FP flags as scalar FP nodes.
+
+- **VecAdd(a, b).** Element-wise addition. E = ∅. Signature: Σ(VecAdd) = ((Vec<T, N>, Vec<T, N>), Vec<T, N>, ∅, F).
+
+- **VecSub, VecMul, VecDiv, VecFma.** Element-wise subtraction, multiplication, division, fused multiply-add. E = ∅.
+
+- **VecNeg, VecAbs, VecMin, VecMax, VecSqrt.** Element-wise unary and binary operations. E = ∅.
+
+- **VecCompare(a, b, cmp_op).** Element-wise comparison. cmp_op ∈ {eq, ne, lt, le, gt, ge}. Produces a mask. E = ∅. Signature: Σ(VecCompare) = ((Vec<T, N>, Vec<T, N>), Mask<N>, ∅, {cmp_op}).
+
+- **VecSelect(mask, a, b).** Element-wise selection. For each lane i, result[i] = mask[i] ? a[i] : b[i]. E = ∅. Signature: Σ(VecSelect) = ((Mask<N>, Vec<T, N>, Vec<T, N>), Vec<T, N>, ∅, ∅).
+
+- **VecBroadcast(scalar).** Broadcasts a scalar to all lanes of a vector. E = ∅. Signature: Σ(VecBroadcast) = ((T,), Vec<T, N>, ∅, ∅).
+
+- **VecExtract(vec, index).** Extracts a single lane from a vector. E = ∅. Signature: Σ(VecExtract) = ((Vec<T, N>, Int), T, ∅, ∅).
+
+- **VecInsert(vec, index, value).** Inserts a scalar into a vector lane. E = ∅. Signature: Σ(VecInsert) = ((Vec<T, N>, Int, T), Vec<T, N>, ∅, ∅).
+
+#### Vector memory nodes (N_vec)
+
+Vector memory operations carry explicit alignment, stride, and contiguity information.
+
+- **VecLoad(s⃗_in, base_ptr, stride, alignment, width).** Loads a vector from memory. base_ptr is the base address, stride is the element stride (1 for contiguous loads), alignment is the guaranteed alignment of base_ptr, width is the number of elements to load. E = {MemRead}. Signature: Σ(VecLoad) = ((State_r₁, …, State_rₖ, Ptr<T>, Int, Int, Int), (State_r₁, …, State_rₖ, Vec<T, N>), {MemRead}, {stride, alignment}).
+
+  - If stride = 1, the load is contiguous.
+  - If stride ≠ 1, the load is strided (element i is at base_ptr + i·stride·sizeof(T)).
+  - alignment must be a power of 2 and must divide the address of base_ptr.
+
+- **VecStore(s⃗_in, base_ptr, vec, stride, alignment).** Stores a vector to memory. E = {MemWrite}. Signature: Σ(VecStore) = ((State_r₁, …, State_rₖ, Ptr<T>, Vec<T, N>, Int, Int), (State_r₁, …, State_rₖ), {MemWrite}, {stride, alignment}).
+
+- **VecGather(s⃗_in, base_ptr, indices, mask, alignment).** Gathers elements from memory at addresses base_ptr + indices[i]·sizeof(T) for each lane i where mask[i] is true. E = {MemRead}. Signature: Σ(VecGather) = ((State_r₁, …, State_rₖ, Ptr<T>, Vec<Int, N>, Mask<N>, Int), (State_r₁, …, State_rₖ, Vec<T, N>), {MemRead}, {alignment}).
+
+  - indices is a vector of integer offsets (in elements, not bytes).
+  - mask controls which lanes are active; inactive lanes do not access memory.
+  - alignment is the guaranteed alignment of each accessed element.
+
+- **VecScatter(s⃗_in, base_ptr, indices, vec, mask, alignment).** Scatters elements to memory. E = {MemWrite}. Signature: Σ(VecScatter) = ((State_r₁, …, State_rₖ, Ptr<T>, Vec<Int, N>, Vec<T, N>, Mask<N>, Int), (State_r₁, …, State_rₖ), {MemWrite}, {alignment}).
+
+- **MaskedVecLoad(s⃗_in, base_ptr, stride, mask, alignment, width).** Loads a vector with masking. Inactive lanes do not access memory and produce undefined values. E = {MemRead}. Signature: Σ(MaskedVecLoad) = ((State_r₁, …, State_rₖ, Ptr<T>, Int, Mask<N>, Int, Int), (State_r₁, …, State_rₖ, Vec<T, N>), {MemRead}, {stride, alignment}).
+
+- **MaskedVecStore(s⃗_in, base_ptr, vec, stride, mask, alignment).** Stores a vector with masking. Inactive lanes do not write to memory. E = {MemWrite}. Signature: Σ(MaskedVecStore) = ((State_r₁, …, State_rₖ, Ptr<T>, Vec<T, N>, Int, Mask<N>, Int), (State_r₁, …, State_rₖ), {MemWrite}, {stride, alignment}).
+
+#### Vector reduction nodes (N_vec)
+
+Reductions collapse a vector to a scalar. Each reduction node specifies the operator, identity element, and associativity/commutativity properties.
+
+- **VecReduceSum(vec).** Sum reduction. E = ∅. Signature: Σ(VecReduceSum) = ((Vec<T, N>,), T, ∅, {op=add, id=0, assoc=true, comm=true}).
+
+- **VecReduceProd(vec).** Product reduction. E = ∅. Signature: Σ(VecReduceProd) = ((Vec<T, N>,), T, ∅, {op=mul, id=1, assoc=true, comm=true}).
+
+- **VecReduceMin(vec).** Minimum reduction. E = ∅. Signature: Σ(VecReduceMin) = ((Vec<T, N>,), T, ∅, {op=min, id=+∞, assoc=true, comm=true}).
+
+- **VecReduceMax(vec).** Maximum reduction. E = ∅. Signature: Σ(VecReduceMax) = ((Vec<T, N>,), T, ∅, {op=max, id=-∞, assoc=true, comm=true}).
+
+- **VecReduceAnd(vec).** Bitwise AND reduction (for integer vectors). E = ∅. Signature: Σ(VecReduceAnd) = ((Vec<T, N>,), T, ∅, {op=and, id=~0, assoc=true, comm=true}).
+
+- **VecReduceOr(vec).** Bitwise OR reduction. E = ∅. Signature: Σ(VecReduceOr) = ((Vec<T, N>,), T, ∅, {op=or, id=0, assoc=true, comm=true}).
+
+- **MaskedVecReduceSum(vec, mask).** Sum reduction with masking. Only active lanes contribute. E = ∅. Signature: Σ(MaskedVecReduceSum) = ((Vec<T, N>, Mask<N>), T, ∅, {op=add, id=0, assoc=true, comm=true}).
+
+All reductions are associative and commutative, which permits reordering of operations during optimization. Non-associative reductions (e.g., floating-point sum with strict semantics) are not permitted unless the source language explicitly opts into relaxed FP semantics.
+
+#### Vector shuffle nodes (N_vec)
+
+Shuffles permute, blend, or broadcast lanes of one or more vectors.
+
+- **VecShuffle(a, b, indices).** Permutes lanes from two input vectors. indices is a compile-time-known vector of integers in [0, 2N), where indices[i] < N selects from a and indices[i] ≥ N selects from b (with indices[i] - N as the lane index). E = ∅. Signature: Σ(VecShuffle) = ((Vec<T, N>, Vec<T, N>, Vec<Int, M>), Vec<T, M>, ∅, {indices}).
+
+  - M is the output width, which can differ from N.
+  - indices must be compile-time known (static shuffle).
+
+- **VecDynamicShuffle(a, b, indices).** Permutes lanes with runtime-variable indices. indices is a runtime vector of integers. E = ∅. Signature: Σ(VecDynamicShuffle) = ((Vec<T, N>, Vec<T, N>, Vec<Int, M>), Vec<T, M>, ∅, ∅).
+
+- **VecBlend(mask, a, b).** Blends two vectors under mask control. result[i] = mask[i] ? a[i] : b[i]. E = ∅. Signature: Σ(VecBlend) = ((Mask<N>, Vec<T, N>, Vec<T, N>), Vec<T, N>, ∅, ∅).
+
+- **VecBroadcastLane(vec, lane).** Broadcasts a single lane to all lanes. E = ∅. Signature: Σ(VecBroadcastLane) = ((Vec<T, N>, Int), Vec<T, N>, ∅, ∅).
+
+#### Mask operations (N_vec)
+
+- **MaskAnd(a, b).** Bitwise AND of two masks. E = ∅. Signature: Σ(MaskAnd) = ((Mask<N>, Mask<N>), Mask<N>, ∅, ∅).
+
+- **MaskOr(a, b).** Bitwise OR of two masks. E = ∅. Signature: Σ(MaskOr) = ((Mask<N>, Mask<N>), Mask<N>, ∅, ∅).
+
+- **MaskNot(a).** Bitwise NOT of a mask. E = ∅. Signature: Σ(MaskNot) = ((Mask<N>,), Mask<N>, ∅, ∅).
+
+- **MaskAllTrue().** Produces a mask with all lanes active. E = ∅. Signature: Σ(MaskAllTrue) = ((), Mask<N>, ∅, ∅).
+
+- **MaskAllFalse().** Produces a mask with all lanes inactive. E = ∅. Signature: Σ(MaskAllFalse) = ((), Mask<N>, ∅, ∅).
+
+- **MaskTest(mask).** Tests whether any lane is active. Produces a scalar boolean. E = ∅. Signature: Σ(MaskTest) = ((Mask<N>,), Bool, ∅, ∅).
+
+- **MaskCount(mask).** Counts the number of active lanes. Produces a scalar integer. E = ∅. Signature: Σ(MaskCount) = ((Mask<N>,), Int, ∅, ∅).
+
+#### Type conversion nodes (N_vec)
+
+- **VecCast(vec, target_type).** Converts a vector to a different element type. E = ∅. Signature: Σ(VecCast) = ((Vec<T₁, N>,), Vec<T₂, N>, ∅, ∅).
+
+- **VecExtend(vec, target_type).** Widens a vector (e.g., Int16 → Int32). The output width may differ from the input width if the target type is wider. E = ∅. Signature: Σ(VecExtend) = ((Vec<T₁, N>,), Vec<T₂, M>, ∅, ∅), where sizeof(T₂) > sizeof(T₁) and M ≤ N.
+
+- **VecTruncate(vec, target_type).** Narrows a vector (e.g., Int32 → Int16). E = ∅. Signature: Σ(VecTruncate) = ((Vec<T₁, N>,), Vec<T₂, M>, ∅, ∅), where sizeof(T₂) < sizeof(T₁) and M ≥ N.
+
+- **VecPack(a, b).** Packs two vectors into one wider vector. E = ∅. Signature: Σ(VecPack) = ((Vec<T, N>, Vec<T, N>), Vec<T, 2N>, ∅, ∅).
+
+- **VecUnpack(vec).** Unpacks a wide vector into two narrower vectors. E = ∅. Signature: Σ(VecUnpack) = ((Vec<T, 2N>,), (Vec<T, N>, Vec<T, N>), ∅, ∅).
+
+### 6.6 Validity Invariants
+
+Valid_VecIR(G) holds iff all of the following hold:
+
+**1. Type consistency.** For every data edge (u, v), τ_out(u) ≤_T τ_in(v) at the corresponding position. Vector widths must match: if an operation requires operands of the same width, all operands must have the same width N.
+
+**2. Effect consistency.** Inherited from ET-SoN. For every state edge (u, v) on region class r, both u and v have E ≠ ∅, and the region class r is in the footprint of both u and v.
+
+**3. Control-flow well-formedness.** Inherited from ET-SoN. Every Region has k ≥ 1 control inputs. Every Phi has k data inputs. The control graph is reachable from Start and terminates at Return, Stop, or Throw.
+
+**4. Loop-structure well-formedness.**
+- Every LoopHeader has exactly one incoming control edge from outside the loop (the entry edge) and one incoming control edge from the LoopLatch (the back edge).
+- Every LoopLatch has exactly one outgoing control edge to the LoopHeader (the back edge) and zero or more outgoing control edges to LoopExit nodes.
+- Every LoopExit has exactly one incoming control edge from the LoopLatch.
+- The loop body (nodes dominated by the header and post-dominated by the latch) is well-formed: all control paths from the header to the latch pass through the loop body.
+- Induction variables are Phi nodes at the LoopHeader with a constant stride (the stride is a loop-invariant value).
+- The trip count (if statically known) is consistent with the loop bounds and stride.
+
+**5. Vector-width consistency.**
+- All vector operands of an operation have the same width N.
+- Mask operands have width N matching the vector operands.
+- Width variables w ∈ W are consistent: if a width variable appears in multiple nodes, it represents the same width throughout the graph.
+- Width constraints are satisfiable: there exists a concrete width assignment that satisfies all constraints.
+
+**6. Mask consistency.**
+- Masked operations (MaskedVecLoad, MaskedVecStore, MaskedVecReduceSum, VecSelect, VecBlend) have a mask operand with width N matching the vector operands.
+- Inactive lanes of masked loads do not access memory (the mask is respected).
+- Inactive lanes of masked stores do not write to memory.
+- Inactive lanes of masked reductions do not contribute to the result.
+
+**7. Reduction well-formedness.**
+- Every reduction node specifies an operator, identity element, and associativity/commutativity properties.
+- The operator is one of {add, mul, min, max, and, or}.
+- The identity element is correct for the operator (e.g., 0 for add, 1 for mul).
+- The reduction is associative and commutative (or the source language has explicitly opted into non-associative reduction with relaxed FP semantics).
+
+**8. Shuffle well-formedness.**
+- Static shuffles (VecShuffle) have compile-time-known indices in [0, 2N).
+- Dynamic shuffles (VecDynamicShuffle) have runtime indices, but the output width M is compile-time known.
+- The indices are valid: for VecShuffle, indices[i] < N selects from the first input, indices[i] ≥ N selects from the second input.
+
+**9. Memory-operation well-formedness.**
+- Vector loads and stores have explicit stride, alignment, and width information.
+- The alignment is a power of 2 and is consistent with the pointer type.
+- Gather/scatter operations have explicit index vectors and masks.
+- The conflict relation (from ET-SoN) is respected: vector memory operations that may alias require state edges between them.
+
+**10. Schedulability.** Inherited from ET-SoN. There exists a schedule S: N → Regions such that:
+- For every data edge (u, v), S(u) dominates S(v) in the control graph, or u is a data input to a Phi at S(v).
+- For every state edge (u, v) on region r, S(u) precedes S(v) in every control path containing both.
+- For every exception edge (u, v), S(u) is the Invoke node and S(v) is the handler Region.
+- For every effectful node n, S(n) is a Region where n's memory footprint is well-defined.
+
+**11. Loop-carried dependence consistency.**
+- For every loop-carried dependence (a data edge from a node in the loop body to a Phi at the loop header), the dependence distance is consistent with the induction variable stride.
+- No loop-carried dependence violates the vectorization legality conditions (e.g., no loop-carried dependence with distance < vector width for operations that require independence).
+
+### 6.7 Representation and Cost Model
+
+**Node layout.** Nodes are allocated in a generational arena. Each node has a fixed header (ID, opcode, E, F, metadata) followed by a variable-length edge array. Inline capacity: 4 edges; overflow spills to a secondary heap array.
+
+**Edge representation.** Integer indices into a global node table. No separate edge objects.
+
+**Loop structure representation.** Loop metadata (header, latch, exit, induction variables, trip count) is stored in a separate loop table, indexed by loop_id. Nodes reference loops by loop_id. This avoids duplicating loop metadata across nodes.
+
+**Vector-width representation.** Width variables w ∈ W are represented as symbolic identifiers. Width constraints are stored in a constraint set associated with the graph. The backend solves the constraint set during lowering.
+
+**Mask representation.** Masks are first-class values, represented as nodes in the graph. Mask operations are explicit nodes. This allows masks to be computed, combined, and passed as operands.
+
+**Memory-operation metadata.** Alignment, stride, and contiguity information are stored as metadata on vector memory nodes. This metadata is used by downstream analyses (instruction selection, code generation) to select optimal instructions.
+
+**Traversal cost.** Iterating over a node's edges is O(1) per edge, with pointer-chasing cost proportional to arena fragmentation. Loop metadata is accessed via the loop table, which is a separate data structure.
+
+**Modification cost.** Adding or removing an edge may reallocate the node's edge array. Passes that perform many incremental modifications should batch changes or use a worklist that defers edge mutations.
+
+**Memory complexity.** O(|N| · (H + Ē · W) + |L| · L_meta), where H is header size, Ē is average edge count, W is word size, |L| is the number of loops, and L_meta is the metadata size per loop.
+
+**Construction cost.** O(|N_ETSoN| · |L|) time and space, dominated by loop recognition and vector-operation insertion during vectorization.
+
+---
+
+# Machine IR — Complete Design Document (v2)
+
+## 0. Document Control and Design Scope
+
+**Component:** Intermediate Representation (Machine IR)
+
+**Version:** 2.0
+
+**Role:** Target-specific, post-instruction-selection representation. Receives Vector IR (with width selection resolved), encodes all target-specific decisions, and serves as the domain for register allocation, instruction scheduling, and final code emission.
+
+**Design Status:** Complete specification with algorithms for register allocation and instruction selection.
+
+**Scope:** This document defines the graph structure, register model, instruction semantics, register allocation algorithm, instruction selection algorithm, and validity invariants of the Machine IR. It does not define:
+- The instruction scheduling algorithm (separate subsystem operating on Machine IR)
+- The code emitter that encodes Machine IR to bytes (separate subsystem)
+- The target machine description (consumed by Machine IR, specified elsewhere)
+
+**Normative References:**
+- LLVM Machine IR representation (for CFG-based machine-level IR design)
+- GCC RTL (for implicit register use/def modeling)
+- Click, C. "Engineering a Compiler" §11 (for register allocation problem formulation)
+- Cooper, K. and Torczon, L. "Engineering a Compiler" §10.5 (for linear scan register allocation)
+- Burg, R. and Henry, W. "Optimal Tree Pattern Matching" (for DP instruction selection)
+- Target architecture manuals (x86-64, ARM64, RISC-V) for register class and instruction semantics
+
+**Known Limitations:**
+- Target machine description is not specified here; Machine IR consumes it as an external dependency
+- Instruction scheduling algorithm is deferred to a separate subsystem
+
+---
+
+## 1. Goals, Non-Goals, and Constraints
+
+### Goals
+
+1. Represent target-specific machine instructions with explicit operand kinds (register, immediate, memory, label, predicate).
+2. Model the register allocation problem precisely and solve it using live-range-aware linear scan.
+3. Perform instruction selection using dynamic programming on DAGs with up-down traversal.
+4. Make implicit register uses and defs explicit (condition codes, calling-convention clobbers, special-purpose registers).
+5. Represent the machine-level control-flow graph with explicit basic blocks and terminators.
+6. Encode calling conventions, stack frame layout, and ABI requirements.
+7. Support predication, subregister indexing, and register-class constraints.
+8. Provide sufficient information for instruction scheduling and code emission without re-analysis.
+
+### Non-Goals
+
+1. Perform instruction scheduling (separate subsystem operating on Machine IR).
+2. Encode machine code to bytes (separate subsystem).
+3. Represent target-independent optimizations (handled in ET-SoN and Vector IR).
+
+### Constraints
+
+- Machine IR construction time must be O(|Vector IR| · k), where k is a target-specific constant for instruction selection complexity.
+- Register allocation time must be O(|V| log |V|), where |V| is the number of virtual registers.
+- Instruction selection time must be O(|DAG nodes| · |patterns|), where |patterns| is the number of instruction patterns.
+- IR memory footprint must not exceed O(|instructions| · c), where c is a small constant factor for operand and metadata overhead.
+- Verifier must run in polynomial time O(|instructions| + |blocks| + |virtual regs|).
+- All register allocation constraints must be explicit — no implicit register assignments.
+
+---
+
+## 6. Intermediate Representation: Machine IR
+
+### 6.1 Purpose and Domain
+
+The Machine IR is a control-flow graph of machine basic blocks, each containing a linear sequence of machine instructions. Its purpose is to represent the program at the level of the target machine, with all target-specific decisions (instruction selection, width selection, addressing mode selection) made explicit. It serves as the domain for instruction scheduling and code emission.
+
+Unlike ET-SoN and Vector IR, Machine IR is:
+- **CFG-based**, not sea-of-nodes. Instruction order matters at the machine level due to implicit register uses/defs, condition codes, and side effects.
+- **Target-specific**. Instructions, registers, and addressing modes are drawn from the target machine description.
+- **Post-instruction-selection**. Every instruction corresponds to a target-machine opcode.
+
+### 6.2 Mathematical Specification
+
+| Requirement | Specification |
+|---|---|
+| **Domain** | G_VecIR: The set of valid Vector IR graphs, with width variables resolved to concrete widths. |
+| **Codomain** | G_MachIR: The set of valid Machine IR graphs. |
+| **Definitions** | G = (B, I, V, P, R, Σ, M). B: Machine basic blocks. I: Machine instructions. V: Virtual registers. P: Physical registers. R: Register classes. Σ: Instruction signatures. M: Target machine description. |
+| **Preconditions** | The input Vector IR graph G_VecIR satisfies Valid_VecIR(G_VecIR). Width variables have been resolved to concrete widths. The target machine description M is provided. |
+| **Postconditions** | The resulting graph G satisfies Valid_MachIR(G) (defined in 6.6). |
+| **Invariants** | Type consistency, register-class consistency, control-flow well-formedness, instruction well-formedness, implicit-use/def consistency, calling-convention consistency, liveness consistency. |
+| **Relations** | Data dependence (→_d), control dependence (→_c), register interference (⋈), register class membership (∈), subregister relation (⊑). |
+| **Failure behavior** | If G_VecIR ∉ Valid_VecIR, instruction selection rejects it. If Machine IR construction encounters an unresolvable structural contradiction (e.g., no instruction matches a vector operation), it emits an InternalCompilerError. |
+| **Complexity** | Construction: O(|N_VecIR| · k) time and space, where k is the target-specific instruction-selection complexity. Register allocation: O(|V| log |V|). |
+| **Correctness** | ⟦G_VecIR⟧ = ⟦G_MachIR⟧. The Machine IR must preserve the observational equivalence of the input Vector IR graph. |
+
+### 6.3 Graph Structure
+
+The IR is a control-flow graph G = (B, E_ctrl), where each block b ∈ B contains a linear sequence of instructions I(b) = [i₁, i₂, …, iₙ].
+
+**Machine basic blocks.** Each block b ∈ B has:
+- A unique block ID.
+- A label (for branch targets).
+- A list of predecessor blocks.
+- A list of successor blocks.
+- A terminator instruction (the last instruction, which is a branch, return, or unconditional jump).
+- A set of live-in virtual registers (registers whose values are defined outside the block and used inside).
+- A set of live-out virtual registers (registers whose values are defined inside the block and used outside).
+
+**Machine instructions.** Each instruction i ∈ I has:
+- An opcode (from the target machine description).
+- A list of operands (defined below).
+- A list of implicit uses (physical registers read but not listed as explicit operands).
+- A list of implicit defs (physical registers written but not listed as explicit operands).
+- A list of flags (e.g., "may load", "may store", "is terminator", "is barrier", "is call").
+- Optional metadata (source location, debug info, predicate).
+
+**Operands.** Each operand is one of:
+- **Register operand.** Either a virtual register v ∈ V or a physical register p ∈ P. May have a subregister index (e.g., the low 32 bits of a 64-bit register).
+- **Immediate operand.** A compile-time constant (integer, floating-point, or symbolic).
+- **Memory operand.** A base register, optional index register, displacement, and scale. Represents an addressing mode.
+- **Label operand.** A reference to a machine basic block (for branches).
+- **Predicate operand.** A mask or condition code (for predicated instructions).
+
+**Virtual registers.** V = {v₀, v₁, v₂, …}. Each virtual register v has:
+- A unique ID.
+- A register class constraint R(v) ⊆ P (the set of physical registers that v may be allocated to).
+- A type (e.g., Int32, Float64, Vec<Int32, 8>).
+- A definition point (the instruction that defines v).
+- A set of use points (the instructions that use v).
+- A live range [start(v), end(v)] (the first and last instruction indices where v is live).
+
+**Physical registers.** P = {p₀, p₁, p₂, …} (target-specific). Each physical register p has:
+- A unique ID.
+- A register class membership (p ∈ R for some R).
+- A set of subregisters (e.g., x86's rax has subregisters eax, ax, al, ah).
+- A set of aliases (registers that overlap with p, e.g., rax and eax alias).
+- A calling-convention role (caller-saved, callee-saved, argument, return value, or reserved).
+
+**Register classes.** R = {R₁, R₂, …} (target-specific). Each register class R has:
+- A set of physical registers R ⊆ P.
+- A size (in bits).
+- An alignment requirement.
+- A set of subregister classes (e.g., GPR32 is a subregister class of GPR64).
+
+### 6.4 Type System and Register Model
+
+**Scalar types.** Inherited from Vector IR: Int8, Int16, Int32, Int64, UInt8, …, Float32, Float64, Bool, Ptr<T>.
+
+**Vector types.** Concrete widths only (width variables have been resolved). Vec<T, N> where N is a concrete positive integer.
+
+**Register-class types.** Each virtual register v has a register class constraint R(v). The register class determines:
+- The size of the value (e.g., GPR32 holds 32-bit values).
+- The alignment requirement.
+- The set of physical registers that v may be allocated to.
+
+**Type consistency rules.**
+- The type of a virtual register must be compatible with its register class: if v has type Int32, then R(v) must be a 32-bit register class (e.g., GPR32).
+- Instruction operands must match the instruction's signature: if an instruction expects a GPR32 operand, the operand must be a virtual register with register class GPR32 or a physical register in GPR32.
+- Memory operands must have types compatible with the addressing mode: e.g., a 32-bit load must have a 32-bit destination register.
+
+**Register allocation: live-range-aware linear scan.**
+
+The register allocation algorithm is live-range-aware linear scan. The algorithm operates as follows:
+
+**Input:**
+- A set of virtual registers V, each with a live range [start(v), end(v)] and register class constraint R(v).
+- A set of physical registers P, partitioned by register class.
+- An interference relation ⋈ ⊆ V × V (two virtual registers interfere if their live ranges overlap).
+- A set of physical register reservations (for calling convention, special instructions).
+
+**Algorithm:**
+
+1. **Sort virtual registers by start point.** Create a list L of all virtual registers, sorted by start(v) in ascending order.
+
+2. **Initialize data structures.**
+   - active: an empty list of virtual registers currently assigned to physical registers, sorted by end point.
+   - free_regs[R]: for each register class R, a list of available physical registers in R.
+   - spill_cost[v]: for each virtual register v, the estimated cost of spilling v (based on live range length, loop depth, and execution frequency).
+
+3. **Iterate through L.** For each virtual register v in L:
+   
+   a. **Expire old intervals.** Remove from active all registers u where end(u) < start(v). Add their physical registers back to the appropriate free_regs lists.
+   
+   b. **Find a free register.** If free_regs[R(v)] is non-empty:
+      - Assign v to a physical register p ∈ free_regs[R(v)].
+      - Remove p from free_regs[R(v)].
+      - Add v to active, maintaining sorted order by end(v).
+   
+   c. **Otherwise, spill.** If free_regs[R(v)] is empty:
+      - Let u be the register in active with the largest end point (the one that extends furthest into the future).
+      - If end(u) > end(v) (u extends further than v):
+        - Spill v: allocate a spill slot for v, do not assign a physical register.
+      - Otherwise (end(v) ≥ end(u), v extends further):
+        - Spill u: allocate a spill slot for u, assign u's physical register to v.
+        - Remove u from active.
+        - Add v to active, maintaining sorted order by end(v).
+
+4. **Insert spill code.** For each spilled virtual register v:
+   - After the definition of v, insert a SPILL instruction that stores v to its spill slot.
+   - Before each use of v, insert a RELOAD instruction that loads v from its spill slot into a temporary physical register.
+
+**Output:**
+- A mapping f: V → P ∪ S, where S is the set of spill slots.
+- A modified instruction sequence with SPILL and RELOAD instructions inserted.
+
+**Complexity:** O(|V| log |V|) time, dominated by sorting and maintaining the active list.
+
+**Spill cost model.** The spill cost of a virtual register v is:
+
+    spill_cost(v) = live_range_length(v) · execution_frequency(v) · loop_depth_factor(v)
+
+where:
+- live_range_length(v) = end(v) - start(v)
+- execution_frequency(v) is the estimated execution frequency of the block containing v's definition
+- loop_depth_factor(v) is 1 + 0.1 · loop_depth(v), where loop_depth(v) is the nesting depth of the innermost loop containing v
+
+Higher spill cost means the register is more expensive to spill, so the algorithm prefers to spill registers with lower spill cost.
+
+**Subregister indexing.** For targets with subregisters (e.g., x86), a virtual register v may be defined or used at a subregister index. For example, a 32-bit operation may define the low 32 bits of a 64-bit virtual register. The subregister index is part of the register operand.
+
+**Implicit uses and defs.** Some instructions implicitly read or write physical registers that are not listed as explicit operands. Examples:
+- x86 arithmetic instructions implicitly read and write the flags register (EFLAGS).
+- Call instructions implicitly clobber caller-saved registers.
+- Return instructions implicitly read the return-value register.
+
+These implicit uses and defs are listed explicitly in the instruction's metadata. They participate in liveness analysis and register allocation.
+
+### 6.5 Instruction Selection: DP on DAG up-down
+
+**Instruction selection algorithm.** The instruction selection algorithm is dynamic programming on DAGs with up-down traversal. The algorithm operates as follows:
+
+**Input:**
+- A DAG of operations from Vector IR (after lowering to scalar/vector operations).
+- A set of instruction patterns, where each pattern is a tree of operations that can be matched by a single machine instruction or a sequence of instructions.
+- A cost function cost(pattern) that returns the cost (in cycles or bytes) of using a pattern.
+
+**Algorithm:**
+
+The algorithm processes the DAG in two passes: bottom-up labeling, then top-down selection.
+
+**Pass 1: Bottom-up labeling.**
+
+For each node n in the DAG (processed in post-order, i.e., children before parents):
+
+1. **Initialize labels.** Create a set labels(n) of (pattern, cost) pairs, initially empty.
+
+2. **Match patterns.** For each instruction pattern p that matches the subtree rooted at n:
+   - Check if all children of p match the corresponding children of n.
+   - If p matches, compute the cost: cost(p) + Σ cost(labels(child)[p_child]) for each child, where p_child is the pattern matched at that child.
+   - Add (p, total_cost) to labels(n).
+
+3. **Keep minimum cost.** For each pattern p that can produce the value at n, keep only the (p, cost) pair with the minimum cost.
+
+**Pass 2: Top-down selection.**
+
+Starting from the root of the DAG (or the roots, if the DAG has multiple outputs):
+
+1. **Select pattern.** For the current node n, select the pattern p ∈ labels(n) with the minimum cost.
+
+2. **Emit instructions.** Emit the machine instruction(s) corresponding to p.
+
+3. **Recurse on children.** For each child c of p, recursively select the pattern for c and emit instructions.
+
+**Output:**
+- A sequence of machine instructions that implements the DAG.
+
+**Complexity:** O(|DAG nodes| · |patterns|) time, where |patterns| is the number of instruction patterns. The bottom-up pass processes each node once, and for each node, it checks all patterns. The top-down pass processes each node once.
+
+**Pattern matching.** Patterns are specified as trees of operations. For example, a pattern for x86 ADD might be:
+
+    ADD(pattern1, pattern2)
+
+where pattern1 and pattern2 are themselves patterns (e.g., register, memory, immediate). The pattern matcher checks if the DAG subtree matches the pattern tree, recursively matching children.
+
+**Cost model.** The cost of a pattern is the sum of:
+- The instruction cost (in cycles or bytes).
+- The cost of the patterns matched at the children.
+- Any additional cost for register constraints, memory access, or other target-specific factors.
+
+The cost function is target-specific and defined by the target machine description.
+
+**Handling DAGs with multiple roots.** If the DAG has multiple roots (multiple output values), the algorithm processes each root independently. If two roots share a common subexpression, the subexpression is computed once and the result is reused.
+
+**Handling cycles.** The DAG may contain cycles due to Phi nodes or loop-carried dependencies. The algorithm breaks cycles by selecting a cut point (e.g., a Phi node) and processing the DAG as a tree rooted at the cut point.
+
+### 6.6 Instruction Semantics
+
+**Instruction opcodes.** The set of opcodes is target-specific and defined by the target machine description. Examples for x86-64:
+- ADD32rr, ADD32ri, ADD64rr, ADD64ri (integer addition)
+- MOV32rr, MOV64rr, MOV32mi, MOV64mi (move)
+- JMP, JCC (jump, conditional jump)
+- CALL, RET (call, return)
+- VADDPS, VMULPS (vector floating-point add, multiply)
+- VPGATHERDD (vector gather)
+
+**Instruction signatures.** Each opcode has a signature Σ(opcode) = (τ⃗_in, τ⃗_out, implicit_uses, implicit_defs, flags), where:
+- τ⃗_in: the types of the explicit input operands.
+- τ⃗_out: the types of the explicit output operands.
+- implicit_uses: the set of physical registers implicitly read.
+- implicit_defs: the set of physical registers implicitly written.
+- flags: metadata flags (may load, may store, is terminator, is barrier, is call, etc.).
+
+**Instruction categories.**
+
+**Arithmetic and logic.** ADD, SUB, MUL, DIV, AND, OR, XOR, SHL, SHR, NEG, NOT. Operands: register or immediate inputs, register output. Implicit defs: flags register (for targets with condition codes).
+
+**Memory operations.** LOAD, STORE. Operands: memory operand (base, index, displacement, scale), register input/output. Flags: may load, may store. Alignment and size are part of the memory operand.
+
+**Vector operations.** VADD, VMUL, VFMA, VMIN, VMAX, VSHUFF, VGATHER, VSCATTER. Operands: vector register inputs/outputs, optional mask operand. Flags: may load (for gather), may store (for scatter).
+
+**Control flow.** JMP, JCC, CALL, RET. Operands: label operand (for jumps), register operands (for calls). Flags: is terminator, is barrier (for calls), is call.
+
+**Move and convert.** MOV, MOVZX, MOVSX, CVTSI2SS, CVTSS2SI. Operands: register or memory input, register output.
+
+**Predicate and mask.** CMP, TEST, SETCC. Operands: register inputs, register or flags output. Implicit defs: flags register.
+
+**Spill and reload.** SPILL, RELOAD. Pseudo-instructions used by register allocation to represent stack spills and reloads. Operands: virtual register, stack slot. Flags: may load (for reload), may store (for spill).
+
+**Phi.** PHI. Pseudo-instruction at the beginning of a block to merge values from different predecessors. Operands: one register input per predecessor, one register output.
+
+**Nop.** NOP. No-op instruction. Used for alignment padding.
+
+### 6.7 Validity Invariants
+
+Valid_MachIR(G) holds iff all of the following hold:
+
+**1. Type consistency.** For every instruction i and every operand position k, the type of the operand matches the expected type Σ(opcode(i))[k]. For register operands, the virtual register's type must be compatible with the operand type.
+
+**2. Register-class consistency.** For every virtual register v, the register class constraint R(v) is non-empty and is a valid register class in the target machine description. For every register operand (virtual or physical), the register's class is compatible with the operand's expected class.
+
+**3. Control-flow well-formedness.**
+- Every block has exactly one terminator instruction (the last instruction).
+- Every block has at least one predecessor (except the entry block).
+- Every block has at least one successor (except exit blocks).
+- The control-flow graph is reachable from the entry block.
+- All branch targets are valid block labels.
+- Conditional branches have exactly two successors.
+
+**4. Instruction well-formedness.**
+- Every instruction's opcode is valid in the target machine description.
+- Every instruction's operand count matches the opcode's signature.
+- Every instruction's operand types match the opcode's signature.
+- Every instruction's implicit uses and defs are valid physical registers.
+- Every instruction's flags are consistent with the opcode (e.g., a LOAD instruction has the "may load" flag).
+
+**5. Implicit-use/def consistency.**
+- For every implicit use of a physical register p in instruction i, p is live at the point of i.
+- For every implicit def of a physical register p in instruction i, p is not live after i (or is redefined before use).
+- Implicit uses and defs are consistent with the target's ABI and instruction semantics.
+
+**6. Calling-convention consistency.**
+- For every CALL instruction, the arguments are passed in the correct registers or stack slots according to the target's calling convention.
+- For every CALL instruction, the caller-saved registers are marked as clobbered (implicit defs).
+- For every RET instruction, the return value is in the correct register according to the target's calling convention.
+- Callee-saved registers are saved and restored around the function body.
+
+**7. Liveness consistency.**
+- For every virtual register v, v is defined exactly once (single static assignment).
+- For every use of v, v is live at the point of use (i.e., v is defined before the use and not killed in between).
+- The live-in and live-out sets of each block are consistent with the definitions and uses within the block.
+- Phi operands are live-out of the corresponding predecessor blocks.
+
+**8. Spill-slot consistency.**
+- Every spill slot is allocated on the stack frame.
+- Every SPILL instruction writes to a valid spill slot.
+- Every RELOAD instruction reads from a valid spill slot.
+- Spill slots do not overlap (unless explicitly allowed for optimization).
+
+**9. Memory-operation consistency.**
+- Every memory operand has a valid addressing mode (base, index, displacement, scale).
+- The alignment of every memory operand is consistent with the target's alignment requirements.
+- The size of every memory operation matches the operand type.
+
+**10. Predicate consistency.**
+- For predicated instructions, the predicate operand is a valid mask or condition code.
+- The predicate width matches the instruction's vector width (for vector predication).
+
+**11. Subregister consistency.**
+- For subregister operands, the subregister index is valid for the register.
+- The subregister size matches the operand type.
+- Subregister writes do not partially overwrite a register unless explicitly allowed by the target.
+
+### 6.8 Representation and Cost Model
+
+**Block layout.** Machine basic blocks are stored in a list, in layout order (the order in which they will be emitted). Each block has a fixed header (block ID, label, predecessor/successor lists, live-in/live-out sets) followed by a list of instruction pointers.
+
+**Instruction layout.** Each instruction is a fixed-size structure (opcode, operand list pointer, implicit-use list pointer, implicit-def list pointer, flags, metadata pointer). Operands are stored in a separate operand array to reduce instruction size.
+
+**Operand layout.** Each operand is a tagged union (register, immediate, memory, label, predicate). Register operands have a register ID (virtual or physical) and an optional subregister index. Memory operands have a base register, index register, displacement, and scale.
+
+**Virtual register layout.** Virtual registers are stored in a table, indexed by virtual register ID. Each entry has the register class constraint, type, definition point, use list, and live range.
+
+**Physical register layout.** Physical registers are defined by the target machine description. They are stored in a table, indexed by physical register ID. Each entry has the register class membership, subregister list, alias list, and calling-convention role.
+
+**Register class layout.** Register classes are defined by the target machine description. They are stored in a table, indexed by register class ID. Each entry has the set of physical registers, size, alignment, and subregister classes.
+
+**Spill slot layout.** Spill slots are allocated on the stack frame. Each spill slot has an offset from the frame pointer and a size. Spill slots are stored in a table, indexed by spill slot ID.
+
+**Traversal cost.** Iterating over a block's instructions is O(1) per instruction, with pointer-chasing cost proportional to memory layout. Iterating over an instruction's operands is O(1) per operand.
+
+**Modification cost.** Adding or removing an instruction requires updating the block's instruction list. Adding or removing a virtual register requires updating the virtual register table and all instructions that use it. Passes that perform many incremental modifications should batch changes or use a worklist that defers mutations.
+
+**Memory complexity.** O(|B| · B_header + |I| · I_header + |I| · Ē · O_size + |V| · V_entry + |S| · S_entry), where B_header is block header size, I_header is instruction header size, Ē is average operand count per instruction, O_size is operand size, V_entry is virtual register entry size, and S_entry is spill slot entry size.
+
+**Construction cost.** O(|N_VecIR| · k) time and space, dominated by instruction selection and operand allocation. Register allocation: O(|V| log |V|). Instruction selection: O(|DAG nodes| · |patterns|).
+
+---
+
+
+# Instruction Scheduling Subsystem — Complete Design Document (v1)
+
+## 0. Document Control and Design Scope
+
+**Component:** Instruction Scheduling Subsystem
+
+**Version:** 1.0
+
+**Role:** Post-register-allocation optimization phase. Receives Machine IR with physical registers assigned, reorders instructions within basic blocks and loops to minimize execution time subject to data dependencies, resource constraints, and latency requirements.
+
+**Design Status:** Complete specification.
+
+**Scope:** This document defines the scheduling problem, dependency model, scheduling algorithms (list scheduling for local scheduling, modulo scheduling for loops), validity invariants, and cost model. It does not define:
+- The register allocation algorithm (already completed; scheduling operates on its output)
+- The code emitter that encodes Machine IR to bytes (separate subsystem)
+- The target machine description (consumed by the scheduler, specified elsewhere)
+
+**Normative References:**
+- Gibbons, G. and Muchnick, V. "Optimizing Instruction Scheduling for the Itanium Architecture" (for list scheduling)
+- Lam, M. "Software Pipelining: An Effective Scheduling Technique for VLIW Machines" (for modulo scheduling)
+- Aho, A., Lam, M., Sethi, R., and Ullman, J. "Compilers: Principles, Techniques, and Tools" §10.7 (for scheduling fundamentals)
+- Target architecture manuals for execution unit models, latency tables, and resource constraints
+
+**Known Limitations:**
+- Target machine description (execution units, latencies, resource constraints) is not specified here; the scheduler consumes it as an external dependency
+- Trace scheduling for hyperblocks is not covered (deferred to future work)
+
+---
+
+## 1. Goals, Non-Goals, and Constraints
+
+### Goals
+
+1. Reorder instructions within basic blocks to minimize execution time while preserving all data dependencies and semantic correctness.
+2. Schedule loop bodies using software pipelining to overlap iterations and hide latencies.
+3. Respect target-specific resource constraints (execution units, issue width, memory ports).
+4. Account for instruction latencies to maximize instruction-level parallelism.
+5. Preserve all register allocation decisions (no register reassignment).
+6. Provide a mathematically verifiable scheduling that can be validated for correctness.
+
+### Non-Goals
+
+1. Perform register allocation (already completed; scheduling operates on its output).
+2. Perform instruction selection (already completed; scheduling operates on its output).
+3. Encode machine code to bytes (separate subsystem).
+4. Perform trace scheduling across multiple basic blocks (deferred).
+
+### Constraints
+
+- Local scheduling time must be O(|I|² · |E|), where |I| is the number of instructions in a block and |E| is the number of dependency edges.
+- Modulo scheduling time must be O(|I| · |E| · II_max), where II_max is the maximum initiation interval explored.
+- Scheduling must preserve all data dependencies: if instruction A must precede instruction B, the schedule must respect this ordering.
+- Scheduling must respect all resource constraints: no more instructions of a given type may be issued in a cycle than the target allows.
+- Scheduling must respect all latency constraints: if instruction A produces a value used by instruction B, and the latency is L cycles, then B must be issued at least L cycles after A.
+
+---
+
+## 6. Instruction Scheduling Subsystem
+
+### 6.1 Purpose and Domain
+
+The Instruction Scheduling Subsystem operates on Machine IR after register allocation. Its purpose is to reorder instructions to maximize instruction-level parallelism (ILP) while respecting data dependencies, resource constraints, and latency requirements. The scheduler produces a reordered instruction sequence that minimizes execution time on the target architecture.
+
+The subsystem performs two types of scheduling:
+1. **Local scheduling** (within basic blocks): reorders instructions in a single block using list scheduling.
+2. **Loop scheduling** (software pipelining): overlaps loop iterations using modulo scheduling.
+
+### 6.2 Mathematical Specification
+
+| Requirement | Specification |
+|---|---|
+| **Domain** | G_MachIR: The set of valid Machine IR graphs, post-register-allocation. |
+| **Codomain** | G_MachIR': The set of valid Machine IR graphs with reordered instructions. |
+| **Definitions** | S: schedule (mapping from instructions to cycle numbers). D: dependency graph (data dependencies, resource constraints, latencies). R: resource model (execution units, issue width, memory ports). |
+| **Preconditions** | The input Machine IR graph G_MachIR satisfies Valid_MachIR(G_MachIR). Register allocation is complete (all virtual registers are assigned to physical registers or spill slots). The target machine description M is provided. |
+| **Postconditions** | The resulting graph G_MachIR' satisfies Valid_MachIR(G_MachIR') and Valid_Schedule(G_MachIR', S). |
+| **Invariants** | Dependency preservation, resource constraint satisfaction, latency constraint satisfaction, register allocation preservation. |
+| **Relations** | Data dependence (→_d), anti-dependence (→_a), output dependence (→_o), resource conflict (⋈_r). |
+| **Failure behavior** | If G_MachIR ∉ Valid_MachIR, scheduling rejects it. If no valid schedule exists (e.g., resource constraints are unsatisfiable), the scheduler emits a compilation error. |
+| **Complexity** | Local scheduling: O(|I|² · |E|). Modulo scheduling: O(|I| · |E| · II_max). |
+| **Correctness** | ⟦G_MachIR⟧ = ⟦G_MachIR'⟧. The scheduled Machine IR must preserve the observational equivalence of the input Machine IR graph. |
+
+### 6.3 Dependency Model
+
+The scheduler operates on a dependency graph D = (I, E), where I is the set of instructions and E is the set of dependency edges.
+
+**Dependency types.**
+
+1. **Data dependence (true dependence).** A →_d B means instruction A produces a value that instruction B consumes. This is a hard constraint: B cannot execute before A completes.
+
+2. **Anti-dependence.** A →_a B means instruction A reads a value that instruction B overwrites. This can be resolved by renaming (if registers are available) or by enforcing ordering.
+
+3. **Output dependence.** A →_o B means both A and B write to the same register or memory location. This can be resolved by renaming or by enforcing ordering.
+
+4. **Resource conflict.** A ⋈_r B means A and B cannot execute in the same cycle due to resource constraints (e.g., both require the same execution unit, or both require a memory port).
+
+**Latency model.** Each instruction A has a latency lat(A) that specifies the number of cycles between when A is issued and when its result is available. For a data dependence A →_d B, the constraint is:
+
+    cycle(B) ≥ cycle(A) + lat(A)
+
+**Resource model.** The target machine description specifies:
+- **Issue width W:** the maximum number of instructions that can be issued per cycle.
+- **Execution units:** a set of functional units (e.g., ALU, FPU, load/store unit, branch unit). Each instruction requires one or more execution units.
+- **Unit constraints:** for each execution unit type, the maximum number of instructions of that type that can be issued per cycle.
+- **Memory ports:** the number of simultaneous memory operations (loads/stores) that can be issued per cycle.
+
+**Dependency graph construction.** The dependency graph is constructed as follows:
+
+1. **Data dependencies.** For each instruction B that uses a value produced by instruction A, add an edge A →_d B with weight lat(A).
+
+2. **Anti-dependencies and output dependencies.** For each pair of instructions A and B where A and B access the same register or memory location, add an edge A →_a B or A →_o B as appropriate. These edges have weight 0 (no latency constraint, but ordering must be preserved unless renaming is possible).
+
+3. **Resource constraints.** Resource constraints are not represented as edges in the dependency graph. Instead, they are enforced during scheduling by checking that the number of instructions of each type issued in each cycle does not exceed the target's resource limits.
+
+### 6.4 Local Scheduling: List Scheduling
+
+**Algorithm.** Local scheduling uses list scheduling, a greedy priority-based algorithm. The algorithm operates as follows:
+
+**Input:**
+- A basic block B with a sequence of instructions I = [i₁, i₂, …, iₙ].
+- A dependency graph D = (I, E) with data, anti, and output dependencies.
+- A target machine description M with execution units, latencies, and resource constraints.
+
+**Algorithm:**
+
+1. **Compute priorities.** For each instruction i ∈ I, compute a priority priority(i). The priority is typically the length of the longest path from i to any sink (instruction with no successors) in the dependency graph. Instructions on the critical path have the highest priority.
+
+2. **Initialize ready list.** Create a ready list R containing all instructions with no predecessors (no incoming dependency edges). Sort R by priority in descending order.
+
+3. **Initialize cycle counter.** Set cycle = 0.
+
+4. **Schedule instructions.** While R is not empty or there are unscheduled instructions:
+   
+   a. **Select instructions for this cycle.** From R, select up to W instructions (where W is the issue width) that can be issued in this cycle without violating resource constraints. Selection is greedy: choose the highest-priority instructions first.
+   
+   b. **Check resource constraints.** For each selected instruction, check that:
+      - The required execution units are available in this cycle.
+      - The memory port limit is not exceeded (if the instruction is a load or store).
+      - No resource conflict exists with other instructions selected for this cycle.
+   
+   c. **Issue instructions.** For each instruction i that passes the resource check:
+      - Assign cycle(i) = cycle.
+      - Remove i from R.
+      - Mark the required execution units as busy for this cycle.
+   
+   d. **Update ready list.** For each instruction j that was just issued:
+      - For each successor k of j in the dependency graph:
+        - If all predecessors of k have been issued and cycle ≥ cycle(pred) + lat(pred) for all predecessors pred, add k to R.
+      - Sort R by priority in descending order.
+   
+   e. **Increment cycle.** Set cycle = cycle + 1.
+
+5. **Handle anti-dependencies and output dependencies.** If anti-dependencies or output dependencies prevent scheduling, insert NOPs or reorder instructions to resolve them. If renaming is possible (e.g., using different physical registers), perform renaming.
+
+**Output:**
+- A schedule S: I → ℕ, mapping each instruction to a cycle number.
+- A reordered instruction sequence I' = [i'_1, i'_2, …, i'_n], sorted by cycle number.
+
+**Complexity:** O(|I|² · |E|) time. For each cycle, we iterate over the ready list (O(|I|) in the worst case) and check resource constraints (O(|E|) in the worst case). The number of cycles is O(|I|) in the worst case.
+
+**Priority heuristics.** The priority of an instruction can be computed using several heuristics:
+- **Critical path length:** the length of the longest path from the instruction to any sink. This prioritizes instructions on the critical path.
+- **Number of successors:** instructions with more successors are prioritized to unblock more instructions.
+- **Latency:** instructions with longer latencies are prioritized to hide their latency.
+
+The default priority is critical path length.
+
+### 6.5 Loop Scheduling: Modulo Scheduling
+
+**Algorithm.** Loop scheduling uses modulo scheduling (software pipelining) to overlap loop iterations. The algorithm operates as follows:
+
+**Input:**
+- A loop L with a loop body B containing a sequence of instructions I = [i₁, i₂, …, iₙ].
+- A dependency graph D = (I, E) with data, anti, and output dependencies, including loop-carried dependencies.
+- A target machine description M with execution units, latencies, and resource constraints.
+
+**Algorithm:**
+
+1. **Compute bounds on initiation interval (II).** The initiation interval II is the number of cycles between the start of consecutive loop iterations. Compute lower bounds on II:
+   
+   - **Recurrence bound (RecMII):** for each cycle in the dependency graph with total latency L and distance d (number of loop iterations), the recurrence bound is ⌈L / d⌉. The RecMII is the maximum over all cycles.
+   
+   - **Resource bound (ResMII):** for each resource type (execution unit, memory port), compute the number of instructions of that type in the loop body divided by the number of that resource available per cycle. The ResMII is the maximum over all resource types.
+   
+   - **Minimum II (MII):** MII = max(RecMII, ResMII).
+
+2. **Try initiation intervals.** Start with II = MII. If scheduling fails, increment II and try again. Continue until II exceeds a maximum limit (e.g., II_max = 2 · MII) or a valid schedule is found.
+
+3. **Schedule the loop body.** For a given II, schedule the instructions in the loop body as follows:
+   
+   a. **Initialize ready list.** Create a ready list R containing all instructions with no predecessors (including no loop-carried predecessors from previous iterations).
+   
+   b. **Initialize cycle counter.** Set cycle = 0.
+   
+   c. **Schedule instructions.** While R is not empty or there are unscheduled instructions:
+      
+      - **Select instructions for this cycle.** From R, select up to W instructions that can be issued in this cycle without violating resource constraints. For each instruction i, check that:
+        - The required execution units are available in this cycle (modulo II, i.e., cycle mod II).
+        - The memory port limit is not exceeded (modulo II).
+        - No resource conflict exists with other instructions selected for this cycle (modulo II).
+        - All latency constraints are satisfied: for each predecessor p of i, cycle(i) ≥ cycle(p) + lat(p) - II · dist(p, i), where dist(p, i) is the loop-carried distance.
+      
+      - **Issue instructions.** For each instruction i that passes the checks:
+        - Assign cycle(i) = cycle.
+        - Remove i from R.
+        - Mark the required execution units as busy for this cycle (modulo II).
+      
+      - **Update ready list.** For each instruction j that was just issued:
+        - For each successor k of j in the dependency graph:
+          - If all predecessors of k have been issued (including loop-carried predecessors from previous iterations) and the latency constraints are satisfied, add k to R.
+      
+      - **Increment cycle.** Set cycle = cycle + 1.
+      
+      - **Check for completion.** If all instructions have been scheduled and cycle ≤ II, the schedule is valid. Otherwise, try the next II.
+
+4. **Generate prolog and epilog.** The modulo schedule produces a pipelined loop body. Generate prolog code to fill the pipeline and epilog code to drain the pipeline. The prolog executes the first few iterations without full pipelining, and the epilog executes the last few iterations without full pipelining.
+
+5. **Register renaming.** If anti-dependencies or output dependencies span loop iterations, perform register renaming to eliminate them. Allocate additional registers to hold values from different iterations.
+
+**Output:**
+- A schedule S: I → ℕ, mapping each instruction to a cycle number (modulo II).
+- A pipelined loop body with prolog and epilog code.
+- The initiation interval II.
+
+**Complexity:** O(|I| · |E| · II_max) time. For each II, we iterate over the instructions and check resource and latency constraints. The number of II values tried is II_max - MII.
+
+**Register pressure.** Modulo scheduling increases register pressure because values from multiple iterations are live simultaneously. The scheduler must check that the register pressure does not exceed the available registers. If register pressure is too high, the scheduler may need to increase II or fall back to unscheduled execution.
+
+### 6.6 Validity Invariants
+
+Valid_Schedule(G_MachIR', S) holds iff all of the following hold:
+
+**1. Dependency preservation.** For every dependency edge (A, B) in the dependency graph:
+- If (A, B) is a data dependence with latency L, then cycle(B) ≥ cycle(A) + L.
+- If (A, B) is an anti-dependence or output dependence, then cycle(B) ≥ cycle(A) (unless renaming is performed).
+
+**2. Resource constraint satisfaction.** For every cycle c and every resource type r:
+- The number of instructions issued in cycle c that require resource r does not exceed the target's limit for r.
+
+**3. Latency constraint satisfaction.** For every instruction A and every successor B of A:
+- cycle(B) ≥ cycle(A) + lat(A) - II · dist(A, B), where dist(A, B) is the loop-carried distance (0 for non-loop-carried dependencies).
+
+**4. Register allocation preservation.** The schedule does not change any register assignments. All virtual registers remain assigned to the same physical registers or spill slots as in the input Machine IR.
+
+**5. Control-flow preservation.** The schedule does not change the control-flow graph. All branch targets, loop structure, and exception handling remain unchanged.
+
+**6. Semantic preservation.** The scheduled instruction sequence produces the same observable behavior as the input instruction sequence. All data dependencies, memory ordering, and exception semantics are preserved.
+
+### 6.7 Representation and Cost Model
+
+**Schedule representation.** The schedule is represented as a mapping from instruction IDs to cycle numbers. For modulo scheduling, the cycle number is modulo II.
+
+**Dependency graph representation.** The dependency graph is represented as an adjacency list. Each instruction has a list of successors with edge weights (latencies and distances).
+
+**Resource model representation.** The resource model is represented as a set of resource types, each with a capacity (maximum number of instructions per cycle). Each instruction has a set of required resources.
+
+**Priority queue representation.** The ready list is represented as a priority queue, sorted by instruction priority.
+
+**Traversal cost.** Iterating over the dependency graph is O(|I| + |E|). Checking resource constraints is O(|resources|) per cycle.
+
+**Modification cost.** Reordering instructions requires updating the instruction sequence in the basic block. The dependency graph is not modified (it is computed once before scheduling).
+
+**Memory complexity.** O(|I| + |E| + |resources|) for the dependency graph and resource model.
+
+**Construction cost.** Local scheduling: O(|I|² · |E|). Modulo scheduling: O(|I| · |E| · II_max).
+---
+
+# Code Emission Subsystem — Complete Design Document (v1)
+
+## 0. Document Control and Design Scope
+
+**Component:** Code Emission Subsystem
+
+**Version:** 1.0
+
+**Role:** Final compilation stage. Receives scheduled Machine IR, encodes instructions into target-specific binary format, generates relocations, symbol tables, and section layout, and produces a conforming object file or assembly output.
+
+**Design Status:** Complete specification.
+
+**Scope:** This document defines the encoding model, relocation model, symbol table model, section layout model, object file format, validity invariants, and cost model. It does not define:
+- The instruction scheduling algorithm (already completed; emission operates on its output)
+- The target machine description (consumed by the emitter, specified elsewhere)
+- The linker that combines object files into an executable (separate subsystem)
+- The runtime loader that loads the executable into memory (separate subsystem)
+
+**Normative References:**
+- System V Application Binary Interface (for ELF format)
+- Apple Mach-O Runtime Architecture (for Mach-O format)
+- Microsoft Portable Executable and Common Object File Format Specification (for PE/COFF format)
+- Target architecture manuals (x86-64, ARM64, RISC-V) for instruction encoding
+
+**Known Limitations:**
+- Target machine description (instruction encoding tables, relocation types) is not specified here; the emitter consumes it as an external dependency
+- Linker script processing is not covered (deferred to linker subsystem)
+- Debug information emission (DWARF, PDB) is not covered (deferred to separate subsystem)
+
+---
+
+## 1. Goals, Non-Goals, and Constraints
+
+### Goals
+
+1. Encode each Machine IR instruction into its target-specific binary representation according to the ISA specification.
+2. Generate relocation entries for all symbols, addresses, and references that cannot be resolved at compile time.
+3. Produce a conforming symbol table with all external symbols, function labels, and global variables.
+4. Organize code and data into appropriate sections (text, data, bss, rodata) with correct alignment and attributes.
+5. Produce output in a standard object file format (ELF, Mach-O, or PE/COFF) that can be consumed by the target's linker.
+6. Resolve all fixups (addresses and offsets that depend on the final layout) correctly.
+7. Provide a mathematically verifiable emission process that can be validated for correctness.
+
+### Non-Goals
+
+1. Perform instruction scheduling (already completed; emission operates on its output).
+2. Perform register allocation (already completed; emission operates on its output).
+3. Link object files into an executable (separate subsystem).
+4. Generate debug information (separate subsystem).
+5. Perform whole-program optimization (already completed in earlier stages).
+
+### Constraints
+
+- Code emission time must be O(|I| · k), where |I| is the number of instructions and k is a target-specific constant for encoding complexity.
+- Emission must produce output that conforms to the target's object file format specification.
+- All relocations must be generated for references that cannot be resolved at compile time.
+- All symbols must be present in the symbol table with correct visibility and binding.
+- All sections must have correct alignment, attributes, and content.
+- The emitted object file must be loadable by the target's linker without errors.
+
+---
+
+## 6. Code Emission Subsystem
+
+### 6.1 Purpose and Domain
+
+The Code Emission Subsystem operates on scheduled Machine IR. Its purpose is to translate the abstract machine-level representation into a concrete binary format that can be linked and executed on the target architecture. The emitter performs instruction encoding, relocation generation, symbol table construction, section layout, and object file assembly.
+
+The subsystem produces one of two output formats:
+1. **Object file** (ELF, Mach-O, or PE/COFF): a binary file containing encoded instructions, data, relocations, and metadata.
+2. **Assembly file**: a textual representation of the instructions in the target's assembly language.
+
+### 6.2 Mathematical Specification
+
+| Requirement | Specification |
+|---|---|
+| **Domain** | G_MachIR': The set of valid Machine IR graphs, post-instruction-scheduling. |
+| **Codomain** | O_obj: The set of valid object files (ELF, Mach-O, or PE/COFF). |
+| **Definitions** | E: encoding function (maps instructions to bytes). R: relocation set. S: symbol table. L: section layout. F: object file format. |
+| **Preconditions** | The input Machine IR graph G_MachIR' satisfies Valid_MachIR(G_MachIR') and Valid_Schedule(G_MachIR', S). The target machine description M is provided. The output format F is specified. |
+| **Postconditions** | The resulting object file O satisfies Valid_Obj(O, F). |
+| **Invariants** | Encoding correctness, relocation completeness, symbol table completeness, section layout correctness, format conformance. |
+| **Relations** | Instruction-to-bytes mapping (→_enc), symbol-to-address mapping (→_addr), relocation-to-reference mapping (→_ref). |
+| **Failure behavior** | If G_MachIR' ∉ Valid_MachIR or ∉ Valid_Schedule, emission rejects it. If encoding fails (e.g., an instruction cannot be encoded due to operand constraints), the emitter emits a compilation error. If the object file format is violated, the emitter emits an internal compiler error. |
+| **Complexity** | Emission: O(|I| · k + |R| + |S| + |L|), where |I| is instruction count, |R| is relocation count, |S| is symbol count, |L| is section count, and k is encoding complexity. |
+| **Correctness** | ⟦G_MachIR'⟧ = ⟦Link(O)⟧. The object file, when linked and loaded, must produce the same observable behavior as the scheduled Machine IR. |
+
+### 6.3 Encoding Model
+
+**Instruction encoding.** Each Machine IR instruction is encoded into a sequence of bytes according to the target's instruction set architecture. The encoding function E: Instruction → Bytes is defined by the target machine description.
+
+For each instruction i with opcode op and operands [o₁, o₂, …, oₙ]:
+
+1. **Encode opcode.** The opcode is encoded into one or more bytes according to the ISA specification. For example, x86-64 uses variable-length encoding with prefixes, opcode bytes, and ModR/M bytes.
+
+2. **Encode operands.** Each operand is encoded according to its type:
+   - **Register operand.** Encoded as a register number (e.g., 3 bits for x86-64 GPRs, 4 bits for ARM64 GPRs). May require a REX prefix (x86-64) or be part of the instruction word (ARM64, RISC-V).
+   - **Immediate operand.** Encoded as a fixed-width integer (8, 16, 32, or 64 bits) in the target's endianness. May require sign extension.
+   - **Memory operand.** Encoded as a combination of base register, index register, scale, and displacement. The encoding depends on the addressing mode (e.g., x86-64 SIB byte, ARM64 scaled offset).
+   - **Label operand.** Encoded as a PC-relative offset or an absolute address. If the target address is not yet known, a relocation is generated.
+   - **Predicate operand.** Encoded as a condition code or mask register number.
+
+3. **Compute instruction size.** The total size of the encoded instruction is the sum of the opcode size, operand sizes, and any prefix or suffix bytes.
+
+4. **Generate fixups.** For operands that reference symbols or addresses that are not yet resolved (e.g., branch targets, global variables), generate a fixup record. A fixup is a tuple (offset, symbol, relocation_type), where offset is the byte offset within the instruction, symbol is the referenced symbol, and relocation_type specifies how the address should be computed.
+
+**Operand encoding rules.** The target machine description specifies the encoding rules for each operand type. For example:
+- x86-64 register operands: 3-bit register number in ModR/M or SIB byte, with REX prefix for registers r8-r15.
+- ARM64 register operands: 5-bit register number in the instruction word.
+- RISC-V register operands: 5-bit register number in the instruction word.
+
+**Immediate encoding rules.** The target machine description specifies the valid immediate ranges for each instruction. For example:
+- x86-64 ADD32ri: 32-bit signed immediate.
+- ARM64 ADD_imm: 12-bit unsigned immediate with optional 12-bit shift.
+- RISC-V ADDI: 12-bit signed immediate.
+
+If an immediate value is outside the valid range, the emitter must either:
+- Reject the instruction with a compilation error.
+- Synthesize a sequence of instructions to materialize the value (e.g., load into a register, then use the register).
+
+### 6.4 Relocation Model
+
+**Relocation types.** A relocation specifies how to compute the final value of a reference when the object file is linked. Each relocation type is defined by the target's ABI specification. Common relocation types include:
+
+- **R_X86_64_64** (ELF x86-64): 64-bit absolute address.
+- **R_X86_64_PC32** (ELF x86-64): 32-bit PC-relative address.
+- **R_X86_64_GOTPCREL** (ELF x86-64): 32-bit PC-relative offset to GOT entry.
+- **R_AARCH64_CALL26** (ELF ARM64): 26-bit PC-relative call offset.
+- **R_AARCH64_ADR_PREL_PG_HI21** (ELF ARM64): 21-bit PC-relative page offset.
+
+**Relocation generation.** For each fixup (offset, symbol, relocation_type), generate a relocation entry:
+
+    reloc = (offset, symbol, relocation_type, addend)
+
+where:
+- offset: the byte offset within the section where the relocation applies.
+- symbol: the symbol referenced by the relocation.
+- relocation_type: the type of relocation (from the target's relocation type table).
+- addend: a constant added to the computed value (may be 0).
+
+**Relocation resolution.** The linker resolves relocations when combining object files into an executable. The resolution formula depends on the relocation type. For example:
+
+- **R_X86_64_64:** value = S + A, where S is the symbol's final address and A is the addend.
+- **R_X86_64_PC32:** value = S + A - P, where P is the address of the relocation site.
+- **R_AARCH64_CALL26:** value = (S + A - P) / 4, where the division is because ARM64 instructions are 4-byte aligned.
+
+The emitter does not resolve relocations; it only generates them. The linker subsystem is responsible for resolution.
+
+### 6.5 Symbol Table Model
+
+**Symbol attributes.** Each symbol in the symbol table has the following attributes:
+
+- **Name:** the symbol's name (a string).
+- **Value:** the symbol's address or offset (relative to the section).
+- **Size:** the size of the symbol (for functions, the function size; for variables, the variable size).
+- **Type:** the symbol type (function, object, section, file, etc.).
+- **Binding:** the symbol binding (local, global, weak).
+- **Visibility:** the symbol visibility (default, hidden, protected).
+- **Section:** the section in which the symbol is defined (or undefined for external symbols).
+
+**Symbol generation.** The emitter generates symbols for:
+
+- **Function labels:** each machine basic block label becomes a symbol with type = function, binding = global (or local if the function is static).
+- **Global variables:** each global variable becomes a symbol with type = object, binding = global.
+- **External references:** each undefined symbol (referenced but not defined in this compilation unit) becomes a symbol with type = notype, binding = global, section = undefined.
+- **Section symbols:** each section has a symbol representing the section itself.
+
+**Symbol visibility.** The visibility of a symbol determines whether it can be referenced from other compilation units:
+
+- **Default:** the symbol is visible to other compilation units and can be preempted by the dynamic linker.
+- **Hidden:** the symbol is not visible to other compilation units and cannot be preempted.
+- **Protected:** the symbol is visible to other compilation units but cannot be preempted.
+
+The emitter assigns visibility based on the source language's visibility attributes (e.g., `static` in C makes a symbol local, `__attribute__((visibility("hidden")))` makes it hidden).
+
+### 6.6 Section Layout Model
+
+**Section attributes.** Each section has the following attributes:
+
+- **Name:** the section name (e.g., .text, .data, .bss, .rodata).
+- **Type:** the section type (progbits, nobits, symtab, strtab, rel, rela, etc.).
+- **Flags:** the section flags (alloc, write, execinstr, merge, strings, etc.).
+- **Alignment:** the section's alignment requirement (a power of 2).
+- **Content:** the section's content (a sequence of bytes).
+
+**Section generation.** The emitter generates sections for:
+
+- **.text:** contains the encoded instructions. Type = progbits, flags = alloc + execinstr, alignment = 16 (or target-specific).
+- **.data:** contains initialized global variables. Type = progbits, flags = alloc + write, alignment = 8 (or target-specific).
+- **.bss:** contains uninitialized global variables. Type = nobits, flags = alloc + write, alignment = 8 (or target-specific).
+- **.rodata:** contains read-only data (constants, string literals). Type = progbits, flags = alloc, alignment = 8 (or target-specific).
+- **.rela.text:** contains relocations for the .text section. Type = rela, flags = 0, alignment = 8.
+- **.symtab:** contains the symbol table. Type = symtab, flags = 0, alignment = 8.
+- **.strtab:** contains the symbol string table. Type = strtab, flags = 0, alignment = 1.
+
+**Section layout.** The emitter lays out sections in the object file in a specific order:
+
+1. **Header:** the object file header (ELF header, Mach-O header, or PE/COFF header).
+2. **Sections:** the sections in layout order (typically .text, .rodata, .data, .bss, .symtab, .strtab, .rela.*).
+3. **Section header table:** a table of section headers, one per section.
+
+The layout must satisfy:
+- Each section is aligned according to its alignment requirement.
+- The section header table is aligned according to the object file format specification.
+- The total size of the object file is the sum of the section sizes, plus padding for alignment.
+
+### 6.7 Object File Format Model
+
+**ELF format.** The ELF (Executable and Linkable Format) object file structure is:
+
+1. **ELF header:** contains magic number, architecture, entry point, section header table offset, etc.
+2. **Sections:** the sections in layout order.
+3. **Section header table:** an array of section header entries, one per section. Each entry contains the section name, type, flags, address, offset, size, link, info, alignment, and entry size.
+
+**Mach-O format.** The Mach-O object file structure is:
+
+1. **Mach-O header:** contains magic number, CPU type, file type, number of load commands, etc.
+2. **Load commands:** a sequence of load commands describing the segments, sections, symbol table, etc.
+3. **Sections:** the sections in layout order.
+4. **Symbol table:** the symbol table and string table.
+
+**PE/COFF format.** The PE/COFF (Portable Executable / Common Object File Format) object file structure is:
+
+1. **COFF header:** contains machine type, number of sections, timestamp, symbol table offset, etc.
+2. **Section headers:** an array of section headers, one per section. Each entry contains the section name, virtual size, virtual address, raw data size, raw data pointer, etc.
+3. **Sections:** the sections in layout order.
+4. **Symbol table:** the symbol table and string table.
+
+**Format conformance.** The emitted object file must conform to the target's object file format specification. The emitter must:
+- Set all required fields in the header.
+- Generate all required sections.
+- Align all sections correctly.
+- Generate a valid symbol table.
+- Generate all required relocations.
+
+### 6.8 Validity Invariants
+
+Valid_Obj(O, F) holds iff all of the following hold:
+
+**1. Encoding correctness.** For every instruction i in the input Machine IR, the encoded bytes E(i) match the target's ISA specification for that instruction and its operands.
+
+**2. Relocation completeness.** For every fixup (offset, symbol, relocation_type) generated during encoding, there is a corresponding relocation entry in the appropriate relocation section.
+
+**3. Symbol table completeness.** For every symbol referenced in the input Machine IR (function labels, global variables, external references), there is a corresponding symbol table entry with correct attributes (name, value, size, type, binding, visibility, section).
+
+**4. Section layout correctness.** For every section in the object file:
+- The section is aligned according to its alignment requirement.
+- The section's content matches the expected content (encoded instructions, data, etc.).
+- The section's flags and type match the expected attributes.
+
+**5. Format conformance.** The object file conforms to the target's object file format specification (ELF, Mach-O, or PE/COFF):
+- The header is correctly formatted.
+- All required sections are present.
+- The section header table is correctly formatted.
+- The symbol table is correctly formatted.
+
+**6. Fixup resolution correctness.** All fixups that can be resolved at compile time (e.g., PC-relative offsets within the same section) are resolved correctly. All fixups that cannot be resolved at compile time (e.g., references to external symbols) have corresponding relocations.
+
+**7. Alignment correctness.** All instructions, data, and sections are aligned according to the target's alignment requirements.
+
+**8. Size correctness.** The size of each section matches the sum of the sizes of its contents. The total size of the object file matches the sum of the section sizes, plus padding for alignment.
+
+### 6.9 Representation and Cost Model
+
+**Encoding buffer.** The emitter uses a byte buffer to accumulate the encoded instructions and data. The buffer is resizable to accommodate the total size of the output.
+
+**Relocation list.** The emitter maintains a list of relocations, one per fixup. Each relocation is a tuple (offset, symbol, relocation_type, addend).
+
+**Symbol table.** The emitter maintains a symbol table, implemented as a hash table mapping symbol names to symbol entries. Each symbol entry contains the symbol's attributes (value, size, type, binding, visibility, section).
+
+**Section list.** The emitter maintains a list of sections, one per section. Each section contains the section's attributes (name, type, flags, alignment, content) and a list of relocations.
+
+**Traversal cost.** Iterating over the instructions is O(|I|). Encoding each instruction is O(k), where k is the encoding complexity (typically O(1) for fixed-length instructions, O(log n) for variable-length instructions). Generating relocations is O(|R|). Building the symbol table is O(|S|). Laying out sections is O(|L|).
+
+**Modification cost.** The emitter does not modify the input Machine IR. It only reads the IR and produces output.
+
+**Memory complexity.** O(|I| · avg_insn_size + |R| · reloc_size + |S| · symbol_size + |L| · section_size), where avg_insn_size is the average instruction size, reloc_size is the relocation entry size, symbol_size is the symbol entry size, and section_size is the section metadata size.
+
+**Construction cost.** O(|I| · k + |R| + |S| + |L|) time, dominated by instruction encoding and relocation generation.
+
+---
+
+# DWARF Debug Information Subsystem — Complete Design Document (v1)
+
+## 0. Document Control and Design Scope
+
+**Component:** DWARF Debug Information Subsystem
+
+**Version:** 1.0
+
+**Role:** Parallel emission stage. Consumes source-level metadata from the front-end, location and range information from register allocation and instruction scheduling, and deopt metadata from safepoints. Produces DWARF5 debug sections that describe the compiled program in terms of the source language.
+
+**Design Status:** Complete specification.
+
+**Scope:** This document defines the DIE tree model, line number program, location lists, range lists, call frame information, deopt metadata integration, vector type representation, section layout, and validity invariants. It does not define:
+- The source language's debug metadata format (consumed from the front-end)
+- The debugger that consumes the DWARF output (separate subsystem, external tool)
+- The target machine description (consumed for register names, address size, etc.)
+- PDB or other non-DWARF debug formats (out of scope)
+
+**Normative References:**
+- DWARF Debugging Information Format, Version 5 (August 2023), published by the DWARF 5 Committee
+- ISO/IEC 10967 (language-independent arithmetic) for numeric type representation
+- System V Application Binary Interface DWARF extensions
+- Target architecture manuals for register name tables
+
+**Known Limitations:**
+- Split-DWARF (.dwo files) is not covered (deferred)
+- Debug names acceleration table (.debug_names) is not covered (deferred)
+- Macro information (.debug_macro) is not covered (deferred)
+- Type unit deduplication (.debug_types in DWARF4, type units in DWARF5) is partially specified
+
+---
+
+## 1. Goals, Non-Goals, and Constraints
+
+### Goals
+
+1. Produce DWARF5 output that allows a debugger to reconstruct the source-level state of the program at any safepoint, including after aggressive optimization, vectorization, register allocation, and instruction reordering.
+2. Represent all source-level entities: variables, functions, types (including vector types), lexical scopes, inlined functions, and control flow.
+3. Translate deopt metadata from safepoints into DWARF location lists that describe where each source variable lives at each program point.
+4. Produce a correct line number program that maps machine instructions back to source locations, including optimized-out and reordered code.
+5. Produce correct call frame information so that stack unwinding works through both normal and exceptional control flow.
+6. Allow the emission to be disabled or stripped without affecting the correctness of the compiled code.
+
+### Non-Goals
+
+1. Produce debug information for code that has been fully optimized away (dead code). Dead code has no debug info.
+2. Support source-level stepping through vectorized loop bodies at the scalar source level (the debugger sees vectorized code; scalar stepping is best-effort).
+3. Produce PDB, STABS, or other non-DWARF formats.
+4. Provide a debugger (external tool).
+
+### Constraints
+
+- DWARF emission time must be O(|source constructs| + |safepoints| · |live vars| + |instructions|) — linear in the size of the inputs.
+- DWARF output size must not exceed O(|source constructs| · k) where k is a small constant factor for DIE overhead.
+- The debug info sections must be independently stripable without affecting code correctness.
+- The debug info emission must not affect the generated code's observable behavior.
+- All DWARF output must conform to DWARF5 and the target's ABI extensions.
+
+---
+
+## 6. DWARF Debug Information Subsystem
+
+### 6.1 Purpose and Domain
+
+The DWARF Debug Information Subsystem translates the compiler's internal representation of source-level information into the DWARF5 binary format. It consumes:
+
+1. **Source metadata** from the front-end: source file names, line/column numbers, type definitions, variable declarations, function signatures, lexical scopes.
+2. **Location metadata** from register allocation: for each virtual register, the physical register or spill slot it was assigned to, and the live range.
+3. **Schedule metadata** from instruction scheduling: the mapping from machine instructions to source locations.
+4. **Deopt metadata** from safepoints: at each safepoint, the mapping from source variables to their current locations (physical registers, spill slots, or materialized values).
+5. **Frame metadata** from code emission: stack frame layout, callee-saved register usage, CFA (call frame address) definition.
+
+It produces the following DWARF5 sections:
+
+- `.debug_info`: the DIE tree describing the program structure.
+- `.debug_abbrev`: abbreviation tables for the DIE tree.
+- `.debug_line`: the line number program mapping instructions to source locations.
+- `.debug_str`: the string table.
+- `.debug_line_str`: the line number program string table (DWARF5).
+- `.debug_ranges`: non-contiguous range lists (DWARF4 compatibility; DWARF5 uses `.debug_rnglists`).
+- `.debug_rnglists`: DWARF5 range lists.
+- `.debug_loc`: location lists (DWARF4 compatibility; DWARF5 uses `.debug_loclists`).
+- `.debug_loclists`: DWARF5 location lists.
+- `.debug_frame`: call frame information.
+- `.debug_addr`: address table (DWARF5).
+
+### 6.2 Mathematical Specification
+
+| Requirement | Specification |
+|---|---|
+| **Domain** | (M_src, M_loc, M_sched, M_deopt, M_frame): source metadata, location metadata, schedule metadata, deopt metadata, frame metadata. All must be well-formed. |
+| **Codomain** | O_dwarf: the set of valid DWARF5 section sets. |
+| **Definitions** | D: DIE tree. L: line number program. LL: location lists. RL: range lists. CFI: call frame information. |
+| **Preconditions** | The input Machine IR has been scheduled and emitted. All safepoints have deopt metadata. The source metadata is consistent with the compiled code. |
+| **Postconditions** | O_dwarf satisfies Valid_DWARF(O_dwarf) as defined in §6.11. |
+| **Invariants** | DIE tree well-formedness, line program well-formedness, location list coverage, range list coverage, CFI well-formedness, section format conformance. |
+| **Relations** | Source-to-DIE mapping (→_die), instruction-to-line mapping (→_line), variable-to-location mapping (→_loc), PC-to-range mapping (→_range). |
+| **Failure behavior** | If source metadata is inconsistent (e.g., a variable declared but never defined), emit a warning and produce best-effort output. If DWARF emission fails structurally, emit an InternalCompilerError. |
+| **Complexity** | Emission: O(|source constructs| + |safepoints| · |live vars| + |instructions|). |
+| **Correctness** | For any safepoint p and any source variable v live at p, the debugger reading O_dwarf at address p must reconstruct the value of v as specified by the deopt metadata. |
+
+### 6.3 DIE Tree Model
+
+**DIE structure.** A DWARF Debugging Information Entry (DIE) is a node in a tree. Each DIE has:
+
+- A **TAG** (e.g., DW_TAG_compile_unit, DW_TAG_subprogram, DW_TAG_variable, DW_TAG_formal_parameter, DW_TAG_base_type, DW_TAG_structure_type, DW_TAG_vector_type, DW_TAG_lexical_block, DW_TAG_inlined_subroutine).
+- A set of **attributes** (name, type, location, line, etc.).
+- Zero or more **children** (forming the tree).
+
+**Top-level tree structure.** The DIE tree for a compilation unit has the following structure:
+
+```
+DW_TAG_compile_unit
+├── DW_TAG_base_type (for each primitive type)
+├── DW_TAG_vector_type (for each vector type used)
+├── DW_TAG_structure_type / DW_TAG_class_type (for each aggregate type)
+├── DW_TAG_typedef (for each type alias)
+├── DW_TAG_subprogram (for each function)
+│   ├── DW_TAG_formal_parameter (for each argument)
+│   ├── DW_TAG_variable (for each local variable)
+│   ├── DW_TAG_lexical_block (for each nested scope)
+│   │   └── ... (nested variables and blocks)
+│   ├── DW_TAG_inlined_subroutine (for each inlined call)
+│   │   └── ... (formal parameters and variables of the inlined function)
+│   └── DW_TAG_label (for each labeled statement)
+└── DW_TAG_namespace (for each namespace/module)
+    └── ... (nested types and functions)
 ```
 
-#### 3.3 ICache Coherency Invariant
-On x86-64, the instruction cache is coherent with the data cache. On AArch64 and RV64, it is not.
-**CODE-INV-01**: After any compiler thread finishes writing to the RW view of the Code/Stub Pool, it *must* execute an architecture-specific ICache flush (e.g., `DC CVAU` / `IC IVAU` on AArch64) before publishing the code pointer to mutator threads.
+**Attribute encoding.** Each attribute has a FORM that specifies how its value is encoded:
+
+- `DW_FORM_addr`: an address (target pointer size).
+- `DW_FORM_data1/2/4/8`: a 1/2/4/8-byte integer.
+- `DW_FORM_string`: a null-terminated string (inline).
+- `DW_FORM_strp`: an offset into `.debug_str`.
+- `DW_FORM_line_strp`: an offset into `.debug_line_str` (DWARF5).
+- `DW_FORM_ref1/2/4/8/udata`: a reference to another DIE (offset within `.debug_info`).
+- `DW_FORM_sec_offset`: an offset into another section (e.g., `.debug_loclists`).
+- `DW_FORM_exprloc`: a DWARF expression (for location descriptions).
+- `DW_FORM_flag_present`: a boolean (encoded as presence of the attribute).
+- `DW_FORM_rnglistx`: an index into `.debug_rnglists` (DWARF5).
+- `DW_FORM_loclistx`: an index into `.debug_loclists` (DWARF5).
+
+**Abbreviation tables.** To reduce the size of `.debug_info`, DIEs are encoded using abbreviation tables stored in `.debug_abbrev`. Each abbreviation specifies a TAG and a list of (attribute, FORM) pairs. Each DIE in `.debug_info` references an abbreviation by number.
+
+**Abbreviation assignment.** The emitter assigns abbreviations using a frequency-based heuristic: the most common (TAG, attribute-set) pairs get the lowest abbreviation numbers (which encode in fewer bytes as ULEB128).
+
+**Type DIEs.** Each source-level type is represented by a type DIE. The mapping is:
+
+- Integer types → `DW_TAG_base_type` with `DW_AT_encoding` = `DW_ATE_signed` or `DW_ATE_unsigned`, `DW_AT_byte_size` = size in bytes, `DW_AT_bit_size` = bit size.
+- Floating-point types → `DW_TAG_base_type` with `DW_AT_encoding` = `DW_ATE_float`.
+- Pointer types → `DW_TAG_pointer_type` with `DW_AT_type` referencing the pointee type.
+- Array types → `DW_TAG_array_type` with `DW_TAG_subrange_type` children.
+- Structure types → `DW_TAG_structure_type` with `DW_TAG_member` children.
+- Function types → `DW_TAG_subroutine_type` with `DW_TAG_formal_parameter` children.
+- Vector types → `DW_TAG_vector_type` (DWARF5) with `DW_AT_byte_size`, `DW_AT_type` (element type), and `DW_AT_count` (number of elements).
+
+**Type deduplication.** If the same type is referenced from multiple places, the type DIE is emitted once and referenced via `DW_FORM_ref*` from all use sites. The emitter maintains a hash table from type identity to DIE offset.
+
+**Source variable mapping.** Each source-level variable declaration maps to a `DW_TAG_variable` or `DW_TAG_formal_parameter` DIE. The DIE carries:
+
+- `DW_AT_name`: the variable's name (string).
+- `DW_AT_type`: reference to the type DIE.
+- `DW_AT_decl_file`, `DW_AT_decl_line`, `DW_AT_decl_column`: source location.
+- `DW_AT_location`: a location list (see §6.5) describing where the variable lives at each PC.
+
+### 6.4 Line Number Program
+
+**Line number program model.** The `.debug_line` section contains a byte-code program that a DWARF consumer executes to reconstruct the instruction-to-source-location mapping. The program is a sequence of opcodes that modify a state machine.
+
+**State machine state.** The state machine maintains:
+
+- `address`: the current machine instruction address (initially 0).
+- `file`: the current source file index (initially 1).
+- `line`: the current source line number (initially 1).
+- `column`: the current source column number (initially 0).
+- `discriminator`: the current discriminator (initially 0; used to distinguish multiple statements on the same source line).
+- `is_stmt`: boolean, whether the current instruction is a recommended breakpoint location (initially true by default).
+- `basic_block`: boolean, whether the current instruction is the first in a basic block (initially false).
+- `end_sequence`: boolean, whether the current address is the end of a sequence (initially false).
+- `prologue_end`: boolean, whether the current instruction is at the end of a function prologue (DWARF5).
+- `epilogue_begin`: boolean, whether the current instruction is at the beginning of a function epilogue (DWARF5).
+- `isa`: the instruction set architecture index (initially 0).
+- `op_index`: the index of the operation within a VLIW instruction (initially 0; relevant for VLIW targets).
+
+**Standard opcodes.**
+
+- `DW_LNS_copy`: emit a row with the current state, then reset `basic_block`, `prologue_end`, `epilogue_begin`, `discriminator` to 0.
+- `DW_LNS_advance_pc` (ULEB128 delta): add delta × `minimum_instruction_length` to `address`.
+- `DW_LNS_fixed_advance_pc` (2-byte delta): add delta to `address`.
+- `DW_LNS_set_file` (ULEB128 file): set `file`.
+- `DW_LNS_set_column` (ULEB128 column): set `column`.
+- `DW_LNS_negate_stmt`: toggle `is_stmt`.
+- `DW_LNS_set_basic_block`: set `basic_block` to true.
+- `DW_LNS_const_add_pc`: add to `address` the amount that would be added by `DW_LNS_advance_pc` with operand 255 (used for compact encoding of small PC advances).
+- `DW_LNS_fixed_advance_pc`: already listed.
+- `DW_LNS_set_prologue_end`: set `prologue_end` to true.
+- `DW_LNS_set_epilogue_begin`: set `epilogue_begin` to true.
+- `DW_LNS_set_isa` (ULEB128 isa): set `isa`.
+- `DW_LNS_set_discriminator` (ULEB128 discriminator): set `discriminator` (DWARF4+).
+
+**Special opcodes.** The line number program uses special opcodes (values ≥ `opcode_base`) to compactly encode simultaneous advances of `address` and `line`. Each special opcode encodes:
+
+- `address_advance = (opcode - opcode_base) / line_range`
+- `line_advance = line_base + ((opcode - opcode_base) % line_range)`
+
+followed by an implicit `DW_LNS_copy`.
+
+**Header parameters.** The line number program header specifies:
+
+- `minimum_instruction_length`: the minimum number of bytes per instruction (1 for x86-64, 4 for ARM64).
+- `maximum_operations_per_instruction`: 1 for non-VLIW, >1 for VLIW.
+- `default_is_stmt`: default value of `is_stmt` (typically true).
+- `line_base`: the smallest line increment encodable by a special opcode (typically -5).
+- `line_range`: the number of line increments encodable by a special opcode (typically 14).
+- `opcode_base`: the first special opcode value (typically 13).
+- `standard_opcode_lengths`: the number of ULEB128 operands for each standard opcode.
+- `include_directories`: list of source file directories.
+- `file_names`: list of source files (each with directory index, timestamp, size).
+
+**DWARF5 line number header.** DWARF5 changes the header format:
+
+- `directory_entry_format`: describes the format of directory entries.
+- `directories`: the directory entries.
+- `file_name_entry_format`: describes the format of file name entries.
+- `file_names`: the file name entries.
+
+This replaces the ad-hoc encoding of DWARF4.
+
+**Line program generation.** The emitter generates the line program as follows:
+
+1. **Sort instructions by address.** The scheduled Machine IR provides a mapping from each instruction to its machine address. Sort instructions by address.
+
+2. **Group by source location.** Group consecutive instructions that share the same (file, line, column, discriminator).
+
+3. **Emit program.** For each group:
+   - If the address has advanced, emit `DW_LNS_advance_pc` or a special opcode.
+   - If the line has advanced, emit a special opcode or `DW_LNS_advance_line` followed by `DW_LNS_copy`.
+   - If the file has changed, emit `DW_LNS_set_file`.
+   - If the column has changed, emit `DW_LNS_set_column`.
+   - If the discriminator has changed, emit `DW_LNS_set_discriminator`.
+   - Emit `DW_LNS_copy` to emit a row.
+   - At function boundaries, emit `DW_LNE_end_sequence` to close the sequence.
+
+4. **Special opcode selection.** When both address and line have advanced, choose between:
+   - A special opcode (compact, but limited in address/line range).
+   - `DW_LNS_advance_pc` + `DW_LNS_advance_line` + `DW_LNS_copy` (flexible, but larger).
+   
+   The choice is based on minimizing the total byte count of the program.
+
+**Handling optimized code.** When optimization removes or reorders code:
+
+- If a source statement is completely eliminated (dead code), no line program row is emitted for it.
+- If a source statement is split across multiple machine instructions, all instructions get the same (file, line, column); use discriminators to distinguish them if needed.
+- If multiple source statements are fused into one machine instruction, the instruction gets the line of the first statement (or use a range list on the DIE).
+- If instruction scheduling moves an instruction far from its original position, the line program still maps it to the original source line. The debugger may show the user a confusing source location, but the mapping is correct.
+
+### 6.5 Location Lists
+
+**Location list model.** A location list describes where a variable lives at each program point. It is a sequence of (range, location description) pairs. The location description is a DWARF expression that computes the variable's value given the machine state.
+
+**Location description forms.**
+
+- `DW_OP_reg<N>`: the variable is in register N.
+- `DW_OP_fbreg <offset>`: the variable is at frame base + offset.
+- `DW_OP_breg<N> <offset>`: the variable is at register N + offset.
+- `DW_OP_addr <address>`: the variable is at a fixed address.
+- `DW_OP_stack_value`: the value is on the DWARF expression stack (used after computation).
+- `DW_OP_piece <size>`: the variable is split; this piece is <size> bytes.
+- `DW_OP_implicit_value <ULEB128 size> <bytes>`: the variable has a compile-time constant value.
+- `DW_OP_entry_value <expr>`: the variable has the value it had at function entry (for parameters that have been overwritten).
+- `DW_OP_GNU_parameter_ref <offset>`: reference to a parameter's entry value.
+
+**DWARF5 location list format.** A location list in `.debug_loclists` is a sequence of entries:
+
+- `DW_LLE_end_of_list` (0x00): terminates the list.
+- `DW_LLE_offset_pair` (0x04): (start_offset, end_offset, expr) — the location is valid for PCs in [base + start_offset, base + end_offset).
+- `DW_LLE_startx_length` (0x06): (address_index, length, expr) — the location is valid for PCs in [address, address + length).
+- `DW_LLE_start_end` (0x02): (start, end, expr) — explicit start and end addresses.
+- `DW_LLE_startx_endx` (0x07): (start_index, end_index, expr) — indexed addresses.
+- `DW_LLE_default_location` (0x05): the default location (used when no other entry matches).
+
+**Location list generation.** For each source variable v:
+
+1. **Collect deopt entries.** For each safepoint p where v is live, the deopt metadata specifies v's location at p. This gives a set of (PC, location) pairs.
+
+2. **Merge adjacent identical locations.** If v has the same location at consecutive safepoints, merge them into a single range.
+
+3. **Extend ranges.** Each (PC, location) entry from a safepoint extends to cover the instructions between that safepoint and the next. The location is assumed to be constant between safepoints (this is the invariant maintained by the register allocator).
+
+4. **Handle register allocation splits.** If register allocation splits v across multiple physical registers (e.g., a 64-bit value in two 32-bit registers on a 32-bit target), emit a `DW_OP_piece` expression for each piece.
+
+5. **Handle optimized-out variables.** If v is live at some safepoints but not others, emit `DW_OP_implicit_value` with a poison value (or omit the range entirely; the debugger will show the variable as "<optimized out>").
+
+6. **Handle entry values.** If v is a function parameter that is overwritten during the function, emit a `DW_OP_entry_value` expression so the debugger can show the original value.
+
+**Example.** For a variable `x` that lives in register RAX from PC 0x1000 to 0x1010, then in register RBX from 0x1010 to 0x1020, then is spilled to [RBP - 8] from 0x1020 to 0x1030:
+
+```
+DW_LLE_offset_pair (0x0, 0x10, DW_OP_reg0)      // RAX
+DW_LLE_offset_pair (0x10, 0x20, DW_OP_reg3)     // RBX
+DW_LLE_offset_pair (0x20, 0x30, DW_OP_fbreg -8) // [RBP - 8]
+DW_LLE_end_of_list
+```
+
+### 6.6 Range Lists
+
+**Range list model.** A range list describes the non-contiguous PC ranges of a DIE (typically a function or lexical block). It is a sequence of (start, end) pairs.
+
+**DWARF5 range list format.** A range list in `.debug_rnglists` is a sequence of entries:
+
+- `DW_RLE_end_of_list` (0x00): terminates the list.
+- `DW_RLE_offset_pair` (0x04): (start_offset, end_offset) — range is [base + start, base + end).
+- `DW_RLE_startx_length` (0x06): (address_index, length).
+- `DW_RLE_start_end` (0x02): (start, end) — explicit addresses.
+- `DW_RLE_startx_endx` (0x07): (start_index, end_index).
+- `DW_RLE_base_addressx` (0x03): sets the base address for subsequent offset_pair entries.
+- `DW_RLE_base_address` (0x01): sets the base address (DWARF4 compatibility).
+
+**Range list generation.** For each function or lexical block:
+
+1. **Collect instruction addresses.** For each instruction in the function/block, get its machine address.
+
+2. **Group into contiguous ranges.** Sort addresses and group consecutive addresses (where the gap between them is exactly the instruction size) into ranges.
+
+3. **Emit range list.** Emit one `DW_RLE_offset_pair` per contiguous range, using the function's low PC as the base address.
+
+**Handling inlined functions.** When a function is inlined at multiple call sites, each inlined instance is a separate `DW_TAG_inlined_subroutine` DIE with its own range list. The ranges are the machine addresses of the inlined code at each call site.
+
+### 6.7 Call Frame Information
+
+**Call frame information model.** The `.debug_frame` section describes how to unwind the stack at each PC. It consists of:
+
+- **Common Information Entry (CIE):** describes the frame layout for a group of functions (typically all functions in a compilation unit). Specifies the return address column, the CFA (call frame address) definition, and the initial state of register rules.
+- **Frame Description Entry (FDE):** describes a specific function. References a CIE, specifies the PC range of the function, and contains a sequence of instructions that modify the frame state.
+
+**Frame state.** The frame state consists of:
+
+- **CFA rule:** how to compute the CFA (e.g., RSP + 8, or RBP + 16).
+- **Register rules:** for each register, how to recover its value (e.g., undefined, same value, offset from CFA, in another register).
+
+**Frame instructions.**
+
+- `DW_CFA_offset` (register, offset): the register is saved at CFA + offset.
+- `DW_CFA_restore` (register): restore the register to its initial rule.
+- `DW_CFA_set_loc` (address): set the current PC.
+- `DW_CFA_advance_loc` (delta): advance the PC by delta × code_alignment_factor.
+- `DW_CFA_def_cfa` (register, offset): set the CFA rule to register + offset.
+- `DW_CFA_def_cfa_register` (register): change the CFA register.
+- `DW_CFA_def_cfa_offset` (offset): change the CFA offset.
+- `DW_CFA_def_cfa_expression` (expression): set the CFA to a DWARF expression.
+- `DW_CFA_expression` (register, expression): the register's value is computed by a DWARF expression.
+- `DW_CFA_offset_extended` (register, offset): like `DW_CFA_offset` but for extended register numbers.
+- `DW_CFA_restore_extended` (register): like `DW_CFA_restore` but for extended register numbers.
+- `DW_CFA_undefined` (register): the register is not recoverable.
+- `DW_CFA_same_value` (register): the register has the same value as in the previous frame.
+- `DW_CFA_register` (register, register): the register is saved in another register.
+- `DW_CFA_remember_state` / `DW_CFA_restore_state`: save and restore the frame state (for handling branches).
+- `DW_CFA_def_cfa_sf` (register, offset): signed offset version of `DW_CFA_def_cfa`.
+- `DW_CFA_def_cfa_offset_sf` (offset): signed offset version of `DW_CFA_def_cfa_offset`.
+- `DW_CFA_offset_sf` (register, offset): signed offset version of `DW_CFA_offset`.
+- `DW_CFA_GNU_window_save`: SPARC-specific (not relevant for x86-64/ARM64/RISC-V).
+- `DW_CFA_AARCH64_negate_ra_state`: ARM64 pointer authentication (DWARF5 extension).
+
+**CFI generation.** For each function:
+
+1. **Emit CIE.** One CIE per compilation unit (or per function if they have different frame layouts). The CIE specifies:
+   - Return address register column.
+   - Code alignment factor (1 for x86-64, 4 for ARM64).
+   - Data alignment factor (typically -8 for 64-bit targets).
+   - Initial CFA rule (typically RSP + 8 at function entry, before the return address is pushed).
+   - Initial register rules (callee-saved registers are "same value"; caller-saved registers are "undefined").
+
+2. **Emit FDE.** One FDE per function. The FDE specifies:
+   - PC range (function start to function end).
+   - CIE pointer.
+   - Augmentation data (e.g., LSDA for exception handling, pointer encoding for PIC).
+   - Frame instructions:
+     - At function entry, after the prologue: `DW_CFA_def_cfa_offset` to account for the pushed frame pointer or allocated stack space.
+     - After each callee-saved register save: `DW_CFA_offset` for that register.
+     - After the frame pointer is set up: `DW_CFA_def_cfa` to switch to RBP + 16 (or equivalent).
+     - At each safepoint, the CFA rule and register rules must correctly describe how to unwind to the caller.
+
+3. **Handle exceptions.** If the function has exception handlers, the FDE includes an LSDA (language-specific data area) pointer in the augmentation data. The LSDA describes the exception handling table (not specified here; belongs to the exception handling subsystem).
+
+### 6.8 Deopt Metadata Integration
+
+**Deopt metadata model.** Each safepoint in the Machine IR carries deopt metadata: a mapping from source variables to their current locations. The deopt metadata is the primary input to location list generation.
+
+**Deopt entry structure.** Each deopt entry is a tuple:
+
+    (safepoint_pc, variable_id, location_description)
+
+where:
+- `safepoint_pc`: the machine address of the safepoint.
+- `variable_id`: the source-level variable identifier (from the front-end).
+- `location_description`: one of:
+  - `Reg(phys_reg)`: the variable is in physical register phys_reg.
+  - `Stack(offset)`: the variable is at frame-relative offset.
+  - `Const(value)`: the variable has a compile-time constant value.
+  - `Materialized(insn_seq)`: the variable's value must be computed by executing a sequence of instructions (used when the value is not directly available).
+  - `Piece(loc1, size1, loc2, size2, ...)`: the variable is split across multiple locations.
+
+**Translation to DWARF.** For each source variable v:
+
+1. **Collect all deopt entries for v.** This gives a set of (PC, location) pairs.
+
+2. **Build a location list.** Translate each (PC, location) pair to a DWARF location description:
+   - `Reg(r)` → `DW_OP_reg<N>` where N is the DWARF register number for r.
+   - `Stack(off)` → `DW_OP_fbreg <off>`.
+   - `Const(val)` → `DW_OP_implicit_value <size> <bytes>`.
+   - `Materialized(seq)` → emit the sequence as a DWARF expression (this is rare; typically the register allocator avoids this case).
+   - `Piece(...)` → emit `DW_OP_piece` expressions.
+
+3. **Merge adjacent identical locations.** If v has the same location at consecutive safepoints, merge them into a single range.
+
+4. **Fill gaps.** Between safepoints, the location is assumed to be constant (the register allocator maintains this invariant). If a variable is live at safepoint p1 and p2 but not in between, the location list covers [p1, p2).
+
+**Handling tiered compilation.** In a JIT with tiered compilation, a function may be recompiled at a higher optimization level. The deopt metadata at each safepoint describes the variable locations for the *current* compilation. If the function is deoptimized, the runtime uses the deopt metadata to reconstruct the source-level state in the lower tier.
+
+The DWARF output describes the *final* compilation. If the function is recompiled, the old DWARF output is replaced. The debugger sees only the current compilation's DWARF.
+
+**Handling deopt targets.** A deopt target is a PC in the lower tier where execution resumes after deoptimization. The DWARF output for the higher tier does not need to describe deopt targets (they are in the lower tier's DWARF). However, the safepoints in the higher tier must have correct location lists so the debugger can inspect the higher-tier execution.
+
+### 6.9 Vector Type Representation
+
+**Vector types in DWARF.** DWARF5 supports vector types via `DW_TAG_vector_type`. The DIE has:
+
+- `DW_AT_byte_size`: the total size of the vector in bytes.
+- `DW_AT_type`: reference to the element type DIE.
+- `DW_AT_count`: the number of elements.
+
+**Example.** A `Vec<Int32, 8>` type (256 bits, 8 × 32-bit integers) is represented as:
+
+```
+DW_TAG_vector_type
+  DW_AT_byte_size: 32
+  DW_AT_type: <ref to DW_TAG_base_type for Int32>
+  DW_AT_count: 8
+```
+
+**Vector variable locations.** A vector variable may live in a vector register (e.g., YMM0 on x86-64) or be spilled to the stack. The location description is:
+
+- `DW_OP_reg<N>` where N is the DWARF register number for the vector register.
+- `DW_OP_fbreg <offset>` for stack-spilled vectors.
+
+**Vector element access.** If the debugger wants to inspect a single element of a vector variable, it uses the DWARF expression `DW_OP_piece` or the debugger's own logic to extract the element. The DWARF output does not need to describe element access explicitly.
+
+**Mask types.** Masks are represented as `DW_TAG_base_type` with `DW_AT_encoding` = `DW_ATE_boolean` (or a target-specific encoding) and `DW_AT_byte_size` = mask size in bytes. Alternatively, masks can be represented as `DW_TAG_vector_type` with element type boolean.
+
+### 6.10 Section Layout
+
+**Section ordering.** The DWARF sections are laid out in the object file in the following order:
+
+1. `.debug_abbrev` (referenced by `.debug_info`).
+2. `.debug_info` (references `.debug_abbrev`, `.debug_str`, `.debug_line_str`, `.debug_loclists`, `.debug_rnglists`, `.debug_addr`).
+3. `.debug_str` (string table).
+4. `.debug_line_str` (line program string table, DWARF5).
+5. `.debug_line` (line number program).
+6. `.debug_loclists` (location lists, DWARF5).
+7. `.debug_rnglists` (range lists, DWARF5).
+8. `.debug_addr` (address table, DWARF5).
+9. `.debug_frame` (call frame information).
+
+**Section alignment.** All DWARF sections have alignment 1 (byte-aligned), except `.debug_frame` which has alignment equal to the target's pointer size (4 or 8 bytes).
+
+**Section flags.** All DWARF sections have flags = 0 (no alloc, no write, no exec). They are not loaded into memory at runtime.
+
+**Section types.** All DWARF sections have type = `SHT_PROGBITS` (ELF) or equivalent.
+
+### 6.11 Validity Invariants
+
+Valid_DWARF(O_dwarf) holds iff all of the following hold:
+
+**1. DIE tree well-formedness.**
+- Every DIE has a valid TAG.
+- Every DIE's attributes match the abbreviation it references.
+- The DIE tree is a tree (no cycles, single root).
+- The root DIE is `DW_TAG_compile_unit`.
+- All `DW_AT_type` references point to valid type DIEs.
+- All `DW_AT_abstract_origin` and `DW_AT_specification` references point to valid DIEs.
+
+**2. Line program well-formedness.**
+- The line program header is correctly formatted.
+- The line program terminates with `DW_LNE_end_sequence` for each sequence.
+- All file indices in the line program are valid (refer to files in the header).
+- The line program, when executed, produces a monotonically non-decreasing sequence of addresses.
+
+**3. Location list coverage.**
+- For every source variable v that is live at a safepoint p, the location list for v covers p.
+- The location list for v does not cover any PC where v is not live.
+- All location descriptions in the location list are valid DWARF expressions.
+- All register numbers in location descriptions are valid for the target.
+
+**4. Range list coverage.**
+- For every function or lexical block, the range list covers exactly the PCs of the instructions in that function or block.
+- The ranges do not overlap.
+- All addresses in the range list are valid machine addresses.
+
+**5. CFI well-formedness.**
+- Every FDE references a valid CIE.
+- The CFI instructions, when executed, produce a valid frame state at each PC.
+- The CFA rule is defined at every PC in the function.
+- All callee-saved registers have a recovery rule at every PC after they are saved.
+- The return address register has a recovery rule at every PC.
+
+**6. Section format conformance.**
+- Each section's header is correctly formatted according to DWARF5.
+- All offsets and indices are within bounds.
+- All strings are null-terminated.
+- All ULEB128 and SLEB128 values are correctly encoded.
+
+**7. Source-level correctness.**
+- For every source variable v live at a safepoint p, the location list for v at p describes the correct location (matches the deopt metadata).
+- For every source function f, the DIE for f has the correct name, type, and range.
+- For every inlined function call, the `DW_TAG_inlined_subroutine` DIE has the correct call site location.
+
+**8. Type correctness.**
+- For every source type t, the type DIE for t has the correct name, size, and structure.
+- All type references are consistent (e.g., a pointer type's `DW_AT_type` points to the pointee type).
+- Vector types have the correct element type and count.
+
+### 6.12 Representation and Cost Model
+
+**DIE buffer.** The emitter uses a byte buffer to accumulate the encoded DIEs. The buffer is resizable.
+
+**Abbreviation table.** The emitter maintains an abbreviation table, implemented as a hash table from (TAG, attribute-set) to abbreviation number.
+
+**String table.** The emitter maintains a string table, implemented as a hash table from string to offset in `.debug_str`.
+
+**Location list buffer.** The emitter uses a byte buffer to accumulate the encoded location lists.
+
+**Range list buffer.** The emitter uses a byte buffer to accumulate the encoded range lists.
+
+**Line program buffer.** The emitter uses a byte buffer to accumulate the encoded line program.
+
+**Traversal cost.** Iterating over the source metadata is O(|source constructs|). Iterating over safepoints is O(|safepoints|). Iterating over instructions is O(|instructions|). Encoding each DIE is O(k) where k is the number of attributes. Encoding each location list entry is O(1). Encoding each line program opcode is O(1).
+
+**Modification cost.** The emitter does not modify the input Machine IR or source metadata. It only reads them and produces output.
+
+**Memory complexity.** O(|source constructs| · die_size + |safepoints| · |live vars| · loc_entry_size + |instructions| · line_entry_size + |strings| · avg_string_length).
+
+**Construction cost.** O(|source constructs| + |safepoints| · |live vars| + |instructions|) time, dominated by DIE construction and location list generation.
 
 ---
 
-### 4. CodeBlob Physical Anatomy
-A compiled method (CodeBlob) is split across the Code Pool and Metadata Pool.
+# Linker Subsystem — Complete Design Document (v1)
 
-#### 4.1 In the Metadata Pool (RW)
-```text
-CodeBlobHeader {
-    method_id: u64,
-    tier: u8 (T1, T2, T3, T4),
+## 0. Document Control and Design Scope
+
+**Component:** Linker Subsystem
+
+**Version:** 1.0
+
+**Role:** Final assembly stage. Consumes object files from Code Emission, resolves symbols, assigns addresses, resolves relocations, generates dynamic linking structures (GOT/PLT), and produces a conforming executable or shared library.
+
+**Design Status:** Complete specification.
+
+**Scope:** This document defines symbol resolution rules, section merging and layout, address assignment, relocation resolution, dynamic linking structures, link-time relaxation, output format, and validity invariants. It does not define:
+- The code emission that produces object files (already completed)
+- The runtime loader that loads executables into memory (separate subsystem, external to the compiler)
+- The DWARF debug information (already completed; linker preserves and merges debug sections)
+- The target machine description (consumed for relocation types, page sizes, etc.)
+
+**Normative References:**
+- System V Application Binary Interface (for ELF format, symbol resolution rules, relocation semantics)
+- Apple Mach-O Runtime Architecture (for Mach-O format)
+- Microsoft Portable Executable and Common Object File Format Specification (for PE/COFF format)
+- Ulrich Drepper, "How To Write Shared Libraries" (for GOT/PLT design)
+- Target architecture manuals for page sizes, alignment requirements, and dynamic relocation types
+
+**Known Limitations:**
+- Incremental linking (for fast rebuilds) is not covered (deferred)
+- Link-time optimization (LTO) beyond basic relaxation is not covered (deferred)
+- Plugin-based extension mechanisms are not covered (deferred)
+- Cross-compilation toolchain management is not covered (deferred)
+
+---
+
+## 1. Goals, Non-Goals, and Constraints
+
+### Goals
+
+1. Resolve all symbol references across object files according to well-defined precedence rules (strong over weak, visibility rules, binding).
+2. Merge and layout sections from all input object files into a coherent address space.
+3. Assign addresses to all sections and symbols, respecting alignment constraints and target-specific layout rules.
+4. Resolve all relocations by patching references with final addresses.
+5. Generate dynamic linking structures (GOT, PLT, dynamic symbol table) for executables and shared libraries that use dynamic linking.
+6. Perform link-time relaxation where beneficial (e.g., converting PC-relative calls to direct branches when targets are in range).
+7. Produce output in a standard executable format (ELF, Mach-O, or PE/COFF) that the target's runtime loader can load.
+8. Support garbage collection of unreachable sections to reduce output size.
+9. Preserve debug information sections and merge them correctly.
+
+### Non-Goals
+
+1. Load the executable into memory (runtime loader's job).
+2. Perform whole-program optimization beyond link-time relaxation (handled in earlier stages).
+3. Generate debug information (handled by DWARF subsystem).
+4. Manage the runtime environment (stack, heap, threads — runtime's job).
+
+### Constraints
+
+- Link time must be O(Σ|Oᵢ| · k + |S| · log|S| + |R|), where |Oᵢ| is the size of input object file i, |S| is the number of symbols, |R| is the number of relocations, and k is a constant for parsing overhead.
+- Memory usage during linking must not exceed O(Σ|Oᵢ| + |S| + |R| + |output size|).
+- The linker must produce output that conforms to the target's executable format specification.
+- All symbol resolutions must follow the rules specified in §6.3.
+- All relocations must be resolved correctly according to the target's ABI.
+- The output must be loadable by the target's runtime loader without errors.
+
+---
+
+## 6. Linker Subsystem
+
+### 6.1 Purpose and Domain
+
+The Linker Subsystem consumes one or more object files and produces a single executable or shared library. Its purpose is to combine separately compiled translation units into a single loadable image by resolving cross-references, assigning addresses, and generating the necessary metadata for dynamic linking.
+
+The subsystem performs the following phases in order:
+
+1. **Input parsing.** Read all input object files and extract symbols, sections, and relocations.
+2. **Symbol resolution.** Build a global symbol table and resolve all symbol references.
+3. **Section merging.** Combine sections with the same name and attributes from different object files.
+4. **Garbage collection.** Remove unreachable sections (if enabled).
+5. **Layout.** Assign addresses to all sections, respecting alignment and ordering constraints.
+6. **Relocation resolution.** Patch all relocations with final addresses.
+7. **Dynamic linking setup.** Generate GOT, PLT, and dynamic symbol table (if applicable).
+8. **Relaxation.** Perform target-specific link-time optimizations.
+9. **Output generation.** Write the final executable or shared library.
+
+### 6.2 Mathematical Specification
+
+| Requirement | Specification |
+|---|---|
+| **Domain** | (O₁, O₂, …, Oₙ, S, L): a set of object files Oᵢ, a linker script S (optional), and command-line options L. |
+| **Codomain** | O_exec: the set of valid executables or shared libraries (ELF, Mach-O, or PE/COFF). |
+| **Definitions** | Σ: global symbol table. M: section map (maps input sections to output sections). A: address assignment function. R': resolved relocations. D: dynamic linking structures. |
+| **Preconditions** | All input object files satisfy Valid_Obj(Oᵢ, F). The linker script (if provided) is well-formed. The target machine description is available. |
+| **Postconditions** | The output satisfies Valid_Exec(O_exec, F). |
+| **Invariants** | Symbol resolution correctness, section layout correctness, relocation resolution correctness, address alignment, format conformance. |
+| **Relations** | Symbol-to-definition mapping (→_def), section-to-address mapping (→_addr), relocation-to-value mapping (→_val). |
+| **Failure behavior** | If a symbol is undefined and not marked as dynamic, emit an "undefined symbol" error. If a relocation cannot be resolved (e.g., out-of-range branch), emit a "relocation overflow" error. If the output format is violated, emit an internal compiler error. |
+| **Complexity** | Linking: O(Σ|Oᵢ| · k + |S| · log|S| + |R| + |output size|). |
+| **Correctness** | ⟦O₁, …, Oₙ⟧ = ⟦O_exec⟧. The executable, when loaded and run, must produce the same observable behavior as the union of the input object files. |
+
+### 6.3 Symbol Resolution
+
+**Symbol table construction.** The linker builds a global symbol table Σ by merging the symbol tables from all input object files. Each symbol has the following attributes:
+
+- **Name:** the symbol's name (string).
+- **Value:** the symbol's address (initially an offset within its section; updated during address assignment).
+- **Size:** the symbol's size.
+- **Type:** function, object, section, file, etc.
+- **Binding:** local, global, or weak.
+- **Visibility:** default, hidden, or protected.
+- **Section:** the section in which the symbol is defined (or undefined for external symbols).
+- **Source:** the object file in which the symbol was defined.
+
+**Resolution rules.** When multiple object files define the same symbol, the linker applies the following rules in order:
+
+1. **Undefined symbols.** If a symbol is undefined in all object files, it remains undefined. If it is referenced, it must be resolved by a dynamic library or result in an error.
+
+2. **Single definition.** If exactly one object file defines the symbol, that definition is used.
+
+3. **Multiple definitions.** If multiple object files define the symbol:
+   - **Strong vs. weak.** A strong definition (binding = global) overrides a weak definition (binding = weak). If there are multiple strong definitions, this is an error (multiple definition error).
+   - **Common symbols.** If a symbol is defined as a "common" symbol (uninitialized global variable in C), it can be overridden by a strong definition. If there are multiple common symbols, the largest one is used.
+   - **Visibility.** A symbol with hidden visibility cannot be overridden by a symbol from another object file (it is local to its object file).
+
+4. **Dynamic symbols.** If a symbol is undefined in all object files but is available in a dynamic library, the linker marks it as a dynamic symbol and generates a dynamic relocation.
+
+**Symbol precedence.** The precedence order for symbol resolution is:
+
+1. Strong definition (binding = global, visibility = default or protected).
+2. Weak definition (binding = weak).
+3. Common symbol (uninitialized global).
+4. Dynamic symbol (from a shared library).
+5. Undefined (error if referenced).
+
+**Symbol interposition.** For shared libraries, a symbol with default visibility can be "interposed" by a definition in the main executable or another shared library loaded earlier. The linker must generate dynamic relocations (e.g., GOT entries) to support interposition.
+
+**Symbol visibility and binding.** The linker respects the visibility and binding attributes:
+
+- **Local symbols** (binding = local) are not exported and cannot be referenced from other object files.
+- **Global symbols** (binding = global) are exported and can be referenced from other object files.
+- **Weak symbols** (binding = weak) are exported but can be overridden by strong symbols.
+- **Hidden visibility** means the symbol is not exported to the dynamic symbol table.
+- **Protected visibility** means the symbol is exported but cannot be interposed.
+
+### 6.4 Section Merging and Layout
+
+**Section merging.** The linker merges sections from different object files into output sections. The merging rules are:
+
+- **Same name and attributes.** Sections with the same name and compatible attributes (flags, type) are merged into a single output section.
+- **Ordering.** The order of input sections within an output section is determined by the linker script (if provided) or by a default ordering (e.g., .text sections in the order they appear on the command line).
+- **Alignment.** The output section's alignment is the maximum alignment of all input sections.
+
+**Default section mapping.** If no linker script is provided, the linker uses a default mapping:
+
+- All .text sections → output .text section.
+- All .rodata sections → output .rodata section.
+- All .data sections → output .data section.
+- All .bss sections → output .bss section.
+- All .debug_* sections → corresponding output .debug_* sections.
+- All .rela.* sections → merged into output .rela.* sections.
+
+**Garbage collection.** If garbage collection is enabled (--gc-sections), the linker removes sections that are not reachable from the entry point or from symbols marked as "keep". The algorithm is:
+
+1. **Build a section dependency graph.** For each section, find all symbols it defines and references. For each referenced symbol, find the section that defines it. Add an edge from the referencing section to the defining section.
+
+2. **Mark reachable sections.** Starting from the entry point and all "keep" symbols, perform a breadth-first search to mark all reachable sections.
+
+3. **Remove unreachable sections.** Remove all sections that are not marked as reachable. Update the symbol table and relocations accordingly.
+
+**Layout algorithm.** The linker assigns addresses to sections using the following algorithm:
+
+1. **Sort sections by type.** Group sections by type (text, rodata, data, bss) and order the groups according to the target's ABI (typically .text, .rodata, .data, .bss).
+
+2. **Assign base addresses.** For each group, assign a base address. The base address is determined by the linker script or by default values (e.g., 0x400000 for x86-64 ELF executables).
+
+3. **Assign section addresses.** Within each group, assign addresses to sections in order. For each section:
+   - Align the current address to the section's alignment requirement.
+   - Assign the current address to the section.
+   - Increment the current address by the section's size.
+
+4. **Update symbol addresses.** For each symbol, update its address to be the section's base address plus the symbol's offset within the section.
+
+**Alignment handling.** The linker ensures that all sections and symbols are correctly aligned:
+
+- Each section's address is a multiple of its alignment requirement.
+- Each symbol's address is a multiple of its alignment requirement (if specified).
+- The output file's segments are aligned to the target's page size (typically 4KB or 64KB).
+
+### 6.5 Address Assignment
+
+**Address assignment function.** The address assignment function A maps each section and symbol to a final address:
+
+    A: Section ∪ Symbol → Address
+
+For a section s:
+
+    A(s) = base(group(s)) + offset(s)
+
+where:
+- group(s) is the group to which s belongs (text, rodata, data, bss).
+- base(g) is the base address of group g.
+- offset(s) is the offset of s within its group, computed during layout.
+
+For a symbol v:
+
+    A(v) = A(section(v)) + offset(v)
+
+where:
+- section(v) is the section in which v is defined.
+- offset(v) is v's offset within its section.
+
+**Address space layout.** The address space is divided into segments:
+
+- **Text segment.** Contains executable code and read-only data. Typically starts at a fixed address (e.g., 0x400000 for x86-64 ELF).
+- **Data segment.** Contains initialized and uninitialized data. Typically starts after the text segment, aligned to a page boundary.
+- **BSS segment.** Contains uninitialized data. Typically part of the data segment but with no file content.
+
+**Position-independent code (PIC).** For shared libraries and position-independent executables, addresses are relative to a load base. The linker generates relocations that are resolved at load time by the runtime loader.
+
+### 6.6 Relocation Resolution
+
+**Relocation resolution.** For each relocation r = (offset, symbol, type, addend), the linker computes the final value and patches the output at the specified offset:
+
+    value = resolve(r)
+    patch(output, offset(r), value)
+
+The resolve function depends on the relocation type. Common relocation types and their resolution formulas:
+
+- **Absolute address (e.g., R_X86_64_64):**
+  
+      value = A(symbol) + addend
+
+- **PC-relative address (e.g., R_X86_64_PC32):**
+  
+      value = A(symbol) + addend - P
+
+  where P is the address of the relocation site (the address being patched).
+
+- **GOT-relative address (e.g., R_X86_64_GOTPCREL):**
+  
+      value = G + addend - P
+
+  where G is the address of the symbol's GOT entry.
+
+- **PLT-relative address (e.g., R_X86_64_PLT32):**
+  
+      value = L + addend - P
+
+  where L is the address of the symbol's PLT entry.
+
+**Relocation overflow.** If the computed value does not fit in the field being patched (e.g., a 32-bit PC-relative offset is too large), the linker emits a "relocation overflow" error. Link-time relaxation (§6.8) can sometimes avoid this by converting long-range calls to short-range calls.
+
+**Dynamic relocations.** If a symbol is defined in a dynamic library, the linker cannot resolve the relocation at link time. Instead, it generates a dynamic relocation that the runtime loader will resolve at load time. The dynamic relocation is stored in the .rela.dyn or .rela.plt section.
+
+### 6.7 Dynamic Linking (GOT/PLT)
+
+**Global Offset Table (GOT).** The GOT is a table of addresses used for position-independent code. Each global variable or function that is accessed via the GOT has an entry in the GOT. The GOT is divided into:
+
+- **.got:** contains addresses of global variables.
+- **.got.plt:** contains addresses of functions (used by the PLT).
+
+**Procedure Linkage Table (PLT).** The PLT is a table of stubs used for lazy binding of function calls. Each function call to a dynamic symbol goes through a PLT stub. The PLT stub:
+
+1. Jumps to the address in the GOT (initially pointing to the resolver).
+2. The resolver (in the dynamic loader) looks up the function's actual address and updates the GOT.
+3. Subsequent calls jump directly to the function.
+
+**GOT/PLT generation.** For each dynamic symbol:
+
+1. **GOT entry.** Allocate an entry in the .got or .got.plt section. Initialize it to 0 (for .got) or to the resolver address (for .got.plt).
+
+2. **PLT stub.** Allocate a PLT stub in the .plt section. The stub contains instructions to jump to the GOT entry and invoke the resolver if needed.
+
+3. **Dynamic relocation.** Generate a dynamic relocation (e.g., R_X86_64_JUMP_SLOT for PLT entries, R_X86_64_GLOB_DAT for GOT entries) that the runtime loader will resolve.
+
+**Symbol interposition and GOT.** For symbols with default visibility, the GOT entry may be interposed by a definition in the main executable or another shared library. The linker generates a dynamic relocation to allow the runtime loader to update the GOT entry at load time.
+
+**Copy relocations.** If a main executable references a global variable defined in a shared library, the linker may generate a "copy relocation". This allocates space for the variable in the executable's .bss section and generates a dynamic relocation that copies the variable's value from the shared library at load time. All references to the variable in the executable and other shared libraries are redirected to the copy.
+
+### 6.8 Link-Time Optimization (Relaxation)
+
+**Relaxation model.** Link-time relaxation is a set of target-specific optimizations that the linker performs after address assignment. The goal is to replace longer instruction sequences with shorter ones when the target address is known to be in range.
+
+**Common relaxation patterns.**
+
+- **Branch relaxation.** Convert a long-range branch (e.g., a call through the PLT) to a short-range branch (e.g., a direct call) when the target is within the branch's range.
+
+- **NOP padding removal.** Remove NOP instructions that were inserted for alignment when the actual address does not require padding.
+
+- **Address calculation simplification.** Replace a sequence of instructions that computes an address (e.g., load address into a register, then add an offset) with a single instruction when the address is known at link time.
+
+**Relaxation algorithm.** The linker performs relaxation iteratively:
+
+1. **Initial layout.** Perform the initial layout and address assignment.
+
+2. **Relaxation pass.** For each instruction that can be relaxed, check if the relaxation is valid (e.g., the target is in range). If so, apply the relaxation and update the instruction's size.
+
+3. **Re-layout.** If any instruction's size changed, re-layout the affected sections and update addresses.
+
+4. **Re-resolve relocations.** Update all relocations with the new addresses.
+
+5. **Repeat.** Repeat steps 2-4 until no more relaxations are possible or a maximum iteration count is reached.
+
+**Convergence.** The relaxation algorithm is guaranteed to converge because each relaxation reduces the size of the output (or keeps it the same). The maximum number of iterations is bounded by the number of instructions that can be relaxed.
+
+### 6.9 Output Format
+
+**ELF executable format.** The ELF executable structure is:
+
+1. **ELF header.** Contains magic number, architecture, entry point, program header table offset, section header table offset, etc.
+
+2. **Program header table.** Describes the segments (loadable sections) and their attributes (virtual address, physical address, file offset, file size, memory size, flags, alignment).
+
+3. **Segments.** The loadable sections, grouped into segments:
+   - **Text segment.** Contains .text, .rodata, and other read-only sections. Flags = PF_R | PF_X.
+   - **Data segment.** Contains .data, .bss, and other read-write sections. Flags = PF_R | PF_W.
+   - **Dynamic segment.** Contains .dynamic, .got, .got.plt, .rela.dyn, .rela.plt. Flags = PF_R | PF_W.
+
+4. **Sections.** The individual sections within the segments.
+
+5. **Section header table.** An array of section headers, one per section.
+
+**Mach-O executable format.** The Mach-O executable structure is:
+
+1. **Mach-O header.** Contains magic number, CPU type, file type, number of load commands, etc.
+
+2. **Load commands.** A sequence of load commands describing the segments, sections, symbol table, dynamic linker, entry point, etc.
+
+3. **Segments.** The loadable sections, grouped into segments (__TEXT, __DATA, __LINKEDIT).
+
+4. **Sections.** The individual sections within the segments.
+
+5. **Symbol table and string table.**
+
+**PE/COFF executable format.** The PE/COFF executable structure is:
+
+1. **DOS header.** Contains the "MZ" magic number and a pointer to the PE header.
+
+2. **PE header.** Contains the PE signature, COFF header, and optional header.
+
+3. **Section headers.** An array of section headers, one per section.
+
+4. **Sections.** The individual sections.
+
+5. **Import table.** Describes the imported symbols and DLLs.
+
+6. **Export table.** Describes the exported symbols.
+
+**Format conformance.** The linker must:
+- Set all required fields in the header.
+- Generate all required segments and sections.
+- Align all segments and sections correctly.
+- Generate a valid symbol table.
+- Generate all required dynamic linking structures (GOT, PLT, dynamic symbol table).
+- Set the entry point correctly.
+
+### 6.10 Validity Invariants
+
+Valid_Exec(O_exec, F) holds iff all of the following hold:
+
+**1. Symbol resolution correctness.**
+- All referenced symbols are defined (either in the executable or in a dynamic library).
+- Symbol precedence rules are correctly applied (strong over weak, visibility rules).
+- No multiple definitions of the same symbol (unless allowed by weak symbols or common symbols).
+
+**2. Section layout correctness.**
+- All sections are assigned addresses that satisfy their alignment requirements.
+- Sections do not overlap (except for sections with the SHF_MERGE flag).
+- The layout matches the target's ABI requirements (e.g., text segment before data segment).
+
+**3. Relocation resolution correctness.**
+- All relocations are resolved correctly according to the target's ABI.
+- No relocation overflows (all values fit in their fields).
+- Dynamic relocations are generated for symbols that cannot be resolved at link time.
+
+**4. Address alignment.**
+- All segment addresses are aligned to the target's page size.
+- All section addresses are aligned to their alignment requirements.
+- All symbol addresses are aligned to their alignment requirements.
+
+**5. Format conformance.**
+- The output conforms to the target's executable format specification (ELF, Mach-O, or PE/COFF).
+- All required headers, segments, and sections are present.
+- All required dynamic linking structures (GOT, PLT, dynamic symbol table) are present and correctly formatted.
+
+**6. Entry point correctness.**
+- The entry point is a valid address within the executable.
+- The entry point is in the text segment.
+- The entry point symbol (if specified) is correctly resolved.
+
+**7. Dynamic linking correctness.**
+- All dynamic symbols are correctly marked (exported or imported).
+- GOT and PLT entries are correctly generated for dynamic symbols.
+- Dynamic relocations are correctly generated for symbols that require runtime resolution.
+
+**8. Debug information preservation.**
+- All debug sections from input object files are preserved in the output.
+- Debug section addresses are correctly updated.
+- Debug relocations are correctly resolved.
+
+### 6.11 Representation and Cost Model
+
+**Symbol table.** The global symbol table is implemented as a hash table mapping symbol names to symbol entries. Each symbol entry contains the symbol's attributes (value, size, type, binding, visibility, section, source).
+
+**Section map.** The section map is a table that maps input sections to output sections. Each entry contains the input section's object file, section index, and the corresponding output section.
+
+**Address table.** The address table is a table that maps sections and symbols to their final addresses. Each entry contains the address and the alignment requirement.
+
+**Relocation list.** The relocation list is a list of all relocations from all input object files. Each entry contains the relocation's offset, symbol, type, addend, and resolved value.
+
+**Output buffer.** The linker uses a byte buffer to accumulate the output executable. The buffer is resizable.
+
+**Traversal cost.** Parsing input object files is O(Σ|Oᵢ|). Building the symbol table is O(|S| · log|S|) (due to hash table operations). Section merging is O(Σ|sections|). Layout is O(|sections|). Relocation resolution is O(|R|). Output generation is O(|output size|).
+
+**Modification cost.** The linker does not modify the input object files. It only reads them and produces output.
+
+**Memory complexity.** O(Σ|Oᵢ| + |S| · symbol_size + |sections| · section_size + |R| · reloc_size + |output size|).
+
+**Construction cost.** O(Σ|Oᵢ| · k + |S| · log|S| + |R| + |output size|) time, dominated by parsing, symbol resolution, and relocation resolution.
+
+---
+
+# T0: Speculative Register Interpreter — Complete Design Document (v1)
+
+## 0. Document Control and Design Scope
+
+**Component:** T0 Tier — Speculative Register Interpreter
+
+**Version:** 1.0
+
+**Role:** Initial execution tier. Interprets source-level bytecode or IR using a register-based virtual machine with speculative optimizations, inline caching, opcode rewriting, and super byte code generation. Collects profiling data for tier transitions.
+
+**Design Status:** Complete specification.
+
+**Scope:** This document defines the register-based interpreter architecture, speculative optimization mechanisms, opcode rewriting rules, super byte code format, profiling infrastructure, deoptimization mechanism, and tier transition triggers. It does not define:
+- The source language's bytecode format (consumed by T0)
+- Higher tiers (T1, T2, etc.) that T0 transitions to
+- The runtime system that manages tier transitions (separate subsystem)
+
+**Normative References:**
+- Hölzle, U., Ungar, D., and Wolfer, L. "The Design and Evaluation of a Self-Optimizing Compiler" (for speculative optimization)
+- Chambers, C. and Ungar, D. "Customization: A Memory-Efficient Technique for Reducing Interpreter Performance" (for inline caching)
+- Click, C. and Rose, J. "Speedup of Java Programs Using the HotSpot VM" (for tiered compilation)
+- Standard JIT compiler literature for deoptimization and tier transitions
+
+**Known Limitations:**
+- Garbage collection integration is not fully specified (deferred to runtime subsystem)
+- Thread safety for concurrent execution is partially specified (deferred)
+- Exact profiling data format is not specified (only the interface)
+
+---
+
+## 1. Goals, Non-Goals, and Constraints
+
+### Goals
+
+1. Execute programs with low startup latency by interpreting bytecode directly without compilation overhead.
+2. Collect accurate profiling data (execution counts, type feedback, branch outcomes) to guide higher-tier compilation.
+3. Apply speculative optimizations (type specialization, branch prediction, inline caching) to improve interpretation speed.
+4. Rewrite opcodes dynamically to eliminate redundant checks and combine operations (super byte codes).
+5. Support fast deoptimization when speculative assumptions are violated.
+6. Provide a clean interface for transitioning to higher tiers (T1, T2) when profiling data indicates hot code.
+7. Maintain correctness under all speculative assumptions (deoptimize on violation).
+
+### Non-Goals
+
+1. Achieve peak performance (higher tiers handle that).
+2. Perform whole-program optimization (deferred to higher tiers).
+3. Generate native code (deferred to higher tiers).
+4. Handle all language features at peak speed (some features may trigger immediate tier transitions).
+
+### Constraints
+
+- T0 startup time must be O(|bytecode|) — no compilation overhead.
+- T0 execution speed must be within 2-5x of native code for typical workloads (after warm-up).
+- Profiling overhead must not exceed 10% of execution time.
+- Deoptimization must be correct and complete (no observable behavior differences).
+- Super byte code generation must be bounded (no unbounded code growth).
+- Memory overhead for inline caches and profiling data must be O(|bytecode| · k) where k is a small constant.
+
+---
+
+## 6. T0: Speculative Register Interpreter
+
+### 6.1 Purpose and Domain
+
+The T0 tier is a register-based interpreter that executes programs with speculative optimizations. Its purpose is to provide fast startup and collect profiling data while applying lightweight optimizations to improve interpretation speed. T0 operates on a register-based bytecode format (not stack-based) to reduce interpreter overhead.
+
+The interpreter maintains:
+- A register file (virtual registers for the current frame).
+- A program counter (PC) pointing to the current bytecode instruction.
+- An operand stack (for expression evaluation, though most operations use registers).
+- A call stack (for function calls).
+- Inline caches (for dynamic dispatch and property access).
+- Profiling counters (for execution counts, type feedback, branch outcomes).
+
+### 6.2 Mathematical Specification
+
+| Requirement | Specification |
+|---|---|
+| **Domain** | B: the set of valid bytecodes. P: the set of valid programs (sequences of bytecodes). S: the set of valid machine states (register file, stack, heap). |
+| **Codomain** | S': the set of resulting machine states after execution. Prof: the set of profiling data collected during execution. |
+| **Definitions** | I: interpreter function. Spec: speculative assumptions. Deopt: deoptimization function. Rewrite: opcode rewriting function. Super: super byte code generator. |
+| **Preconditions** | The input bytecode B is well-formed. The initial state S is valid (registers initialized, heap consistent). |
+| **Postconditions** | The resulting state S' satisfies the source language's semantics under the speculative assumptions Spec. If a speculative assumption is violated, deoptimization occurs and execution continues in a higher tier. |
+| **Invariants** | Speculative assumption consistency, profiling data accuracy, deoptimization correctness, register file consistency, stack consistency. |
+| **Relations** | Bytecode-to-state transition (→_exec), speculative assumption violation (→_deopt), opcode rewriting (→_rewrite), profiling data collection (→_profile). |
+| **Failure behavior** | If a speculative assumption is violated, deoptimize and transition to a higher tier. If the bytecode is malformed, emit an InternalCompilerError. If the heap is inconsistent, emit a runtime error. |
+| **Complexity** | Interpretation: O(|instructions| · k) where k is the average cost per instruction (including speculative checks). Profiling: O(|instructions| · p) where p is the profiling overhead per instruction. |
+| **Correctness** | ⟦B⟧_source = ⟦I(B, S)⟧_T0 under speculative assumptions Spec. If Spec is violated, ⟦Deopt(B, S)⟧_T1 = ⟦B⟧_source. |
+
+### 6.3 Register-Based Interpreter Architecture
+
+**Register file.** The interpreter maintains a register file for each activation frame. The register file contains:
+- **Virtual registers** (v0, v1, v2, …): used for local variables and temporary values.
+- **Argument registers** (a0, a1, a2, …): used for function arguments.
+- **Return value register** (r0): used for function return values.
+- **Special registers**: PC (program counter), SP (stack pointer), FP (frame pointer), HP (heap pointer).
+
+**Bytecode format.** The bytecode is register-based, not stack-based. Each instruction specifies its operands as register indices. Example bytecodes:
+
+```
+LOAD_CONST r0, const_index    // Load constant into register r0
+LOAD_LOCAL r1, local_index    // Load local variable into register r1
+STORE_LOCAL local_index, r2   // Store register r2 into local variable
+ADD r3, r1, r2                // r3 = r1 + r2
+CALL r4, r0, arg_count        // Call function in r0 with arg_count arguments, result in r4
+JUMP label                    // Unconditional jump
+JUMP_IF_FALSE r5, label       // Conditional jump if r5 is false
+RETURN r6                     // Return value in r6
+```
+
+**Instruction dispatch.** The interpreter uses a threaded dispatch mechanism (computed goto or switch dispatch) to execute bytecodes. Each bytecode handler:
+1. Decodes the instruction (reads opcode and operands).
+2. Performs the operation (e.g., add two registers).
+3. Updates the PC to the next instruction.
+4. Checks for deoptimization triggers (optional, based on profiling).
+
+**Operand stack.** Although the bytecode is register-based, an operand stack is maintained for expression evaluation and function call argument passing. The stack is used for:
+- Evaluating complex expressions before storing results in registers.
+- Passing arguments to functions (arguments are pushed onto the stack, then the CALL instruction pops them).
+- Handling exceptions (the exception object is pushed onto the stack).
+
+### 6.4 Speculative Optimization
+
+**Speculative assumptions.** The interpreter makes speculative assumptions about the program's behavior to optimize execution. Common speculative assumptions include:
+
+1. **Type speculation.** Assume that a variable or expression has a specific type (e.g., "this variable is always an integer"). If the assumption is violated, deoptimize.
+
+2. **Branch prediction.** Assume that a conditional branch always goes in a specific direction (e.g., "this loop condition is always true"). If the assumption is violated, update the prediction and continue (no deoptimization needed for branch prediction).
+
+3. **Inline caching.** Assume that a dynamic dispatch (e.g., method call, property access) always resolves to a specific target. If the assumption is violated, update the cache (polymorphic inline cache) or deoptimize if the cache becomes too complex.
+
+4. **Shape speculation.** Assume that an object has a specific shape (layout of properties). If the object's shape changes, deoptimize.
+
+5. **Constant speculation.** Assume that a value is constant (e.g., "this loop bound is always 10"). If the value changes, deoptimize.
+
+**Speculative assumption representation.** Each speculative assumption is represented as a guard:
+
+    Guard = (assumption_id, check_function, deopt_target)
+
+where:
+- `assumption_id`: a unique identifier for the assumption.
+- `check_function`: a function that checks whether the assumption holds (e.g., "is this value an integer?").
+- `deopt_target`: the PC in a higher tier where execution should resume if the assumption is violated.
+
+**Guard insertion.** Guards are inserted at points where speculative assumptions might be violated:
+- Before a type-specialized operation (e.g., integer addition).
+- Before a branch (to check the branch prediction).
+- Before a dynamic dispatch (to check the inline cache).
+- Before accessing an object property (to check the object's shape).
+
+**Guard checking.** Each guard check is a lightweight operation (e.g., a type tag check, a pointer comparison). If the check fails, the interpreter:
+1. Records the violation in the profiling data.
+2. Deoptimizes: reconstructs the source-level state and transfers control to a higher tier.
+
+### 6.5 Inline Caching
+
+**Inline cache structure.** An inline cache (IC) is a data structure attached to a bytecode instruction that caches the result of a dynamic dispatch. The IC structure is:
+
+```
+InlineCache = {
+    key: lookup_key,          // The key used for cache lookup (e.g., receiver type, property name)
+    target: dispatch_target,  // The cached dispatch target (e.g., method address, property offset)
+    state: cache_state,       // The cache state (uninitialized, monomorphic, polymorphic, megamorphic)
+    entries: [cache_entry],   // For polymorphic caches, a list of (key, target) pairs
+    profiling: profile_data   // Profiling data for this cache (hit count, miss count, etc.)
+}
+```
+
+**Cache states.**
+
+- **Uninitialized.** The cache has not been used yet. The first dispatch populates the cache.
+- **Monomorphic.** The cache has seen only one key. Fast path: check if the current key matches the cached key; if so, use the cached target.
+- **Polymorphic.** The cache has seen 2-4 different keys. The cache stores a list of (key, target) pairs. The interpreter searches the list for a match.
+- **Megamorphic.** The cache has seen more than 4 different keys. The cache is disabled, and the interpreter uses a slow path (full dynamic dispatch). The interpreter may deoptimize if the megamorphic site is hot.
+
+**Cache lookup.** For a monomorphic cache:
+
+```
+if (cache.key == current_key) {
+    return cache.target;  // Cache hit
+} else {
+    // Cache miss
+    target = slow_path_lookup(current_key);
+    update_cache(cache, current_key, target);
+    return target;
+}
+```
+
+For a polymorphic cache:
+
+```
+for (entry in cache.entries) {
+    if (entry.key == current_key) {
+        return entry.target;  // Cache hit
+    }
+}
+// Cache miss
+target = slow_path_lookup(current_key);
+if (cache.entries.length < MAX_POLYMORPHIC_SIZE) {
+    cache.entries.append((current_key, target));
+} else {
+    cache.state = MEGAMORPHIC;
+}
+return target;
+```
+
+**Cache invalidation.** Inline caches are invalidated when:
+- The object's shape changes (e.g., a new property is added).
+- The method is redefined (e.g., monkey patching).
+- The class hierarchy changes (e.g., a new subclass is loaded).
+
+When a cache is invalidated, its state is reset to UNINITIALIZED.
+
+### 6.6 Opcode Rewriting
+
+**Opcode rewriting model.** The interpreter dynamically rewrites bytecodes to eliminate redundant checks and optimize common patterns. Opcode rewriting is a form of just-in-time optimization that modifies the bytecode in place.
+
+**Rewriting rules.** Common rewriting rules include:
+
+1. **Type specialization.** If a variable is speculatively assumed to have a specific type, rewrite the bytecode to use a type-specialized version:
+
+   ```
+   Original: ADD r3, r1, r2
+   Rewritten: ADD_INT r3, r1, r2  // Assumes r1 and r2 are integers
+   ```
+
+   The rewritten bytecode includes a guard that checks the type assumption. If the guard fails, the interpreter deoptimizes.
+
+2. **Constant folding.** If an operand is a compile-time constant, rewrite the bytecode to use the constant directly:
+
+   ```
+   Original: ADD r3, r1, 5
+   Rewritten: ADD_IMM r3, r1, 5  // Use immediate operand
+   ```
+
+3. **Dead code elimination.** If a bytecode is unreachable (e.g., after an unconditional jump), rewrite it to a NOP:
+
+   ```
+   Original: LOAD_CONST r0, 42
+   Rewritten: NOP  // This instruction is unreachable
+   ```
+
+4. **Common subexpression elimination.** If a computation is repeated, cache the result and reuse it:
+
+   ```
+   Original: 
+     MUL r3, r1, r2
+     MUL r4, r1, r2
+   Rewritten:
+     MUL r3, r1, r2
+     MOV r4, r3  // Reuse the result
+   ```
+
+5. **Inline cache specialization.** If an inline cache is monomorphic, rewrite the bytecode to inline the dispatch:
+
+   ```
+   Original: CALL_METHOD r3, r0, "method_name"
+   Rewritten: CALL_DIRECT r3, r0, method_address  // Inlined dispatch
+   ```
+
+**Rewriting trigger.** Opcode rewriting is triggered by:
+- Profiling data (e.g., a branch is taken 99% of the time).
+- Inline cache state (e.g., a cache becomes monomorphic).
+- Type feedback (e.g., a variable is always an integer).
+- Explicit optimization requests (e.g., the runtime detects a hot loop).
+
+**Rewriting safety.** Opcode rewriting must preserve the program's semantics. The interpreter ensures this by:
+- Inserting guards for all speculative assumptions.
+- Maintaining a deoptimization target for each rewritten bytecode.
+- Verifying that the rewritten bytecode is equivalent to the original under the speculative assumptions.
+
+### 6.7 Super Byte Codes
+
+**Super byte code model.** A super byte code is a single bytecode that represents a sequence of operations. Super byte codes reduce interpreter overhead by combining multiple operations into a single dispatch.
+
+**Super byte code generation.** The interpreter generates super byte codes by:
+1. Identifying common sequences of bytecodes (e.g., "load local, add constant, store local").
+2. Creating a new bytecode that represents the sequence.
+3. Replacing the original sequence with the super byte code.
+
+**Example super byte codes.**
+
+- **LOAD_ADD_STORE.** Combines loading a local variable, adding a constant, and storing the result:
+
+  ```
+  Original:
+    LOAD_LOCAL r0, local_index
+    ADD_IMM r0, r0, constant
+    STORE_LOCAL local_index, r0
+  
+  Super byte code:
+    LOAD_ADD_STORE local_index, constant
+  ```
+
+- **LOAD_CALL_STORE.** Combines loading a function, calling it, and storing the result:
+
+  ```
+  Original:
+    LOAD_LOCAL r0, func_index
+    CALL r1, r0, arg_count
+    STORE_LOCAL local_index, r1
+  
+  Super byte code:
+    LOAD_CALL_STORE local_index, func_index, arg_count
+  ```
+
+- **BRANCH_IF_TRUE.** Combines a comparison and a conditional branch:
+
+  ```
+  Original:
+    CMP r0, r1, r2
+    JUMP_IF_TRUE r0, label
+  
+  Super byte code:
+    CMP_BRANCH r1, r2, label, CMP_EQ
+  ```
+
+**Super byte code format.** Super byte codes are encoded in the same format as regular bytecodes, but with additional operands to specify the combined operations. The interpreter's dispatch table includes handlers for both regular and super byte codes.
+
+**Super byte code benefits.** Super byte codes reduce interpreter overhead by:
+- Reducing the number of dispatch operations (one dispatch per super byte code instead of one per original bytecode).
+- Reducing the number of register reads and writes (intermediate results stay in registers).
+- Enabling better instruction-level parallelism (the super byte code handler can be optimized as a unit).
+
+**Super byte code limitations.** Super byte codes are only beneficial for common patterns. The interpreter limits super byte code generation to:
+- Sequences of 2-4 bytecodes (longer sequences have diminishing returns).
+- Patterns that occur frequently (based on profiling data).
+- Patterns that do not involve complex control flow (e.g., no branches in the middle of a super byte code).
+
+### 6.8 Profiling Infrastructure
+
+**Profiling data model.** The interpreter collects profiling data to guide tier transitions and optimization decisions. Profiling data includes:
+
+1. **Execution counts.** For each bytecode, the number of times it has been executed.
+2. **Type feedback.** For each variable or expression, the set of types it has taken.
+3. **Branch outcomes.** For each conditional branch, the number of times it has been taken and not taken.
+4. **Inline cache statistics.** For each inline cache, the hit count, miss count, and the set of keys seen.
+5. **Call site statistics.** For each call site, the set of callees and the number of calls to each.
+
+**Profiling data structure.** Profiling data is stored in a side table associated with each function:
+
+```
+ProfileData = {
+    execution_counts: [int],           // One counter per bytecode
+    type_feedback: [type_set],         // One type set per variable
+    branch_outcomes: [(int, int)],     // (taken_count, not_taken_count) per branch
+    inline_cache_stats: [cache_stat],  // One stat per inline cache
+    call_site_stats: [call_stat]       // One stat per call site
+}
+```
+
+**Profiling overhead.** Profiling adds overhead to interpretation. To minimize overhead:
+- Execution counts are incremented only for bytecodes that are candidates for optimization (e.g., loop headers, call sites).
+- Type feedback is collected only for variables that are used in type-specialized operations.
+- Branch outcomes are collected only for branches that are candidates for branch prediction.
+- Inline cache statistics are collected automatically as part of the inline cache mechanism.
+
+**Profiling accuracy.** Profiling data must be accurate to guide optimization decisions. The interpreter ensures accuracy by:
+- Using atomic operations for counters (to handle concurrent execution).
+- Sampling (e.g., collecting type feedback only every Nth execution) to reduce overhead while maintaining statistical accuracy.
+- Resetting profiling data when a function is recompiled (to avoid stale data).
+
+### 6.9 Deoptimization
+
+**Deoptimization model.** Deoptimization is the process of transferring execution from T0 to a higher tier when a speculative assumption is violated. Deoptimization must:
+1. Reconstruct the source-level state (variables, call stack, etc.).
+2. Transfer control to the appropriate point in the higher tier.
+3. Ensure that the higher tier produces the same observable behavior as T0 would have.
+
+**Deoptimization trigger.** Deoptimization is triggered when:
+- A guard check fails (e.g., a type assumption is violated).
+- An inline cache becomes megamorphic and the site is hot.
+- The runtime explicitly requests deoptimization (e.g., a class is redefined).
+
+**Deoptimization process.** When deoptimization is triggered:
+
+1. **Capture the current state.** The interpreter captures the current register file, operand stack, call stack, and PC.
+
+2. **Map to source-level state.** The interpreter uses deopt metadata (generated during bytecode compilation) to map the current state to source-level variables. The deopt metadata specifies:
+   - Which register corresponds to which source variable.
+   - Which stack slots correspond to which source variables.
+   - The PC in the higher tier where execution should resume.
+
+3. **Transfer to higher tier.** The interpreter transfers control to the higher tier by:
+   - Allocating a new frame in the higher tier's call stack.
+   - Initializing the frame with the source-level state.
+   - Jumping to the deopt target PC in the higher tier.
+
+4. **Continue execution.** The higher tier continues execution from the deopt target, producing the same observable behavior as T0 would have.
+
+**Deoptimization correctness.** Deoptimization is correct if:
+- The source-level state is correctly reconstructed.
+- The higher tier produces the same observable behavior as T0 would have.
+- No speculative assumptions from T0 are carried over to the higher tier (the higher tier must re-establish its own assumptions).
+
+**Deoptimization overhead.** Deoptimization is expensive (it involves stack reconstruction and tier transition). To minimize overhead:
+- Deoptimization should be rare (speculative assumptions should be accurate).
+- The deoptimization path should be optimized (e.g., use a fast path for common cases).
+- The runtime should avoid deoptimizing the same function repeatedly (e.g., by disabling speculative optimizations for that function).
+
+### 6.10 Tier Transition
+
+**Tier transition model.** The interpreter transitions to a higher tier when profiling data indicates that a function is hot (executed frequently). The transition is triggered by:
+- Execution count thresholds (e.g., a function has been called 1000 times).
+- Loop iteration thresholds (e.g., a loop has iterated 100 times).
+- Explicit requests from the runtime (e.g., the runtime detects a long-running function).
+
+**Transition process.** When a tier transition is triggered:
+
+1. **Compile the function.** The runtime compiles the function to a higher tier (T1, T2, etc.) using the profiling data collected by T0.
+
+2. **Install the compiled code.** The runtime installs the compiled code in the function's code table, replacing the T0 bytecode.
+
+3. **Redirect execution.** Subsequent calls to the function execute the compiled code instead of the T0 bytecode.
+
+4. **Deoptimize existing frames.** If there are existing T0 frames on the call stack, they are deoptimized and replaced with frames in the higher tier.
+
+**Transition safety.** Tier transitions are safe if:
+- The compiled code produces the same observable behavior as the T0 bytecode.
+- Existing frames are correctly deoptimized.
+- The profiling data used for compilation is accurate.
+
+**Transition overhead.** Tier transitions are expensive (they involve compilation and deoptimization). To minimize overhead:
+- Transitions should be triggered only for hot functions.
+- The compilation should be fast (higher tiers use incremental compilation).
+- The deoptimization should be fast (use a fast path for common cases).
+
+### 6.11 Validity Invariants
+
+Valid_T0(B, S) holds iff all of the following hold:
+
+**1. Bytecode well-formedness.**
+- All bytecodes are valid (correct opcode, correct operand count, correct operand types).
+- All jump targets are valid (point to valid bytecodes).
+- All register indices are within bounds.
+
+**2. State consistency.**
+- The register file is consistent (all registers have valid values).
+- The operand stack is consistent (all stack slots have valid values).
+- The call stack is consistent (all frames have valid return addresses and frame pointers).
+- The heap is consistent (all objects have valid shapes and types).
+
+**3. Speculative assumption consistency.**
+- All guards are correctly inserted at points where speculative assumptions might be violated.
+- All guards correctly check the speculative assumptions.
+- If a guard fails, deoptimization occurs correctly.
+
+**4. Inline cache correctness.**
+- All inline caches are correctly initialized.
+- All inline cache lookups return the correct target (or trigger a slow path).
+- All inline cache updates are correct (the cache state is updated correctly).
+
+**5. Profiling data accuracy.**
+- All execution counts are accurate (within sampling error).
+- All type feedback is accurate (the type set includes all types seen).
+- All branch outcomes are accurate (within sampling error).
+- All inline cache statistics are accurate.
+
+**6. Opcode rewriting correctness.**
+- All rewritten bytecodes are equivalent to the original bytecodes under the speculative assumptions.
+- All rewritten bytecodes have correct guards.
+- All rewritten bytecodes have correct deoptimization targets.
+
+**7. Super byte code correctness.**
+- All super byte codes are equivalent to the original bytecode sequences.
+- All super byte codes have correct guards (if any).
+- All super byte codes have correct deoptimization targets (if any).
+
+**8. Deoptimization correctness.**
+- All deoptimization targets are valid (point to valid PCs in higher tiers).
+- All deoptimization metadata is correct (correctly maps T0 state to source-level state).
+- All deoptimizations produce the same observable behavior as T0 would have.
+
+**9. Tier transition correctness.**
+- All tier transitions are triggered correctly (based on profiling data).
+- All compiled code is correct (produces the same observable behavior as T0).
+- All existing frames are correctly deoptimized during tier transitions.
+
+### 6.12 Representation and Cost Model
+
+**Register file representation.** The register file is an array of values (tagged pointers or unboxed primitives). Each frame has its own register file.
+
+**Bytecode representation.** Bytecodes are stored in a byte array. Each bytecode is a variable-length encoding (opcode followed by operands).
+
+**Inline cache representation.** Inline caches are stored in a side table associated with each function. Each cache is a small structure (key, target, state, entries).
+
+**Profiling data representation.** Profiling data is stored in a side table associated with each function. The data structure is as defined in §6.8.
+
+**Traversal cost.** Interpreting a bytecode is O(1) (constant time per bytecode, including dispatch and execution). Inline cache lookup is O(1) for monomorphic caches, O(k) for polymorphic caches (where k is the number of entries). Profiling updates are O(1).
+
+**Modification cost.** Opcode rewriting modifies the bytecode array in place. The cost is O(1) per rewrite. Super byte code generation modifies the bytecode array and may require updating jump targets. The cost is O(|bytecodes|) in the worst case.
+
+**Memory complexity.** O(|bytecodes| + |frames| · |registers| + |inline caches| · cache_size + |profiling data| · profile_size).
+
+**Construction cost.** Interpretation: O(|instructions| · k) where k is the average cost per instruction. Profiling: O(|instructions| · p) where p is the profiling overhead per instruction. Opcode rewriting: O(|rewrites|). Super byte code generation: O(|patterns|).
+
+---
+
+# Universal Guest Bytecode — Complete Design Document (v1)
+
+## 0. Document Control and Design Scope
+
+**Component:** Universal Guest Bytecode (UGB)
+
+**Version:** 1.0
+
+**Role:** Language-agnostic, capability-based intermediate bytecode format. Serves as the universal representation consumed by T1 (baseline JIT) and produced by language-specific front-ends. Supports polyglot execution and near-zero overhead FFI.
+
+**Design Status:** Complete specification.
+
+**Scope:** This document defines the bytecode format, capability system, type system, FFI mechanism, memory model, and validity invariants. It does not define:
+- Language-specific front-ends that produce UGB (separate subsystems)
+- The T1 JIT compiler (already specified; consumes UGB)
+- The runtime system (separate subsystem)
+- The FFI runtime for specific foreign languages (separate subsystems)
+
+**Normative References:**
+- Capability-based security literature (Dennis & Van Horn, Capability Myths, etc.)
+- WebAssembly specification (for portable bytecode design)
+- Java Native Interface (JNI) specification (for FFI design patterns)
+- Python C API (for dynamic language FFI patterns)
+- Target architecture ABIs (for FFI calling conventions)
+
+**Known Limitations:**
+- Garbage collection integration with foreign languages is partially specified
+- Thread safety for concurrent FFI calls is partially specified
+- Exact capability revocation mechanisms are not fully specified
+
+---
+
+## 1. Goals, Non-Goals, and Constraints
+
+### Goals
+
+1. Provide a universal bytecode format that can represent programs from multiple source languages (C, Python, Java, JavaScript, Rust, etc.).
+2. Enforce security and isolation through a capability-based permission system.
+3. Support polyglot execution: code from different languages can interoperate seamlessly.
+4. Provide near-zero overhead FFI: calling foreign functions should be as fast as native calls.
+5. Maintain a well-defined memory model that accommodates different language semantics (GC vs. manual memory management, value vs. reference semantics).
+6. Be efficiently compilable by T1 (copy-and-patch JIT).
+7. Support dynamic features (reflection, dynamic typing, eval) without sacrificing performance for static code.
+
+### Non-Goals
+
+1. Replace language-specific IRs for optimization (each language may have its own optimization pipeline before lowering to UGB).
+2. Provide peak performance for all languages (some languages may require specialized compilation paths).
+3. Support all language features without overhead (dynamic features may incur runtime checks).
+
+### Constraints
+
+- UGB encoding size must be O(|source constructs| · k) where k is a small constant.
+- Capability checks must add <5% overhead to execution.
+- FFI calls must have <10% overhead compared to native calls.
+- UGB must be verifiable in O(|bytecode|) time.
+- UGB must support at least 256 opcodes, 65536 capabilities, and 256 type tags.
+
+---
+
+## 6. Universal Guest Bytecode
+
+### 6.1 Purpose and Domain
+
+The Universal Guest Bytecode (UGB) is a register-based, capability-gated bytecode format designed to represent programs from multiple source languages. Its purpose is to provide a common execution substrate that enforces security through capabilities while enabling efficient polyglot execution and FFI.
+
+UGB is:
+- **Register-based**: operations use virtual registers, not a stack.
+- **Capability-based**: every operation that accesses resources (memory, FFI, I/O) requires appropriate capabilities.
+- **Polyglot**: can represent the semantics of multiple languages (static/dynamic, GC/manual, value/reference).
+- **Verifiable**: bytecode can be verified for type safety and capability compliance before execution.
+- **FFI-friendly**: provides direct mechanisms for calling foreign functions with minimal overhead.
+
+### 6.2 Mathematical Specification
+
+| Requirement | Specification |
+|---|---|
+| **Domain** | P_src: the set of valid source programs (from any supported language). |
+| **Codomain** | B_UGB: the set of valid UGB programs. |
+| **Definitions** | F: front-end lowering function (language-specific). C: capability environment. T: type environment. M: memory model. |
+| **Preconditions** | The source program P_src is well-formed according to its language's semantics. The capability environment C is valid. |
+| **Postconditions** | The resulting UGB program B_UGB satisfies Valid_UGB(B_UGB). |
+| **Invariants** | Capability compliance, type safety, memory model consistency, FFI correctness. |
+| **Relations** | Source-to-UGB mapping (→_lower), capability check (→_check), FFI call (→_ffi). |
+| **Failure behavior** | If capability check fails, raise a CapabilityViolation exception. If type check fails, raise a TypeViolation exception. If FFI call fails, raise an FFIViolation exception. |
+| **Complexity** | Lowering: O(|source constructs| · k). Verification: O(|bytecode|). |
+| **Correctness** | ⟦P_src⟧_source = ⟦F(P_src)⟧_UGB under capability environment C. |
+
+### 6.3 Bytecode Format
+
+**Instruction encoding.** Each UGB instruction is variable-length and consists of:
+
+```
+Instruction = {
+    opcode: u8,                        // The operation code (0-255)
+    operands: [operand],               // Variable number of operands
+    capabilities: [capability_id],     // Required capabilities for this instruction
+    metadata: metadata                 // Optional metadata (source location, type info, etc.)
+}
+```
+
+**Operand types.** Operands can be:
+
+- **Register**: a virtual register index (u16).
+- **Immediate**: a constant value (i32, i64, f32, f64, or pointer).
+- **Capability**: a capability identifier (u16).
+- **Label**: a bytecode offset for branches (i32).
+- **Type tag**: a type identifier (u8).
+- **FFI descriptor**: a foreign function descriptor (u32).
+
+**Instruction categories.**
+
+**Arithmetic and logic.** ADD, SUB, MUL, DIV, REM, AND, OR, XOR, SHL, SHR, NEG, NOT. Operands: destination register, source registers or immediates. Capabilities: none (pure computation).
+
+**Memory operations.** LOAD, STORE, ALLOC, FREE. Operands: destination/source registers, address register, size. Capabilities: MemRead, MemWrite, MemAlloc for respective operations.
+
+**Control flow.** JUMP, JUMP_IF_TRUE, JUMP_IF_FALSE, CALL, RETURN. Operands: target label or register, condition register (for conditional jumps), argument registers (for calls). Capabilities: Call for CALL instructions.
+
+**Type operations.** TYPE_CHECK, TYPE_CAST, TYPE_TAG. Operands: value register, type tag. Capabilities: TypeInspect for TYPE_CHECK.
+
+**FFI operations.** FFI_CALL, FFI_LOAD, FFI_STORE. Operands: FFI descriptor, argument registers, result register. Capabilities: FFI for all FFI operations.
+
+**Capability operations.** CAP_CHECK, CAP_GRANT, CAP_REVOKE. Operands: capability register. Capabilities: CapAdmin for CAP_GRANT and CAP_REVOKE.
+
+**Polyglot operations.** LANG_SWITCH, LANG_CONTEXT. Operands: language identifier, context register. Capabilities: Polyglot for language switching.
+
+**Dynamic operations.** EVAL, REFLECT, DYN_CALL. Operands: code register, object register, method name. Capabilities: Dynamic for all dynamic operations.
+
+### 6.4 Capability System
+
+**Capability model.** A capability is a token that grants permission to perform a specific operation or access a specific resource. Capabilities are:
+
+- **Unforgeable**: capabilities cannot be created by user code.
+- **Tamper-proof**: capabilities cannot be modified by user code.
+- **Transitive**: capabilities can be passed to callees (with possible attenuation).
+- **Revocable**: capabilities can be revoked by the runtime.
+
+**Capability types.**
+
+- **Memory capabilities**: MemRead, MemWrite, MemAlloc, MemFree. Grant permission to read, write, allocate, or free memory.
+- **FFI capabilities**: FFI, FFI_Specific(ffi_id). Grant permission to call foreign functions (all or specific).
+- **Type capabilities**: TypeInspect, TypeModify. Grant permission to inspect or modify type information.
+- **I/O capabilities**: IO_Read, IO_Write, IO_Network, IO_File. Grant permission to perform I/O operations.
+- **Dynamic capabilities**: Dynamic, Eval, Reflect. Grant permission to perform dynamic operations.
+- **Polyglot capabilities**: Polyglot, Lang_Specific(lang_id). Grant permission to switch languages or interact with specific languages.
+- **Administrative capabilities**: CapAdmin, ThreadCreate, GC_Control. Grant permission to manage capabilities, threads, or garbage collection.
+
+**Capability environment.** Each function has a capability environment that specifies which capabilities are available:
+
+```
+CapabilityEnvironment = {
+    available_caps: Set<capability_id>,     // Capabilities available to this function
+    granted_caps: Map<register, capability>, // Capabilities stored in registers
+    revoked_caps: Set<capability_id>         // Capabilities that have been revoked
+}
+```
+
+**Capability checking.** Before executing an instruction, the runtime checks that the instruction's required capabilities are available in the current capability environment:
+
+```
+check_capabilities(instruction, cap_env):
+    for cap in instruction.capabilities:
+        if cap not in cap_env.available_caps:
+            raise CapabilityViolation(cap)
+```
+
+**Capability passing.** When calling a function, the caller can pass capabilities to the callee:
+
+```
+CALL r_func, args, caps
+```
+
+The callee receives the capabilities in `caps` and can use them during its execution. The caller can attenuate capabilities (pass a subset of its own capabilities).
+
+**Capability revocation.** The runtime can revoke capabilities at any time (e.g., when a sandbox is torn down). Revoked capabilities are immediately invalid:
+
+```
+CAP_REVOKE cap_id
+```
+
+After revocation, any attempt to use the capability raises a CapabilityViolation.
+
+### 6.5 Type System
+
+**Type tags.** UGB uses a tagged type system where each value has a type tag. Type tags are:
+
+- **Primitive types**: Int8, Int16, Int32, Int64, UInt8, UInt16, UInt32, UInt64, Float32, Float64, Bool, Char.
+- **Reference types**: Ptr, Ref, Box, Array, String, Object.
+- **Function types**: Func(args, ret).
+- **Capability types**: Cap(cap_type).
+- **Foreign types**: Foreign(lang_id, foreign_type_id).
+- **Dynamic types**: Dyn (for dynamically typed values).
+- **Bottom type**: Bottom (for unreachable code).
+
+**Type representation.** Types are represented as type tags (u8) for primitive types and type descriptors (pointers to type metadata) for complex types.
+
+**Type checking.** UGB supports both static and dynamic type checking:
+
+- **Static type checking**: performed during verification (before execution). If the bytecode is statically type-safe, no runtime type checks are needed.
+- **Dynamic type checking**: performed at runtime for dynamically typed code. Type checks are guarded by TypeInspect capabilities.
+
+**Type conversion.** Type conversions are explicit:
+
+```
+TYPE_CAST r_dest, r_src, target_type
+```
+
+If the conversion is invalid (e.g., casting a string to an integer), a TypeViolation exception is raised.
+
+### 6.6 Memory Model
+
+**Memory regions.** UGB defines several memory regions:
+
+- **Stack**: function-local storage (virtual registers, operand stack).
+- **Heap**: dynamically allocated objects (managed by GC or manual allocation).
+- **Foreign memory**: memory owned by foreign languages (not managed by UGB GC).
+- **Code memory**: executable code (immutable after JIT compilation).
+
+**Memory access.** Memory access is capability-gated:
+
+- **Stack access**: no capability required (implicit).
+- **Heap access**: requires MemRead/MemWrite capabilities.
+- **Foreign memory access**: requires FFI capability and appropriate foreign memory descriptors.
+
+**Pointer semantics.** UGB supports two pointer semantics:
+
+- **Safe pointers**: tagged pointers that include type information and bounds. Require MemRead/MemWrite capabilities.
+- **Raw pointers**: untagged pointers for FFI. Require FFI capability and are not bounds-checked.
+
+**Garbage collection.** UGB supports both GC-managed and manually-managed memory:
+
+- **GC-managed objects**: allocated with ALLOC, automatically freed by GC.
+- **Manually-managed objects**: allocated with ALLOC, must be freed with FREE. Require MemFree capability.
+
+**Foreign memory management.** Foreign memory is managed by the foreign language's runtime. UGB provides mechanisms to:
+
+- **Borrow foreign memory**: temporarily access foreign memory with a capability.
+- **Own foreign memory**: take ownership of foreign memory (transfer management to UGB).
+- **Release foreign memory**: release ownership back to the foreign runtime.
+
+### 6.7 FFI Mechanism
+
+**FFI descriptor.** An FFI descriptor describes a foreign function:
+
+```
+FFIDescriptor = {
+    ffi_id: u32,                       // Unique identifier for this foreign function
+    lang_id: u8,                       // The foreign language (C, Python, Java, etc.)
+    name: string,                      // The function name
+    signature: FuncType,               // The function signature (argument types, return type)
+    calling_convention: CallingConvention, // The calling convention (Cdecl, Stdcall, etc.)
+    capabilities_required: [capability_id], // Capabilities required to call this function
+    marshaling: MarshalingInfo         // How to marshal arguments and results
+}
+```
+
+**FFI calling convention.** The calling convention specifies how arguments are passed and results are returned:
+
+- **Cdecl**: C calling convention (arguments on stack, caller cleans up).
+- **Stdcall**: Windows calling convention (arguments on stack, callee cleans up).
+- **Fastcall**: arguments in registers (x86-64 System V, Windows x64).
+- **Language-specific**: custom calling conventions for specific languages (e.g., Python's argument passing).
+
+**FFI marshaling.** Marshaling specifies how to convert between UGB values and foreign values:
+
+```
+MarshalingInfo = {
+    arg_marshalers: [Marshaler],       // How to marshal each argument
+    result_marshaler: Marshaler,       // How to marshal the result
+    error_handling: ErrorHandling      // How to handle foreign exceptions
+}
+```
+
+**Marshaling types.**
+
+- **Direct pass**: the UGB value is passed directly (e.g., integers, floats).
+- **Boxing**: the UGB value is boxed into a foreign object (e.g., UGB string → Python str).
+- **Unboxing**: the foreign value is unboxed into a UGB value (e.g., Python int → UGB Int64).
+- **Reference pass**: a reference to the UGB value is passed (e.g., pointer to UGB object).
+- **Copy**: the UGB value is copied into foreign memory (e.g., UGB array → C array).
+
+**FFI call process.** The FFI call process is:
+
+1. **Check capabilities**: verify that the FFI capability is available.
+2. **Marshal arguments**: convert UGB arguments to foreign values according to the marshaling info.
+3. **Call foreign function**: invoke the foreign function using the specified calling convention.
+4. **Marshal result**: convert the foreign result to a UGB value.
+5. **Handle errors**: if the foreign function raised an exception, convert it to a UGB exception.
+
+**FFI overhead.** The FFI overhead is minimized by:
+
+- **Pre-marshaling**: marshaling information is computed at compile time, not runtime.
+- **Direct calls**: foreign functions are called directly, not through a trampoline (when possible).
+- **Inline marshaling**: simple marshaling operations are inlined into the call site.
+- **Capability caching**: capability checks are cached and only performed once per call site.
+
+**FFI examples.**
+
+**Calling a C function:**
+
+```c
+// C code
+int add(int a, int b) {
+    return a + b;
+}
+```
+
+```ugb
+// UGB code
+FFI_DESCRIPTOR fd, "add", "C", FuncType([Int32, Int32], Int32), Cdecl
+LOAD_CONST r0, 5
+LOAD_CONST r1, 7
+FFI_CALL r2, fd, [r0, r1]  // r2 = 12
+```
+
+**Calling a Python function:**
+
+```python
+# Python code
+def greet(name):
+    return f"Hello, {name}!"
+```
+
+```ugb
+// UGB code
+FFI_DESCRIPTOR fd, "greet", "Python", FuncType([String], String), Python
+LOAD_CONST r0, "World"
+FFI_CALL r1, fd, [r0]  // r1 = "Hello, World!"
+```
+
+**Passing UGB objects to C:**
+
+```c
+// C code
+void process_array(int* arr, int len) {
+    for (int i = 0; i < len; i++) {
+        arr[i] *= 2;
+    }
+}
+```
+
+```ugb
+// UGB code
+FFI_DESCRIPTOR fd, "process_array", "C", FuncType([Ptr<Int32>, Int32], Void), Cdecl
+ALLOC r0, 10 * sizeof(Int32)  // Allocate array
+LOAD_CONST r1, 10
+FFI_CALL void, fd, [r0, r1]   // Pass array to C
+// Array is now modified by C code
+```
+
+### 6.8 Polyglot Execution
+
+**Language contexts.** UGB supports multiple language contexts, each with its own semantics:
+
+```
+LanguageContext = {
+    lang_id: u8,                       // Language identifier
+    semantics: LanguageSemantics,      // Language-specific semantics
+    runtime: LanguageRuntime,          // Language runtime (GC, exception handling, etc.)
+    interop: InteropRules              // Rules for interoperating with other languages
+}
+```
+
+**Language switching.** Code can switch between language contexts:
+
+```
+LANG_SWITCH lang_id, context_reg
+```
+
+The new language context determines how operations are interpreted (e.g., integer overflow behavior, exception handling, GC semantics).
+
+**Polyglot capabilities.** Polyglot operations require Polyglot capabilities:
+
+- **LANG_SWITCH**: switch to a different language context.
+- **LANG_CONTEXT**: query the current language context.
+- **INTEROP_CALL**: call a function in a different language context.
+
+**Interop rules.** Interop rules specify how values are converted between languages:
+
+```
+InteropRules = {
+    value_conversions: Map<(lang_id, type), (lang_id, type)>,  // How to convert values
+    exception_propagation: ExceptionPropagation,                // How exceptions propagate
+    memory_ownership: MemoryOwnership                          // Who owns shared memory
+}
+```
+
+**Polyglot example.**
+
+```ugb
+// Start in UGB context
+LOAD_CONST r0, 42
+
+// Switch to Python context
+LANG_SWITCH PYTHON, r1
+
+// Call a Python function
+FFI_CALL r2, python_func, [r0]
+
+// Switch back to UGB context
+LANG_SWITCH UGB, r3
+
+// Use the result
+ADD r4, r2, 1
+```
+
+### 6.9 Validity Invariants
+
+Valid_UGB(B) holds iff all of the following hold:
+
+**1. Bytecode well-formedness.**
+- All instructions have valid opcodes.
+- All operands have valid types and values.
+- All branch targets are valid (point to valid instructions).
+- All register indices are within bounds.
+
+**2. Capability compliance.**
+- All instructions have their required capabilities available in the capability environment.
+- All capability operations (grant, revoke) are performed by code with CapAdmin capability.
+- No revoked capabilities are used.
+
+**3. Type safety.**
+- All operations are type-safe (operand types match expected types).
+- All type conversions are valid (or guarded by dynamic type checks).
+- All function calls have matching signatures.
+
+**4. Memory model consistency.**
+- All memory accesses are within bounds (for safe pointers).
+- All memory accesses have appropriate capabilities.
+- All allocated memory is eventually freed (for manually-managed memory).
+- No dangling pointers (for GC-managed memory).
+
+**5. FFI correctness.**
+- All FFI calls have valid FFI descriptors.
+- All FFI arguments are correctly marshaled.
+- All FFI results are correctly unmarshaled.
+- All FFI exceptions are correctly propagated.
+
+**6. Polyglot correctness.**
+- All language switches are valid (target language is supported).
+- All interop calls follow the interop rules.
+- All value conversions between languages are correct.
+
+**7. Control flow correctness.**
+- All functions have a valid entry point and exit points.
+- All call sites have matching return points.
+- All exception handlers are valid.
+
+**8. Resource bounds.**
+- The bytecode size is within limits.
+- The number of capabilities is within limits.
+- The number of types is within limits.
+
+### 6.10 Representation and Cost Model
+
+**Bytecode representation.** UGB is stored as a byte array. Each instruction is variable-length (1-16 bytes typically). The encoding is compact to minimize memory usage and improve cache locality.
+
+**Capability representation.** Capabilities are represented as opaque tokens (pointers to capability structures). Capability checks are pointer comparisons (O(1)).
+
+**Type representation.** Primitive types are represented as type tags (u8). Complex types are represented as pointers to type descriptors.
+
+**FFI descriptor representation.** FFI descriptors are stored in a global table, indexed by ffi_id. Lookup is O(1).
+
+**Language context representation.** Language contexts are stored in a global table, indexed by lang_id. Switching contexts is O(1).
+
+**Traversal cost.** Decoding an instruction is O(1). Checking capabilities is O(|required_caps|) (typically 1-3). Type checking is O(1) for static types, O(k) for dynamic types (where k is the type complexity). FFI marshaling is O(|args|) (typically 1-10).
+
+**Modification cost.** UGB is immutable after verification (except for capability revocation). Capability revocation is O(1).
+
+**Memory complexity.** O(|bytecode| + |capabilities| · cap_size + |types| · type_size + |ffi_descriptors| · ffi_size).
+
+**Construction cost.** Lowering from source to UGB: O(|source constructs| · k). Verification: O(|bytecode|).
+
+---
+
+# Capability System Implementation — Complete Design Document (v1)
+
+## 0. Document Control and Design Scope
+
+**Component:** Capability System Implementation (subsystem of Universal Guest Bytecode)
+
+**Version:** 1.0
+
+**Role:** Runtime implementation of the capability-based security model defined in UGB §6.4. Provides the concrete data structures, algorithms, and invariants for capability tokens, the global capability table, revocation, attenuation, and per-frame capability environments.
+
+**Design Status:** Complete specification.
+
+**Scope:** This document defines the capability token representation, global capability table layout, all capability operations (create, check, attenuate, pass, revoke, duplicate), the revocation mechanism, per-frame capability environments, integration with UGB execution, security properties, and validity invariants. It does not define:
+- The UGB bytecode format (already specified; consumes this subsystem)
+- The T1 JIT compiler (already specified; emits capability checks)
+- Language-specific front-ends (produce UGB with capability annotations)
+- The runtime system's thread-safety model (this subsystem specifies per-thread data structures; concurrency is orthogonal)
+
+**Normative References:**
+- Dennis, J. and Van Horn, E. "Programming Semantics for Multiprogrammed Computations" (capability foundations)
+- Watson, R. et al. "Capability Hardware Enhanced RISC Instructions" (CHERI — hardware capability design)
+- Levy, H. "Capability-Based Computer Systems" (comprehensive capability theory)
+- Standard OS literature on file-descriptor-style generation counters (Bugaenko, "Generation Counters")
+
+**Known Limitations:**
+- Cryptographic capability tokens (for cross-process capability transfer) are not covered — this design uses in-process tokens only.
+- Capability transfer across address spaces (e.g., via shared memory) is deferred.
+- Hardware-enforced capability checks (CHERI-style) are out of scope; this is a software implementation.
+
+---
+
+## 1. Goals, Non-Goals, and Constraints
+
+### Goals
+
+1. Provide O(1) capability checks on the hot path (every capability-gated instruction).
+2. Support unforgeable, tamper-proof capability tokens that user code cannot create or modify.
+3. Support attenuation: deriving a weaker capability from a stronger one, with the invariant that the derived capability's permissions are a subset of the parent's.
+4. Support revocation: invalidating a capability and all its descendants, with the invariant that no revoked capability can pass a check.
+5. Support transitive capability passing during function calls, with caller-controlled attenuation.
+6. Keep memory overhead per capability under 64 bytes in the global table plus 8 bytes per live token.
+7. Keep revocation cost proportional to the number of descendants, not the total table size.
+
+### Non-Goals
+
+1. Hardware-enforced capabilities (CHERI-style tagged memory). This is a pure software implementation.
+2. Cross-process capability transfer. Capabilities are in-process tokens.
+3. Cryptographic capability tokens for untrusted environments.
+4. Fine-grained temporal revocation (e.g., "revoke after 5 seconds"). Revocation is immediate and permanent.
+
+### Constraints
+
+- Capability check cost: ≤ 3 memory accesses (one GCT entry load, two comparisons) on the fast path.
+- Attenuation cost: O(1) amortized (one GCT entry allocation).
+- Revocation cost: O(|descendants|) — proportional to the number of capabilities invalidated.
+- Memory overhead per capability: ≤ 64 bytes in GCT + 8 bytes per token.
+- Maximum live capabilities: 2³² (limited by 32-bit index).
+- Maximum attenuation chain depth: 256 (enforced to bound revocation walk cost).
+
+---
+
+## 6. Capability System Implementation
+
+### 6.1 Purpose and Domain
+
+The Capability System Implementation provides the runtime machinery for the UGB capability model. It translates the abstract capability semantics (unforgeable, tamper-proof, transitive, revocable tokens) into concrete data structures and algorithms.
+
+The subsystem maintains:
+- A **Global Capability Table (GCT)**: the single source of truth for all capability state.
+- **Capability tokens**: 64-bit values that reference GCT entries and carry permission flags.
+- **Per-frame capability environments**: the set of capabilities available to each function activation.
+- **Revocation infrastructure**: mechanisms to invalidate capabilities and their descendants.
+
+### 6.2 Mathematical Specification
+
+| Requirement | Specification |
+|---|---|
+| **Domain** | CapReq: the set of capability requests (check, attenuate, revoke, pass). State: the current GCT state and per-frame environments. |
+| **Codomain** | CapResult: the set of capability operation results (OK, REVOKED, INSUFFICIENT_PERMISSION, INVALID_ATTENUATION, etc.). State': the updated state. |
+| **Definitions** | GCT: global capability table. Token: 64-bit capability token. Env: per-frame capability environment. Perm: permission bitmask. |
+| **Preconditions** | The GCT is well-formed (all entries have valid structure). All tokens in live environments reference valid GCT entries. |
+| **Postconditions** | All security invariants (§6.9) hold in State'. |
+| **Invariants** | Unforgeability, tamper-proofness, attenuation monotonicity, revocation completeness, check correctness. |
+| **Relations** | Token-to-entry mapping (→_entry), parent-child relation (→_child), permission subset (⊆_perm). |
+| **Failure behavior** | Invalid operations return error codes; they never corrupt state. Malformed tokens are rejected. |
+| **Complexity** | Check: O(1). Attenuate: O(1) amortized. Revoke: O(|descendants|). Pass: O(|caps passed|). |
+| **Correctness** | For all reachable states, the security invariants (§6.9) hold. |
+
+### 6.3 Capability Token Representation
+
+**Token format.** A capability token is a 64-bit value with the following layout:
+
+```
+Bits  0-15:  permission_flags (u16) — which operations this token permits
+Bits 16-47:  gct_index       (u32) — index into the Global Capability Table
+Bits 48-63:  generation      (u16) — must match the GCT entry's generation
+```
+
+**Permission flags.** The 16-bit permission field is a bitmask. Each bit represents a primitive permission:
+
+```
+PERM_MEM_READ       = 0x0001
+PERM_MEM_WRITE      = 0x0002
+PERM_MEM_ALLOC      = 0x0004
+PERM_MEM_FREE       = 0x0008
+PERM_FFI            = 0x0010
+PERM_FFI_SPECIFIC   = 0x0020  // requires additional FFI descriptor check
+PERM_TYPE_INSPECT   = 0x0040
+PERM_TYPE_MODIFY    = 0x0080
+PERM_IO_READ        = 0x0100
+PERM_IO_WRITE       = 0x0200
+PERM_IO_NETWORK     = 0x0400
+PERM_IO_FILE        = 0x0800
+PERM_DYNAMIC        = 0x1000
+PERM_EVAL           = 0x2000
+PERM_REFLECT        = 0x4000
+PERM_POLYGLOT       = 0x8000
+```
+
+A token's `permission_flags` field is the intersection of:
+- The parent token's permissions (at attenuation time).
+- The GCT entry's `permission_mask` (the maximum permissions for this resource).
+
+**Token construction.** Tokens are constructed only by the runtime (never by user code). The constructor is:
+
+```
+make_token(gct_index: u32, generation: u16, permission_flags: u16) -> Token:
+    return (permission_flags as u64)
+         | ((gct_index as u64) << 16)
+         | ((generation as u64) << 48)
+```
+
+**Token decomposition.** The runtime extracts fields via bit masks and shifts:
+
+```
+token_flags(token)     = token & 0xFFFF
+token_index(token)     = (token >> 16) & 0xFFFFFFFF
+token_generation(token) = (token >> 48) & 0xFFFF
+```
+
+**Token validity.** A token is *syntactically valid* if its `gct_index` is within the GCT bounds. It is *semantically valid* if it also passes the check operation (§6.5).
+
+### 6.4 Global Capability Table
+
+**GCT layout.** The GCT is a contiguous array of fixed-size entries. Each entry is 64 bytes (one cache line on most architectures) to minimize cache-line sharing between entries.
+
+```
+struct GCTEntry {                              // 64 bytes total
+    resource_ptr:    u64,    //  8 bytes — pointer to resource descriptor
+    generation:      u16,    //  2 bytes — current generation (incremented on revoke)
+    status:          u8,     //  1 byte  — ACTIVE | REVOKED | ATTENUATED
+    _pad1:           u8,     //  1 byte
+    parent_index:    u32,    //  4 bytes — index of parent (0xFFFFFFFF if root)
+    permission_mask: u16,    //  2 bytes — maximum permissions for this resource
+    ref_count:       u32,    //  4 bytes — number of live tokens referencing this entry
+    children_head:   u32,    //  4 bytes — index of first child (linked list)
+    next_sibling:    u32,    //  4 bytes — index of next sibling (linked list)
+    _reserved:       u32,    //  4 bytes
+    _pad2:           u32,    //  4 bytes — pad to 64 bytes
+}
+```
+
+**Entry status values.**
+
+```
+STATUS_ACTIVE      = 0  // capability is valid
+STATUS_REVOKED     = 1  // capability has been revoked
+STATUS_ATTENUATED  = 2  // capability has children (informational, still active)
+```
+
+**Resource descriptor.** The `resource_ptr` points to a type-specific descriptor that describes what the capability grants access to. The descriptor type is determined by the capability's primitive permissions:
+
+- For memory capabilities: a `MemoryResource` (base address, size, region class).
+- For FFI capabilities: an `FFIResource` (FFI descriptor ID, allowed functions).
+- For I/O capabilities: an `IOResource` (file descriptor, socket, path pattern).
+- For type capabilities: a `TypeResource` (type ID, allowed operations).
+- For administrative capabilities: an `AdminResource` (admin scope).
+
+**GCT allocation.** The GCT is allocated as a single contiguous block. Free entries are maintained in a free-list (singly linked through the `children_head` field, repurposed for free-list linkage when `status == FREE`). Allocation is O(1) via free-list pop.
+
+**GCT growth.** When the free-list is exhausted, the GCT is reallocated at double size. All existing tokens remain valid because they reference entries by index, and indices do not change during reallocation.
+
+**GCT invariants.**
+
+1. Every entry with `status == ACTIVE` or `status == ATTENUATED` has a valid `resource_ptr`.
+2. Every entry with `status == REVOKED` has `generation` strictly greater than any live token referencing it.
+3. The parent-child relation forms a forest (no cycles).
+4. The attenuation chain depth is at most 256.
+5. `ref_count` accurately reflects the number of live tokens referencing the entry.
+
+### 6.5 Capability Operations
+
+#### 6.5.1 Check
+
+The check operation is the hot-path operation. It is invoked before every capability-gated instruction.
+
+```
+check(token: Token, required_perm: u16) -> CapResult:
+    idx = token_index(token)
+    if idx >= GCT.size:
+        return INVALID_TOKEN
+    
+    entry = GCT[idx]
+    
+    // Fast path: generation mismatch means revoked
+    if entry.generation != token_generation(token):
+        return REVOKED
+    
+    // Status check
+    if entry.status == STATUS_REVOKED:
+        return REVOKED
+    
+    // Permission check: token must have the required permission
+    if (token_flags(token) & required_perm) != required_perm:
+        return INSUFFICIENT_PERMISSION
+    
+    // Permission check: entry must allow the required permission
+    if (entry.permission_mask & required_perm) != required_perm:
+        return INSUFFICIENT_PERMISSION
+    
+    return OK
+```
+
+**Cost:** 1 GCT entry load + 3 comparisons. On modern hardware with the GCT entry in L1 cache, this is ~3-5 cycles.
+
+**Fast-path optimization.** The generation check can be combined with the status check into a single comparison if the status is encoded in the top bits of the generation field (e.g., generation occupies bits 0-14, status occupies bit 15). This reduces the check to 2 comparisons.
+
+#### 6.5.2 Attenuate
+
+Attenuation derives a new capability with a subset of the parent's permissions.
+
+```
+attenuate(parent_token: Token, new_permissions: u16) -> Result<Token, CapError>:
+    // Verify parent is valid
+    parent_idx = token_index(parent_token)
+    if parent_idx >= GCT.size:
+        return Err(INVALID_TOKEN)
+    
+    parent_entry = GCT[parent_idx]
+    if parent_entry.generation != token_generation(parent_token):
+        return Err(REVOKED)
+    if parent_entry.status == STATUS_REVOKED:
+        return Err(REVOKED)
+    
+    // New permissions must be a subset of parent's permissions
+    if (new_permissions & ~token_flags(parent_token)) != 0:
+        return Err(INVALID_ATTENUATION)
+    
+    // New permissions must be a subset of entry's permission mask
+    if (new_permissions & ~parent_entry.permission_mask) != 0:
+        return Err(INVALID_ATTENUATION)
+    
+    // Check attenuation depth
+    depth = compute_attenuation_depth(parent_idx)
+    if depth >= MAX_ATTENUATION_DEPTH:  // 256
+        return Err(ATTENUATION_TOO_DEEP)
+    
+    // Allocate new GCT entry
+    new_idx = gct_allocate()
+    if new_idx == GCT_INVALID:
+        return Err(GCT_FULL)
+    
+    new_entry = GCTEntry {
+        resource_ptr:    parent_entry.resource_ptr,
+        generation:      parent_entry.generation,  // inherit generation
+        status:          STATUS_ACTIVE,
+        parent_index:    parent_idx,
+        permission_mask: new_permissions,
+        ref_count:       1,
+        children_head:   GCT_INVALID,
+        next_sibling:    parent_entry.children_head,
+    }
+    GCT[new_idx] = new_entry
+    
+    // Link as child of parent
+    parent_entry.children_head = new_idx
+    if parent_entry.status == STATUS_ACTIVE:
+        parent_entry.status = STATUS_ATTENUATED
+    
+    // Increment parent ref count (for revocation tracking)
+    parent_entry.ref_count += 1
+    
+    return Ok(make_token(new_idx, parent_entry.generation, new_permissions))
+```
+
+**Cost:** O(depth) for depth computation (bounded by 256), O(1) for allocation and linking. Amortized O(1) in practice.
+
+#### 6.5.3 Revoke
+
+Revocation invalidates a capability and all its descendants.
+
+```
+revoke(token: Token) -> CapResult:
+    idx = token_index(token)
+    if idx >= GCT.size:
+        return INVALID_TOKEN
+    
+    entry = GCT[idx]
+    if entry.generation != token_generation(token):
+        return REVOKED  // already revoked
+    
+    // Eager revocation: walk the descendant tree and invalidate all
+    worklist = [idx]
+    count = 0
+    
+    while worklist is not empty:
+        curr_idx = worklist.pop()
+        curr_entry = GCT[curr_idx]
+        
+        // Invalidate this entry
+        curr_entry.generation = (curr_entry.generation + 1) & 0xFFFF
+        curr_entry.status = STATUS_REVOKED
+        count += 1
+        
+        // Add children to worklist
+        child_idx = curr_entry.children_head
+        while child_idx != GCT_INVALID:
+            worklist.push(child_idx)
+            child_idx = GCT[child_idx].next_sibling
+    
+    return OK_WITH_COUNT(count)
+```
+
+**Cost:** O(|descendants|) — proportional to the number of capabilities invalidated. The worklist is bounded by the total number of live capabilities.
+
+**Correctness.** After revocation, every token that referenced the revoked entry (or any descendant) has a generation mismatch and will fail the check operation.
+
+#### 6.5.4 Pass (during CALL)
+
+When a CALL instruction is executed, the caller passes capabilities to the callee. The caller may attenuate capabilities before passing.
+
+```
+pass_capabilities(caller_env: Env, callee_env: Env, cap_list: [Token]):
+    for token in cap_list:
+        // Verify token is valid in caller's environment
+        if not env_contains(caller_env, token):
+            raise CapabilityViolation(PASS_INVALID_CAP)
+        
+        // Add to callee's environment
+        env_add(callee_env, token)
+        
+        // Increment ref count
+        idx = token_index(token)
+        GCT[idx].ref_count += 1
+```
+
+**Cost:** O(|cap_list|) — linear in the number of capabilities passed.
+
+#### 6.5.5 Duplicate
+
+Duplication creates a new token referencing the same GCT entry. Used when a capability is stored in multiple registers or memory locations.
+
+```
+duplicate(token: Token) -> Result<Token, CapError>:
+    idx = token_index(token)
+    if idx >= GCT.size:
+        return Err(INVALID_TOKEN)
+    
+    entry = GCT[idx]
+    if entry.generation != token_generation(token):
+        return Err(REVOKED)
+    
+    entry.ref_count += 1
+    return Ok(token)  // token value is unchanged; ref_count tracks duplicates
+```
+
+**Cost:** O(1).
+
+#### 6.5.6 Drop
+
+When a capability is no longer needed (register overwritten, frame popped), the ref count is decremented. When ref count reaches zero, the GCT entry is freed.
+
+```
+drop(token: Token):
+    idx = token_index(token)
+    if idx >= GCT.size:
+        return  // invalid token, ignore
+    
+    entry = GCT[idx]
+    entry.ref_count -= 1
+    
+    if entry.ref_count == 0 and entry.status == STATUS_REVOKED:
+        // Entry is revoked and no longer referenced; free it
+        gct_free(idx)
+```
+
+**Cost:** O(1).
+
+### 6.6 Revocation Mechanism
+
+**Design choice: eager revocation with generation counters.**
+
+The revocation mechanism uses a combination of:
+1. **Generation counters**: each GCT entry has a generation that is incremented on revocation. Tokens carry the generation at creation time. A mismatch indicates revocation.
+2. **Eager descendant invalidation**: when a capability is revoked, all descendants are immediately invalidated by incrementing their generations.
+3. **Worklist-based traversal**: avoids stack overflow for deep attenuation chains.
+
+**Why not lazy revocation?** Lazy revocation (checking the parent chain on every use) would make the check operation O(chain_depth), violating the O(1) check constraint. Eager revocation makes check O(1) at the cost of making revoke O(|descendants|), which is acceptable because revocation is rare.
+
+**Why not cryptographic tokens?** Cryptographic tokens (e.g., HMAC-signed) would allow cross-process capability transfer but would make the check operation expensive (cryptographic verification). For in-process use, generation counters are sufficient and fast.
+
+**Revocation completeness.** The revocation algorithm guarantees that after `revoke(token)`:
+- The token itself fails all subsequent checks.
+- All tokens derived from it (directly or transitively) fail all subsequent checks.
+- No new tokens can be derived from the revoked capability.
+
+**Proof sketch.** Let T be the set of tokens derived from the revoked token (the descendant tree). The revocation algorithm increments the generation of every entry in T. Any token in T has a generation that was set at or before the revocation time, so it will mismatch the entry's new generation. Any new token derived after revocation would require a valid parent token, which no longer exists. ∎
+
+### 6.7 Per-Frame Capability Environments
+
+**Environment structure.** Each function activation frame has a capability environment:
+
+```
+struct CapabilityEnvironment {
+    cap_slots:    [Token; MAX_CAP_SLOTS],   // 64 slots by default
+    slot_count:   u16,                       // number of active slots
+    parent_env:   *CapabilityEnvironment,    // caller's environment (for nested calls)
+    frame_id:     u32,                       // unique frame identifier
+}
+```
+
+**Environment operations.**
+
+```
+env_add(env: Env, token: Token):
+    if env.slot_count >= MAX_CAP_SLOTS:
+        raise CapabilityError(ENV_FULL)
+    env.cap_slots[env.slot_count] = token
+    env.slot_count += 1
+
+env_contains(env: Env, token: Token) -> bool:
+    for i in 0..env.slot_count:
+        if env.cap_slots[i] == token:
+            return true
+    return false
+
+env_remove(env: Env, token: Token):
+    for i in 0..env.slot_count:
+        if env.cap_slots[i] == token:
+            env.cap_slots[i] = env.cap_slots[env.slot_count - 1]
+            env.slot_count -= 1
+            return
+```
+
+**Environment lifecycle.** The environment is created on function entry and destroyed on function exit. On exit, all capabilities in the environment are dropped (ref count decremented).
+
+### 6.8 Integration with UGB Execution
+
+**Check insertion.** The T1 JIT compiler inserts capability checks before every capability-gated instruction. For example:
+
+```
+// UGB bytecode: LOAD r0, [r1]  (requires PERM_MEM_READ)
+// T1 compiled code:
+    check_cap PERM_MEM_READ, r_cap    // capability check
+    load r0, [r1]                     // actual load
+```
+
+**Check failure handling.** If a check fails, the runtime raises a `CapabilityViolation` exception. The exception handler can:
+- Terminate the program (sandbox violation).
+- Deoptimize to a higher tier that handles the violation gracefully.
+- Log the violation and continue (for debugging).
+
+**Capability passing in CALL.** The CALL instruction includes a list of capabilities to pass:
+
+```
+CALL r_func, args, cap_list
+```
+
+The runtime invokes `pass_capabilities` to transfer the capabilities to the callee's environment.
+
+**Capability revocation during execution.** The runtime can revoke capabilities at any time (e.g., when a sandbox is torn down). Revocation is asynchronous: the next check operation on a revoked capability will fail.
+
+### 6.9 Security Properties
+
+The capability system satisfies the following security properties:
+
+**P1. Unforgeability.** User code cannot create a valid capability token.
+
+*Justification.* Tokens are constructed only by the runtime (via `make_token`, `attenuate`, `duplicate`). The GCT is not directly accessible to user code. The token format includes a generation field that must match the GCT entry; without access to the GCT, user code cannot forge a valid generation.
+
+**P2. Tamper-proofness.** User code cannot modify a capability token to gain additional permissions.
+
+*Justification.* Tokens are 64-bit values stored in registers or memory. Even if user code modifies a token's bits, the modified token will fail the check operation because:
+- Modifying the permission flags: the entry's `permission_mask` check will fail.
+- Modifying the generation: the generation check will fail.
+- Modifying the index: the index will either be out of bounds or point to an entry with a different generation.
+
+**P3. Attenuation monotonicity.** If capability B is derived from capability A, then B's permissions are a subset of A's permissions.
+
+*Justification.* The `attenuate` operation enforces `(new_permissions & ~token_flags(parent_token)) == 0`, which ensures the new permissions are a subset of the parent's. The GCT entry's `permission_mask` is also set to `new_permissions`, preventing further expansion.
+
+**P4. Revocation completeness.** If capability A is revoked, all capabilities derived from A (directly or transitively) are also revoked.
+
+*Justification.* The `revoke` operation walks the descendant tree and increments the generation of every entry. All tokens referencing those entries will fail the generation check. (See proof sketch in §6.6.)
+
+**P5. Check correctness.** The `check` operation returns OK if and only if the token is valid and has the required permission.
+
+*Justification.* The check operation verifies:
+- The index is in bounds.
+- The generation matches (not revoked).
+- The status is not REVOKED.
+- The token's permission flags include the required permission.
+- The entry's permission mask includes the required permission.
+
+If all checks pass, the token is valid and has the required permission. If any check fails, the token is invalid or lacks the permission.
+
+### 6.10 Validity Invariants
+
+Valid_CapSystem(State) holds iff all of the following hold:
+
+**1. GCT well-formedness.**
+- Every entry with `status == ACTIVE` or `status == ATTENUATED` has a valid `resource_ptr`.
+- Every entry with `status == REVOKED` has a generation that is strictly greater than any live token referencing it.
+- The parent-child relation forms a forest (no cycles).
+- The attenuation chain depth is at most 256.
+
+**2. Token validity.**
+- Every live token references a valid GCT entry (index in bounds).
+- Every live token's generation matches the entry's generation (unless the entry is revoked, in which case the token is invalid).
+- Every live token's permission flags are a subset of the entry's permission mask.
+
+**3. Environment consistency.**
+- Every capability in a live environment is a valid token.
+- The ref count of every GCT entry accurately reflects the number of live tokens referencing it.
+
+**4. Revocation correctness.**
+- After a revoke operation, all tokens referencing the revoked entry (or any descendant) fail the check operation.
+- No new tokens can be derived from a revoked capability.
+
+**5. Attenuation correctness.**
+- Every attenuated capability's permissions are a subset of its parent's permissions.
+- The attenuation chain depth does not exceed 256.
+
+**6. Resource bounds.**
+- The GCT size does not exceed 2³² entries.
+- The number of live capabilities does not exceed 2³².
+- The number of capabilities per environment does not exceed MAX_CAP_SLOTS (64).
+
+### 6.11 Representation and Cost Model
+
+**GCT representation.** The GCT is a contiguous array of 64-byte entries. The array is allocated via `mmap` (or equivalent) and can be grown by reallocating at double size.
+
+**Token representation.** Tokens are 64-bit values stored in registers or memory. They are passed by value (no indirection).
+
+**Environment representation.** Environments are allocated on the stack (one per function frame). The `cap_slots` array is fixed-size (64 slots).
+
+**Traversal cost.** Check: O(1) — 1 GCT load + 3 comparisons. Attenuate: O(depth) for depth check, O(1) for allocation. Revoke: O(|descendants|). Pass: O(|cap_list|). Duplicate: O(1). Drop: O(1).
+
+**Modification cost.** GCT growth: O(|GCT|) for reallocation (rare). Entry allocation: O(1) via free-list. Entry freeing: O(1).
+
+**Memory complexity.** O(|GCT entries| · 64 bytes + |live tokens| · 8 bytes + |environments| · (64 · 8 + 16) bytes). For a typical program with 10,000 capabilities and 1,000 active frames: ~640 KB for GCT + ~80 KB for tokens + ~520 KB for environments ≈ 1.2 MB.
+
+**Construction cost.** GCT initialization: O(|GCT size|). Capability creation: O(1). Environment creation: O(1).
+
+---
+
+# Garbage Collection Subsystem — Complete Design Document (v1)
+
+## 0. Document Control and Design Scope
+
+**Component:** Garbage Collection Subsystem (Incremental, Concurrent, Generational)
+
+**Version:** 1.0
+
+**Role:** Runtime memory management. Provides automatic reclamation of unreachable objects with low-latency pauses, concurrent operation alongside mutator threads, and generational collection tuned for the weak generational hypothesis.
+
+**Design Status:** Complete specification.
+
+**Scope:** This document defines the heap layout, object model, allocation strategy, generational structure, concurrent SATB marking, write barrier, young-generation copying collection, concurrent old-generation evacuation via load barriers and colored pointers, safepoints, stack scanning, reference processing, collection policy, and validity invariants. It does not define:
+- The language front-ends (produce allocations and stores that interact with this subsystem)
+- The T0/T1 tiers (must respect safepoints and barriers)
+- FFI interactions with foreign allocators (deferred)
+- The OS memory management interface (consumed, not specified)
+
+**Normative References:**
+- Dijkstra, E. et al. "A Discipline of Multiprogramming" (tri-color abstraction for concurrent marking)
+- Jones, R. and Lins, R. "Garbage Collection: Algorithms for Automatic Dynamic Memory Management"
+- Bacon, D. et al. "Concurrent Cycle Collection in Reference Counted Systems"
+- Årlandson, P. et al. "The Garbage Collection Handbook"
+- OpenJDK ZGC design (load barriers, colored pointers, concurrent relocation)
+- OpenJDK G1 design (region-based heap, SATB marking, remembered sets)
+- Barbois, R. and Le Fessant, F. "A Concurrent, Generational Garbage Collector"
+
+**Known Limitations:**
+- Huge-object (>region-size) handling is specified at the interface level; internal strategy deferred.
+- NUMA-aware placement is not specified.
+- Compacting old-generation via concurrent relocation is specified; alternative strategies (mark-compact STW) are out of scope.
+- Finalization semantics interact with language semantics; the GC provides the hooks, the language defines the rules.
+
+---
+
+## 1. Goals, Non-Goals, and Constraints
+
+### Goals
+
+1. Provide automatic memory reclamation with pause times bounded by a configurable target (default ≤ 1 ms for application threads).
+2. Run marking and evacuation concurrently with mutator threads for the old generation.
+3. Exploit the weak generational hypothesis: most objects die young, few old objects point to young objects.
+4. Preserve all language-level reachability semantics, including weak, soft, and phantom references.
+5. Maintain the generational invariant (no untracked old-to-young pointers) at all times.
+6. Scale to many mutator threads and many GC threads with bounded synchronization overhead.
+7. Provide a mathematically verifiable correctness argument based on the tri-color abstraction and barrier invariants.
+
+### Non-Goals
+
+1. Zero-pause garbage collection (pause times are bounded, not zero).
+2. Real-time hard deadlines (this is a soft real-time design; hard real-time GC is out of scope).
+3. Reference counting as the primary reclamation mechanism (pure tracing GC; optional RC bridge is deferred).
+4. Cross-process shared heaps.
+
+### Constraints
+
+- Mutator pause time per safepoint: ≤ P_max (configurable, default 1 ms).
+- GC overhead (time spent in GC / total time): ≤ 5% at steady state for typical workloads.
+- Heap expansion factor: ≤ 2× live data at steady state.
+- Write barrier overhead per store: ≤ 1 cycle on the fast path (for non-cross-generational stores).
+- Load barrier overhead per load: ≤ 2 cycles on the fast path (for correctly-colored pointers).
+- Memory overhead for metadata (card table, mark bitmap, forwarding table): ≤ 5% of heap.
+
+---
+
+## 6. Garbage Collection Subsystem
+
+### 6.1 Purpose and Domain
+
+The GC subsystem manages a heap of dynamically allocated objects. It reclaims objects that are no longer reachable from the mutator's roots (stack frames, global variables, registers). It does so in a way that is:
+
+- **Incremental**: collection work is performed in small quanta interleaved with mutator execution.
+- **Concurrent**: most collection phases run in parallel with mutator threads.
+- **Generational**: the heap is partitioned into generations; young objects are collected more frequently and more cheaply than old objects.
+
+### 6.2 Mathematical Specification
+
+| Requirement | Specification |
+|---|---|
+| **Domain** | H: heap state (objects, edges, roots). M: mutator transitions (alloc, store, load). |
+| **Codomain** | H': updated heap state after GC intervention. |
+| **Definitions** | R: root set. Reach(S): transitive closure of references from S. Live(H, R) = Reach(R) ∩ H. Dead(H, R) = H \ Live(H). |
+| **Preconditions** | H is well-formed (all pointers valid, barrier invariants hold). |
+| **Postconditions** | H' satisfies: (a) Live(H', R') ⊇ Live(H, R) (no live object collected); (b) Dead(H, R) ∩ H' = ∅ (dead objects reclaimed); (c) barrier invariants hold in H'. |
+| **Invariants** | Tri-color marking invariant, generational invariant, load-barrier forwarding invariant, safepoint consistency. |
+| **Relations** | Reference edge (→_ref), forwarding (→_fwd), root (→_root), card membership (∈_card). |
+| **Failure behavior** | Out-of-memory: raise OOM exception after failed expansion. Barrier violation: internal error (bug). |
+| **Complexity** | Mark: O(|Live|) work, spread across mutator quanta. Evacuate: O(|Live_old|). Young collect: O(|Live_young|). |
+| **Correctness** | For any execution, the observable behavior matches a semantics where unreachable objects are reclaimed at arbitrary safe points. |
+
+### 6.3 Heap Layout and Object Model
+
+**Region-based heap.** The heap is a contiguous virtual address range divided into fixed-size **regions**. Each region is 4 MB (configurable). Regions are classified by generation and role:
+
+- **Young regions**: allocated via bump pointer; collected by copying.
+- **Old regions**: contain promoted or long-lived objects; collected by concurrent marking and evacuation.
+- **Humongous regions**: contiguous runs of regions for objects larger than half a region.
+- **Free regions**: available for allocation.
+- **Metadata regions**: card table, mark bitmap, forwarding table, etc.
+
+**Object header.** Every object has a header:
+
+```
+struct ObjectHeader {
+    mark_word:    u64,   // hash code / lock state / age / forwarding pointer
+    klass_ptr:    u64,   // pointer to type metadata (also carries color bits on 64-bit)
+    size:         u32,   // object size in bytes (including header)
+    flags:        u8,    // generation, humongous, pinned, etc.
+    _pad:         u8,
+}
+```
+
+**Colored pointers.** On 64-bit targets with sufficient unused virtual address bits (e.g., x86-64 with 48-bit addresses), the top bits of every object pointer encode GC metadata. We use 4 bits:
+
+```
+Bits 45-47 of a pointer:
+    Marked0     (bit 45)
+    Marked1     (bit 46)
+    Remapped    (bit 47)
+    Finalizable (bit 44)  // reserved for future use
+```
+
+These bits are the **load barrier's** mechanism for concurrent relocation (see §6.10). The actual object address is bits 0-43.
+
+**Card table.** The heap is divided into **cards** of 512 bytes each. A card table is a byte array with one byte per card, encoding which generation the card belongs to:
+
+```
+CARD_YOUNG  = 0
+CARD_OLD    = 1
+CARD_HUMONGOUS = 2
+CARD_FREE   = 3
+```
+
+The card table is used by the write barrier to detect cross-generational stores and by the remembered set to track old-to-young pointers.
+
+**Remembered set (remset).** A per-region data structure listing cards in that region that contain pointers into the young generation. Maintained by the write barrier.
+
+### 6.4 Allocation
+
+**Thread-local allocation buffers (TLABs).** Each mutator thread has a TLAB: a contiguous chunk of a young region. Allocation is bump-pointer:
+
+```
+allocate(size):
+    if tlab.remaining >= size:
+        obj = tlab.top
+        tlab.top += size
+        return obj
+    else:
+        return slow_path_allocate(size)
+```
+
+**Slow path.** When a TLAB is exhausted, the thread requests a new TLAB from the GC. If no young regions are available, a young-generation collection is triggered (see §6.12).
+
+**Promotion.** Objects surviving a young collection are promoted to old regions. Promotion is a copy into an old region; the object's header is updated to reflect its new generation.
+
+**Large objects.** Objects larger than half a region (2 MB) are allocated directly in a contiguous run of free regions (humongous allocation).
+
+### 6.5 Generational Structure
+
+**Weak generational hypothesis.** Most objects die young; objects that have survived several collections are likely to live longer. The GC exploits this by:
+
+- Collecting the young generation frequently with short pauses.
+- Collecting the old generation infrequently with concurrent phases.
+- Avoiding scanning the old generation during young collections (using the remset).
+
+**Age tracking.** Each object's header carries a 4-bit age (0-15). The age is incremented each time the object survives a young collection. When the age reaches the promotion threshold (default 15, configurable), the object is promoted to the old generation.
+
+**Generational invariant.** At all times:
+
+> If an object O in an old region contains a reference to an object Y in a young region, then the card containing that reference is recorded in the old region's remset.
+
+The write barrier (§6.7) maintains this invariant.
+
+### 6.6 Concurrent Marking: SATB and the Tri-Color Abstraction
+
+**Tri-color abstraction.** During marking, every object is in one of three conceptual states:
+
+- **White**: not yet known to be reachable. Candidate for reclamation.
+- **Gray**: known to be reachable, but not all of its outgoing references have been scanned.
+- **Black**: known to be reachable, and all of its outgoing references have been scanned.
+
+**SATB (snapshot-at-the-beginning) invariant.** At the start of a marking cycle, the GC takes a conceptual snapshot of the heap. The marking must identify at least all objects that were reachable at that snapshot. Objects that become unreachable after the snapshot may or may not be collected in this cycle (they will be collected in the next).
+
+Formally: if an object O was reachable from roots at snapshot time t₀, then O must be marked black or gray at the end of the marking phase.
+
+**SATB write barrier.** To maintain the SATB invariant, the write barrier intercepts reference stores. When a black object's reference field is modified to point to a white object, the object must be re-grayed (added to the marking worklist). The barrier:
+
+```
+write_barrier(src_obj, field_offset, new_ref):
+    if src_obj is black and new_ref is white:
+        enqueue(src_obj)  // re-gray
+    // additionally, handle generational invariant (see §6.7)
+```
+
+In practice, the barrier is simplified: any store into an old object that might point to an unmarked object causes the source to be enqueued. The precision of "might be unmarked" is a performance/correctness tradeoff; we use a conservative check based on the mark bitmap.
+
+**Marking phases.**
+
+1. **Initial mark (STW, short)**: scan roots, mark directly-reachable objects gray.
+2. **Concurrent mark**: GC threads pop gray objects, scan their fields, mark referenced white objects gray, mark the scanned object black. Mutator threads execute the write barrier.
+3. **Concurrent preclean**: process the remset to handle cross-generational references that arrived during concurrent mark.
+4. **Remark (STW, short)**: drain any remaining gray objects, process weak references, finalize the mark bitmap.
+
+**Mark bitmap.** Each old region has a mark bitmap with one bit per minimum object size (e.g., 16 bytes). A set bit means the object is marked (gray or black). The bitmap is double-buffered: one bitmap is the "prev" bitmap (from the last completed cycle), the other is the "next" bitmap (being built). This allows the mutator to query "was this object reachable last cycle?" for certain optimizations.
+
+### 6.7 Write Barrier
+
+**Combined barrier.** The write barrier performs two duties:
+
+1. **SATB marking**: ensure the tri-color invariant.
+2. **Generational invariant**: record old-to-young stores in the remset.
+
+**Barrier implementation.**
+
+```
+store(obj, offset, value):
+    obj[offset] = value
+    
+    // Generational part: if obj is old and value is young, dirty the card
+    if obj is in old region and value is in young region:
+        card = card_of(obj + offset)
+        if card_table[card] != CARD_DIRTY:
+            card_table[card] = CARD_DIRTY
+            // remset will be rebuilt from dirty cards at young collection
+    
+    // SATB part: if obj is black and value is not marked, re-gray obj
+    if mark_bitmap[obj] == BLACK and (value == null or mark_bitmap[value] == WHITE):
+        satb_queue.push(obj)
+```
+
+**Fast path.** The fast path (no barrier work needed) is a single comparison: if the store is young-to-young or old-to-old with no marking concern, the barrier is a no-op. On modern hardware this is 1 cycle.
+
+**SATB queue.** Each mutator thread has a thread-local SATB queue. When the queue fills, it is flushed to the global SATB queue (lock-free). GC threads consume from the global queue.
+
+### 6.8 Young-Generation Collection
+
+**Young collection (minor GC).** A young collection reclaims unreachable young objects and promotes survivors.
+
+**Phases.**
+
+1. **Pause start (STW)**: enter safepoint, flush TLABs, scan roots (stacks, registers, globals).
+2. **Process remset**: for each old region, scan its dirty cards to find old-to-young references. These are added to the root set for the young collection.
+3. **Evacuate young regions**: for each live young object, copy it to a survivor region (if age < threshold) or an old region (if age ≥ threshold). Update all references to the object via a forwarding table.
+4. **Update references**: scan the evacuated regions' original locations (or use a slot table) to fix up references.
+5. **Release old young regions**: mark them as free.
+6. **Resume mutator**.
+
+**Pause time.** The pause is bounded by the amount of live data in the young generation. With a bounded young generation size (e.g., 32 MB default), the pause is bounded to a few hundred microseconds on modern hardware.
+
+**Copying algorithm.** Uses a worklist of regions to scan. Each region has a "scan cursor" and a "copy cursor". Live objects are copied to the copy cursor's target region; the scan cursor advances through the copied data, scanning fields and enqueuing newly-discovered live objects.
+
+### 6.9 Old-Generation Evacuation (Concurrent Relocation)
+
+**Concurrent compaction.** Unlike the young generation, the old generation is evacuated **concurrently** with the mutator. This is achieved via load barriers and colored pointers (ZGC-style).
+
+**Evacuation phases.**
+
+1. **Concurrent prepare**: select old regions for evacuation (based on liveness ratio).
+2. **Concurrent relocate**: for each live object in a selected region, allocate space in a new region, copy the object, and install a forwarding pointer in the old location. The object's new address is encoded into the colored pointer.
+3. **Concurrent remap**: mutator threads, via load barriers, gradually update their references to point to the new locations.
+4. **Pause remap (STW, very short)**: scan roots and thread-local state to remap any remaining old references.
+5. **Release old regions**: mark them as free.
+
+**Forwarding pointer.** When an object is relocated, its old location is overwritten with a forwarding pointer to the new location. The forwarding pointer is distinguished from a normal pointer by a dedicated bit in the mark word.
+
+### 6.10 Load Barrier and Colored Pointers
+
+**Colored pointer scheme.** Each pointer carries metadata in its high bits indicating the state of the object it references:
+
+- **Marked0/Marked1**: encode the mark state from the most recent marking cycle.
+- **Remapped**: indicates the pointer has been updated to point to the relocated object.
+- **Finalizable**: reserved.
+
+**Load barrier.** Every reference load goes through a load barrier:
+
+```
+load(obj, offset) -> ref:
+    raw = obj[offset]
+    if raw has bad color:
+        return slow_path(raw)
+    else:
+        return raw
+
+slow_path(raw):
+    // Case 1: object has been relocated; forward to new address
+    if raw points to a forwarding entry:
+        new_addr = forwarding_table[raw]
+        new_ref = recolor(new_addr, correct_color)
+        obj[offset] = new_ref  // self-healing
+        return new_ref
+    
+    // Case 2: pointer color is stale; recolor
+    actual_addr = strip_color(raw)
+    new_ref = recolor(actual_addr, current_mark_state)
+    obj[offset] = new_ref  // self-healing
+    return new_ref
+```
+
+**Self-healing.** The load barrier writes the corrected pointer back into the slot. This means subsequent loads of the same slot are fast-path.
+
+**Fast path.** If the pointer's color matches the current expected color, the barrier is a single comparison and branch: 1-2 cycles.
+
+**Compiler integration.** The T1 JIT emits load barriers for all reference loads. For hot code, the fast path is inlined; the slow path is a call to a runtime helper.
+
+### 6.11 Safepoints and Stack Scanning
+
+**Safepoints.** Mutator threads reach safepoints at:
+- Backward branches (loop back-edges).
+- Method returns.
+- Epilogues.
+- Explicit `safepoint` bytecodes (from UGB).
+
+At a safepoint, the thread checks a **safepoint flag**. If set, the thread parks and waits for the GC to finish its STW phase.
+
+**Stack scanning.** During STW phases (initial mark, remark, pause remap), the GC scans each mutator thread's stack to find root references. The scan uses:
+- **Stack maps**: emitted by the T1 JIT, describing which stack slots contain references at each safepoint PC.
+- **Register maps**: describing which registers contain references at each safepoint PC.
+
+**Concurrent root scanning (for concurrent phases).** For concurrent marking, roots are scanned at the initial-mark STW pause. Subsequent changes to roots (e.g., new stack references) are handled by the SATB barrier: any store of a reference into a root location (global variable, field) triggers the barrier.
+
+**Thread-local state.** Each mutator thread maintains:
+- TLAB (for allocation).
+- SATB queue (for write barrier buffering).
+- Safepoint state (parked/running).
+- Stack map pointer (for the current PC).
+
+### 6.12 Reference Processing
+
+**Reference types.** The GC supports four reference strengths:
+
+- **Strong**: normal references. Object is live if reachable via strong references.
+- **Soft**: cleared only when memory is needed. Cleared in full collections when heap is tight.
+- **Weak**: cleared at the end of any marking cycle if the referent is not strongly reachable.
+- **Phantom**: cleared after finalization, but the referent is not accessible after clearing. Used for post-mortem cleanup tracking.
+
+**Discovery and processing.** During the remark phase:
+1. Discover reference objects whose referents are not strongly reachable.
+2. Enqueue soft references only if heap pressure warrants.
+3. Clear weak and phantom references (set referent to null).
+4. Enqueue cleared references onto their registered queues (for application-level notification).
+
+**Finalization.** Objects with finalizers are treated specially:
+1. If an object with a finalizer is found unreachable, it is registered for finalization instead of being reclaimed.
+2. Its finalizer is invoked (possibly asynchronously).
+3. After finalization, if the object is still unreachable, it is reclaimed in the next cycle.
+
+### 6.13 Collection Policy and Triggering
+
+**Young collection trigger.** A young collection is triggered when:
+- TLAB allocation fails (no free young regions).
+- Explicit request from the runtime.
+
+**Old collection trigger.** An old collection is triggered when:
+- The old generation occupancy exceeds a threshold (e.g., 80% of committed old regions).
+- A certain number of young collections have occurred since the last old collection.
+- Explicit request from the runtime.
+
+**Concurrent cycle pacing.** Once triggered, the concurrent marking cycle is paced to complete before the old generation fills up. The pacer computes the amount of marking work to perform per mutator allocation quantum:
+
+```
+work_per_alloc = (remaining_mark_work) / (remaining_heap_before_full)
+```
+
+**Adaptive sizing.** The young generation size is adjusted based on pause time targets:
+- If pauses are too long, shrink the young generation.
+- If GC overhead is too high, grow the young generation.
+
+### 6.14 Validity Invariants
+
+Valid_GC(H) holds iff all of the following hold:
+
+**1. Heap well-formedness.**
+- Every object's size field is consistent with its actual allocation size.
+- Every reference field contains either null or a valid pointer to an object.
+- No two objects overlap in memory.
+- The card table accurately reflects the generation of each card.
+
+**2. Tri-color marking invariant.**
+- At the end of a marking cycle, every object reachable from roots is black.
+- During marking, no black object has a reference to a white object that was reachable at snapshot time. (Enforced by SATB barrier.)
+
+**3. Generational invariant.**
+- Every old-to-young reference is recorded in the source region's remset (via dirty card).
+- The card table is consistent with the remset.
+
+**4. Load-barrier forwarding invariant.**
+- Every pointer in the mutator's view either points to a valid (non-forwarded) object with the correct color, or will be corrected by the load barrier before use.
+- Forwarding pointers are installed atomically with respect to mutator loads.
+
+**5. Safepoint consistency.**
+- At any safepoint, the stack maps and register maps accurately describe the reference-containing locations.
+- No mutator thread is executing outside a safepoint during an STW phase.
+
+**6. Allocation consistency.**
+- TLABs do not overlap.
+- Bump-pointer allocation does not exceed region bounds.
+- Promotion correctly updates the object's generation.
+
+**7. Reference processing correctness.**
+- Weak references are cleared if and only if the referent is not strongly reachable.
+- Soft references are cleared only under memory pressure.
+- Phantom references are cleared after finalization.
+- Finalizable objects are not reclaimed until after finalization.
+
+**8. Barrier integrity.**
+- The write barrier is executed for every reference store (enforced by compiler).
+- The load barrier is executed for every reference load (enforced by compiler).
+- Barrier failures are internal errors, not user-visible.
+
+### 6.15 Representation and Cost Model
+
+**Heap metadata overhead.**
+- Card table: 1 byte per 512 bytes of heap = 0.2%.
+- Mark bitmap: 1 bit per 16 bytes = 0.78%.
+- Forwarding table: 8 bytes per region (one pointer per region header) = negligible.
+- SATB queues: per-thread, bounded size.
+- Total: ~1% of heap.
+
+**Write barrier cost.**
+- Fast path (no work needed): 1 comparison + 1 conditional branch = ~1 cycle.
+- Slow path (SATB enqueue or card dirtying): ~20-50 cycles, amortized over many stores.
+
+**Load barrier cost.**
+- Fast path (correct color): 1 comparison + 1 conditional branch = ~1-2 cycles.
+- Slow path (forwarding or recoloring): ~50-100 cycles, amortized via self-healing.
+
+**Pause times.**
+- Initial mark: O(|roots|) = typically 100-500 µs.
+- Remark: O(|roots| + |remaining gray|) = typically 100-500 µs.
+- Pause remap: O(|roots|) = typically 50-200 µs.
+- Young collection: O(|live young|) = typically 500 µs - 5 ms depending on young size.
+
+**Throughput overhead.**
+- GC work as fraction of total time: 2-5% at steady state.
+- Barrier overhead as fraction of mutator time: 1-3%.
+
+**Memory complexity.** O(|heap| · metadata_fraction + |threads| · per_thread_state + |regions| · per_region_state).
+
+**Construction cost.** Heap initialization: O(|heap|) to zero metadata. Collection cycle: O(|live|) total work, spread over time.
+
+---
+
+# Compiler Optimizations for AOT and JIT Compilers (Revised)
+---
+
+## 1. Scalar, Local & Peephole Optimizations (1–24)
+
+| # | Optimization | Description |
+|---|---|
+| 1 | **Constant folding** | Evaluate constant expressions at compile time. |
+| 2 | **Constant propagation** | Replace variables with known constant values. |
+| 3 | **Partial constant propagation** | Propagate constants only along paths where it enables further optimizations (cost-driven). |
+| 4 | **Copy propagation** | Replace `x = y` usages of `x` with `y`. |
+| 5 | **Partial copy propagation** | Propagate copies only when it reduces register pressure or exposes CSE. |
+| 6 | **Local dead code elimination (DCE)** | Remove instructions whose results are unused. |
+| 7 | **Partial dead code elimination (PDCE)** | Eliminate code that is dead on *some* paths by duplicating the live paths (Kildall, 1981; more aggressive than total DCE). |
+| 8 | **Common subexpression elimination (CSE)** | Reuse results of identical expressions. |
+| 9 | **Partial CSE** | Perform CSE only when the reuse is profitable given register pressure. |
+| 10 | **Algebraic simplification** | `x * 1 → x`, `x + 0 → x`, `x * 2 → x << 1`. |
+| 11 | **Strength reduction** | Replace expensive ops with cheaper equivalents. |
+| 12 | **Partial strength reduction** | Apply strength reduction only to induction variables or ops on hot paths. |
+| 13 | **Peephole optimization** | Pattern-match and replace short instruction sequences. |
+| 14 | **Branch folding / simplification** | Remove redundant branches, convert to conditional moves. |
+| 15 | **Tail call optimization (TCO)** | Reuse caller's stack frame for tail calls. |
+| 16 | **Local value numbering (LVN)** | Detect equivalent expressions within a block. |
+| 17 | **Partial value numbering** | Perform LVN only on subsets of expressions where hash collisions or cost justify it. |
+| 18 | **Instruction combining** | Merge multiple arithmetic/logical ops into a single target instruction. |
+| 19 | **Reassociation** | Rearrange commutative/associative ops to expose CSE or parallelism. |
+| 20 | **Redundant flag elimination** | Remove duplicate condition-code updates. |
+| 21 | **Trivial dead store elimination** | Remove writes immediately overwritten. |
+| 22 | **Bitwise identity simplification** | Simplify `x & 0`, `x | -1`, etc. |
+| 23 | **Sign/zero-extension elimination** | Remove redundant extensions based on value ranges. |
+| 24 | **Shift-and-add / division-by-constant lowering** | Compile multiplications/divisions by constants into shifts and magic-number multiplications. |
+
+---
+
+## 2. Global, SSA & Data-Flow Optimizations (25–56)
+
+| # | Optimization | Description |
+|---|---|
+| 25 | **Global value numbering (GVN)** | Prove expression equivalence across blocks. |
+| 26 | **Sparse conditional constant propagation (SCCP)** | Combine constant propagation with unreachable-code elimination (Wegman & Zadeck, 1991). |
+| 27 | **Partial SCCP** | Apply SCCP only along hot paths or where lattice depth is bounded. |
+| 28 | **Global dead store elimination (DSE)** | Remove memory writes never read before being overwritten. |
+| 29 | **Partial dead store elimination** | Eliminate stores that are dead on some paths via path-sensitive analysis. |
+| 30 | **Redundant load elimination (RLE)** | Reuse values already in registers. |
+| 31 | **Partial redundant load elimination** | Eliminate loads redundant on some paths (variant of PRE). |
+| 32 | **Partial redundancy elimination (PRE)** | Eliminate expressions redundant on *some* paths by code motion + CSE (Morel & Renvoise, 1979). |
+| 33 | **Lazy code motion (LCM)** | Optimal PRE variant minimizing register pressure (Knoop, Rüthing, Steffen, 1992). |
+| 34 | **Partial code motion** | Hoist/sink only code where the benefit exceeds the cost (profile- or cost-driven). |
+| 35 | **Available expressions analysis** | Classical data-flow for CSE. |
+| 36 | **Live variable analysis** | Determine which variables hold values needed in the future. |
+| 37 | **Live range splitting** | Shorten variable lifetimes to ease register allocation. |
+| 38 | **Phi-node optimization** | Simplify or eliminate φ-nodes in SSA. |
+| 39 | **Aggressive dead code elimination (ADCE)** | Iterated DCE using call-graph and side-effect analysis. |
+| 40 | **Conditional constant propagation** | Propagate constants along specific CFG edges based on branch conditions. |
+| 41 | **Unreachable code elimination** | Remove blocks with no predecessors. |
+| 42 | **Dominator tree optimizations** | Use dominance frontiers for efficient φ-node placement. |
+| 43 | **Post-dominator tree optimizations** | Used for sinking and control-dependence analysis. |
+| 44 | **Control dependence analysis** | Determine which instructions depend on specific branch outcomes. |
+| 45 | **Static Single Information (SSI)** | Extend SSA to track both definitions and uses. |
+| 46 | **Value forwarding** | Pass values directly via registers across block boundaries. |
+| 47 | **Global copy propagation** | Propagate copies across the entire CFG. |
+| 48 | **Partial sinking** | Delay instructions to their latest profitable use point (opposite of hoisting). |
+| 49 | **Partial hoisting** | Hoist instructions to earliest profitable definition point. |
+| 50 | **Critical edge splitting** | Insert empty blocks to safely place code on multi-source/multi-dest edges. |
+| 51 | **Out-of-SSA translation optimization** | Minimize copies when leaving SSA form. |
+| 52 | **Phi-web coalescing** | Merge variables connected by φ-nodes. |
+| 53 | **SSA renaming optimization** | Minimize registers during SSA construction. |
+| 54 | **Sparse simple constant propagation** | Lightweight SCCP variant for fast JIT tiers. |
+| 55 | **Correlated propagation** | Propagate range info derived from branch conditions (e.g., after `if (x > 0)`). |
+| 56 | **Range analysis / Value range propagation (VRP)** | Track min/max bounds to eliminate bounds checks and enable other opts. |
+
+---
+
+## 3. Control Flow Graph (CFG) Optimizations (57–74)
+
+| # | Optimization | Description |
+|---|---|
+| 57 | **Basic block merging** | Combine a block with its sole successor. |
+| 58 | **Basic block splitting** | Break large blocks for finer-grained scheduling. |
+| 59 | **Empty block removal** | Eliminate blocks containing only unconditional jumps. |
+| 60 | **Jump threading** | Redirect jumps to bypass intermediate blocks. |
+| 61 | **Partial jump threading** | Thread only jumps where the benefit (branch elimination) exceeds code-size cost. |
+| 62 | **Branch chain elimination** | Collapse chains of unconditional jumps. |
+| 63 | **Switch lowering (binary search / jump tables / bit-test)** | Convert switches into optimal decision structures. |
+| 64 | **Tail duplication** | Copy small successor blocks to eliminate conditional branches. |
+| 65 | **Partial tail duplication** | Duplicate only small, cold successor blocks (size-threshold driven). |
+| 66 | **Trace scheduling** | Reorder blocks to form long straight-line traces based on profiles. |
+| 67 | **Superblock formation** | Blocks with single entry but multiple exits. |
+| 68 | **Hyperblock formation** | Use predication to merge diamond CFGs into single blocks. |
+| 69 | **Branchless code generation** | Replace branches with conditional moves or arithmetic. |
+| 70 | **Partial branchless conversion** | Convert only branches where the cost of misprediction exceeds the cmov latency. |
+| 71 | **Switch splitting** | Break large switches into smaller sub-switches. |
+| 72 | **If-conversion** | Convert short if-then-else to predicated/branchless code. |
+| 73 | **Partial if-conversion** | Apply only when the branch is unpredictable and the body is small. |
+| 74 | **Block reordering for locality** | Place frequently-executed blocks adjacently. |
+
+---
+
+## 4. Loop Transformations (75–115)
+
+| # | Optimization | Description |
+|---|---|
+| 75 | **Full loop unrolling** | Replicate entire body to eliminate overhead. |
+| 76 | **Partial loop unrolling** | Replicate body N times (cost/benefit driven). |
+| 77 | **Loop unswitching** | Move loop-invariant conditionals outside the loop. |
+| 78 | **Partial loop unswitching** | Unswitch only the most selective/predictable conditions. |
+| 79 | **Loop-invariant code motion (LICM)** | Hoist computations that don't change per iteration. |
+| 80 | **Partial LICM** | Hoist only invariants where hoisting doesn't hurt register pressure or cache. |
+| 81 | **Induction variable simplification / elimination** | Reduce and remove redundant IVs. |
+| 82 | **Strength reduction on IVs** | Replace IV multiplications with additions. |
+| 83 | **Loop fusion (jamming)** | Combine adjacent loops with same bounds. |
+| 84 | **Partial loop fusion** | Fuse only loops where fusion improves locality without increasing register pressure. |
+| 85 | **Loop fission (distribution)** | Split a loop for better cache/register use. |
+| 86 | **Partial loop fission** | Split only loops where fission enables vectorization or reduces pressure. |
+| 87 | **Loop interchange** | Swap nested loop order for locality. |
+| 88 | **1D loop strip mining** | Break loop into chunks fitting in registers/L1. |
+| 89 | **Multi-dimensional loop tiling** | Block nested loops for cache reuse. |
+| 90 | **Partial loop tiling** | Tile only loops with affine, perfectly-nested structure. |
+| 91 | **Loop skewing** | Transform iteration spaces to expose parallelism. |
+| 92 | **Loop reversal / collapsing / normalization** | Direction, nesting, and bound transformations. |
+| 93 | **Software pipelining** | Overlap iterations to hide latency. |
+| 94 | **Partial software pipelining** | Pipeline only innermost loops or those with bounded initiation intervals. |
+| 95 | **Modulo scheduling** | Resource-constrained software pipelining. |
+| 96 | **Iteration peeling** | Handle first/last iterations specially. |
+| 97 | **Partial loop peeling** | Peel only iterations needed for alignment or prologue/epilogue. |
+| 98 | **Loop versioning** | Generate specialized loop variants (aligned vs. unaligned). |
+| 99 | **Loop unroll-and-jam** | Unroll outer loop and fuse resulting inner loops. |
+| 100 | **Loop bound analysis / elimination of bounds checks** | Prove bounds to remove internal checks. |
+| 101 | **Loop-carried dependence analysis** | Determine if iterations can be reordered. |
+| 102 | **Reduction recognition** | Identify accumulation patterns for vectorization. |
+| 103 | **Loop idiom recognition** | Replace manual loops with `memset`/`memcpy`/etc. |
+| 104 | **Loop predication** | Hoist bounds checks out of loops by verifying range upfront. |
+| 105 | **Partial loop predication** | Predicate only checks that dominate the loop body. |
+| 106 | **Loop-invariant function call hoisting** | Move pure calls out of loops. |
+| 107 | **Loop unswitching with branch prediction** | Use profile data to duplicate loops for the hot path. |
+| 108 | **Multi-level loop interchange** | Reorder deeply nested loops. |
+| 109 | **Loop index set splitting** | Partition loops into ranges where different opts apply. |
+| 110 | **Affine loop scheduling (Polyhedral)** | Compute optimal execution order for affine loops. |
+| 111 | **Polyhedral dataflow analysis** | Exact dependence analysis for complex loop nests. |
+| 112 | **Partial vectorization** | Vectorize only the main body of a loop, leaving a scalar tail. |
+| 113 | **Partial loop distribution** | Distribute only statements that benefit from separation. |
+| 114 | **Loop-aware prefetch insertion** | Insert prefetches based on loop stride and cache geometry. |
+| 115 | **Loop alignment optimization** | Align loop entry to cache-line boundaries. |
+
+---
+
+## 5. Interprocedural & Whole-Program Optimizations (116–150)
+
+| # | Optimization | Description |
+|---|---|
+| 116 | **Function inlining** | Replace call with callee body. |
+| 117 | **Partial inlining** | Inline only the hot prefix of a function, leaving the cold path as a call. |
+| 118 | **Devirtualization** | Resolve virtual/dynamic calls to direct calls. |
+| 119 | **Partial devirtualization** | Devirtualize only monomorphic or highly-biased call sites. |
+| 120 | **Class hierarchy analysis (CHA)** | Use type hierarchy to limit call targets. |
+| 121 | **Rapid type analysis (RTA)** | Refine CHA using instantiated types. |
+| 122 | **Variable type inference (VTI)** | Infer types of dynamically-typed variables. |
+| 123 | **Interprocedural constant propagation (IPCP)** | Propagate constants across calls. |
+| 124 | **Partial IPCP** | Propagate constants only for call sites where it shrinks the callee or enables inlining. |
+| 125 | **Interprocedural DCE** | Remove unused functions/methods. |
+| 126 | **Function cloning / specialization** | Create specialized copies for specific argument types/values. |
+| 127 | **Partial function cloning** | Clone only functions with a small number of hot argument profiles. |
+| 128 | **Escape analysis** | Determine if an object escapes its creating scope. |
+| 129 | **Partial escape analysis (PEA)** | Track object escape per-path; allow allocation elimination even if object escapes on *some* paths (Säverud et al., GraalVM — a landmark research optimization). |
+| 130 | **Scalar replacement of aggregates (SRA)** | Break structs/objects into scalar fields. |
+| 131 | **Partial scalar replacement** | Replace only fields that are proven non-escaping or frequently accessed. |
+| 132 | **Call graph construction** | Build static or dynamic call graphs. |
+| 133 | **Summary-based analysis** | Propagate function summaries (side effects, return values). |
+| 134 | **Link-time optimization (LTO)** | Whole-program optimization at link time. |
+| 135 | **ThinLTO** | Scalable LTO using summary bitcodes. |
+| 136 | **Profile-guided optimization (PGO)** | Use runtime profiles to guide AOT decisions. |
+| 137 | **AutoFDO / SampleFDO** | PGO from hardware sampling. |
+| 138 | **Context-sensitive analysis** | Analyze functions in calling context. |
+| 139 | **Partial evaluation** | Specialize a program with respect to known compile-time inputs (Jones, Gomard, Sestoft — a whole research field underpinning JIT specialization). |
+| 140 | **Argument specialization** | Generate code tailored to specific argument values. |
+| 141 | **Return value optimization (RVO) / NRVO** | Elide copies of returned objects. |
+| 142 | **Cross-module inlining** | Inline across compilation units. |
+| 143 | **Whole-program devirtualization** | Prove exact type globally to eliminate virtual dispatch. |
+| 144 | **Interprocedural SCCP** | Apply SCCP across the call graph. |
+| 145 | **Tail call / sibling call optimization** | Reuse caller's stack frame for tail calls. |
+| 146 | **Exception handling table optimization** | Shrink LSDA tables. |
+| 147 | **Dead function elimination** | Remove unused code at module/program level. |
+| 148 | **Partial specialization** | Specialize functions only for the most frequent type profiles. |
+| 149 | **Speculative devirtualization** | Devirtualize with a runtime type-check guard. |
+| 150 | **Argument marshalling optimization** | Optimize FFI/RPC data packing. |
+
+---
+
+## 6. Memory, Pointers, Alias & GC Optimizations (151–184)
+
+| # | Optimization | Description |
+|---|---|
+| 151 | **Stack allocation of heap objects** | Promote non-escaping heap objects to the stack. |
+| 152 | **Allocation sinking** | Delay object allocation until first use. |
+| 153 | **Partial allocation sinking** | Sink only allocations where the delay reduces pressure on the fast path. |
+| 154 | **Object field reordering** | Reorder struct fields for packing/alignment. |
+| 155 | **Memory coalescing** | Merge adjacent memory ops into wider operations. |
+| 156 | **Cache-aware data layout** | Reorder data structures for cache line utilization. |
+| 157 | **Software prefetch insertion** | Insert explicit prefetches. |
+| 158 | **Partial prefetching** | Insert prefetches only for accesses with predictable strides. |
+| 159 | **TLB optimization** | Promote hot regions to large/huge pages. |
+| 160 | **Write barrier elimination** | Remove GC write barriers when proven unnecessary. |
+| 161 | **Partial write barrier elimination** | Remove barriers only on paths where GC state is known (e.g., young-gen only). |
+| 162 | **Card table / remembered set optimization** | Optimize GC dirty-card tracking. |
+| 163 | **Generational GC tuning** | Optimize nursery sizes and promotion thresholds. |
+| 164 | **Region-based memory management** | Group allocations into regions freed together. |
+| 165 | **Bump-pointer allocation / TLAB** | Eliminate lock contention for thread-local allocations. |
+| 166 | **Slab / free-list / arena allocation lowering** | Optimize pool allocations. |
+| 167 | **Pointer compression (Compressed Oops)** | Use 32-bit offsets for 64-bit heap pointers. |
+| 168 | **Partial pointer compression** | Compress only pointers within a bounded heap region. |
+| 169 | **Heap compaction / mark-and-sweep bitmap optimization** | Evacuation and fast marking. |
+| 170 | **Reference counting cycle collection** | Detect and collect reference cycles. |
+| 171 | **Flow-insensitive alias analysis (Andersen's / Steensgaard's)** | Inclusion-based and equality-based pointer analysis. |
+| 172 | **Flow-sensitive alias analysis** | Track pointer aliases across control flow. |
+| 173 | **Context-sensitive / field-sensitive alias analysis** | Track aliases through call graph and struct fields. |
+| 174 | **Mod/Ref analysis** | Determine if a function modifies or only references memory. |
+| 175 | **Zero-cost abstraction lowering** | Eliminate overhead from iterators, monads, etc. |
+| 176 | **Pointer alignment inference** | Prove alignment to enable vectorized loads. |
+| 177 | **Non-temporal store insertion** | Use streaming stores to bypass cache for large sequential writes. |
+| 178 | **Partial non-temporal store insertion** | Use streaming stores only when the working set exceeds cache. |
+| 179 | **Store-to-load forwarding promotion** | Promote stores that are immediately reloaded into register-to-register moves. |
+| 180 | **Partial store-to-load forwarding** | Forward only when the store size matches the load and no aliasing intervenes. |
+| 181 | **Memory access coalescing** | Merge adjacent scalar accesses into vector loads/stores. |
+| 182 | **Partial memory coalescing** | Coalesce only when alignment and size permit. |
+| 183 | **Stack slot coloring** | Reuse stack slots for non-overlapping live ranges. |
+| 184 | **Partial stack slot coloring** | Color only slots where reuse saves meaningful stack space. |
+
+---
+
+## 7. Object-Oriented & Dynamic-Language Optimizations (185–208)
+
+| # | Optimization | Description |
+|---|---|
+| 185 | **Inline caching (IC)** | Cache method lookup results at call sites. |
+| 186 | **Partial inline caching** | Use ICs only for hot call sites; fall back to generic dispatch for cold ones. |
+| 187 | **Monomorphic / polymorphic / megamorphic ICs** | Specialize by call-site diversity. |
+| 188 | **Speculative inlining** | Inline based on profiled receiver type. |
+| 189 | **Guarded devirtualization** | Inline with a type-check guard. |
+| 190 | **Partial guarded devirtualization** | Guard only the hottest call sites; leave others polymorphic. |
+| 191 | **Type profiling / type specialization** | Record observed types; generate type-specific code paths. |
+| 192 | **Partial type specialization** | Specialize only for the top-N observed types. |
+| 193 | **Hidden classes / maps / shapes** | Track object layouts dynamically (V8, SpiderMonkey, JSC). |
+| 194 | **Method handle / invokedynamic optimization** | Optimize dynamic dispatch mechanisms. |
+| 195 | **Allocation elimination** | Remove allocations that don't escape. |
+| 196 | **Object inlining** | Embed small objects directly in their parent. |
+| 197 | **Field hoisting** | Hoist field loads out of loops/methods. |
+| 198 | **Partial field hoisting** | Hoist only fields with invariant values on the hot path. |
+| 199 | **Write-combining / store buffering** | Merge consecutive field writes. |
+| 200 | **Unboxing / box elimination** | Extract primitives from wrappers; prevent wrapper creation. |
+| 201 | **Partial unboxing** | Unbox only the most common wrapper types on hot paths. |
+| 202 | **Primitive specialization** | Generate specialized collections/methods for `int`, `double`, etc. |
+| 203 | **Dynamic code generation (tracing)** | Record linear traces for JIT compilation. |
+| 204 | **Partial trace selection** | Select only the hottest traces for compilation (trace JITs). |
+| 205 | **Megamorphic call site splitting** | Split call sites by caller context. |
+| 206 | **Dictionary / property lookup optimization** | Optimize dynamic property access via ICs and shapes. |
+| 207 | **Speculative class checks** | Hoist class checks with deoptimization on failure. |
+| 208 | **Partial speculative class checks** | Speculate only on classes with high observed frequency. |
+
+---
+
+## 8. Parallelism, Vectorization & Concurrency (209–228)
+
+| # | Optimization | Description |
+|---|---|
+| 209 | **Auto-vectorization (SLP)** | Superword-Level Parallelism — pack scalars into SIMD. |
+| 210 | **Loop vectorization** | Vectorize loop bodies. |
+| 211 | **Auto-parallelization** | Detect and parallelize independent loops. |
+| 212 | **Partial auto-parallelization** | Parallelize only loops with high iteration counts and low synchronization. |
+| 213 | **Loop distribution for parallelism** | Split loops to expose parallel regions. |
+| 214 | **Dependence analysis** | Determine loop-carried dependencies. |
+| 215 | **Polyhedral optimization** | Model affine loops as polyhedra for complex transformations. |
+| 216 | **Transaction memory (HTM/STM) lowering** | Compile atomic blocks into hardware/software transactions. |
+| 217 | **SIMD intrinsics lowering** | Map high-level ops to hardware SIMD. |
+| 218 | **Multi-versioning** | Generate vector and scalar variants chosen at runtime. |
+| 219 | **Lock elision** | Remove locks when thread-local analysis proves no contention. |
+| 220 | **Partial lock elision** | Elide locks only on paths with low observed contention. |
+| 221 | **Lock coarsening / splitting / RW-lock promotion** | Adjust lock granularity. |
+| 222 | **Barrier elimination** | Remove unnecessary thread synchronization barriers. |
+| 223 | **Partial barrier elimination** | Remove barriers only where memory model permits relaxation. |
+| 224 | **Volatile access optimization** | Minimize memory fence overhead. |
+| 225 | **Atomic operation lowering** | Optimize CAS / LL-SC. |
+| 226 | **Concurrent GC optimizations** | Fold write-barriers into normal stores. |
+| 227 | **False sharing mitigation** | Insert padding between thread-local variables. |
+| 228 | **Memory model relaxation** | Reorder loads/stores where the language memory model permits. |
+
+---
+
+## 9. JIT-Specific & Runtime Mechanisms (229–242)
+
+| # | Optimization | Description |
+|---|---|
+| 229 | **Tiered compilation** | Start with baseline JIT, then optimize hot code. |
+| 230 | **On-stack replacement (OSR)** | Replace executing code with optimized version mid-execution. |
+| 231 | **Partial OSR** | Perform OSR only for the hottest loops; leave cold loops interpreted. |
+| 232 | **Deoptimization** | Fall back to interpreter when assumptions fail. |
+| 233 | **Partial deoptimization** | Deoptimize only the failed region, keeping unrelated optimized code intact (frame-aware). |
+| 234 | **Speculative optimization** | Optimize based on observed behavior; deoptimize on failure. |
+| 235 | **Partial speculative optimization** | Apply speculation only on hot paths with high-confidence profiles. |
+| 236 | **Background compilation** | Compile on separate threads. |
+| 237 | **Partial background compilation** | Compile only high-priority methods in the background; others synchronously. |
+| 238 | **Lazy compilation** | Compile only when needed. |
+| 239 | **Adaptive optimization** | Re-optimize based on evolving profiles. |
+| 240 | **Inline cache miss handling / code patching** | Patch call sites when new types observed. |
+| 241 | **Safepoint insertion / bailout state generation** | Enable GC and deopt at defined points. |
+| 242 | **Runtime profile collection / partial profiling** | Gather counters, type maps, and branch probabilities; profile only hot regions to reduce overhead. |
+
+---
+
+# 32-Bit Target Support for Garbage Collection — Complete Design Document (v1)
+
+## 0. Document Control and Design Scope
+
+**Component:** 32-Bit Target Support (extension to Garbage Collection Subsystem)
+
+**Version:** 1.0
+
+**Role:** Provides garbage collection support for 32-bit target architectures where colored pointers are not feasible due to the lack of unused address bits. Implements alternative mechanisms for marking, forwarding, and barriers using side-table metadata and object header bits.
+
+**Design Status:** Complete specification.
+
+**Scope:** This document defines the 32-bit object header layout, mark bitmap usage, header-based forwarding, load barrier implementation, write barrier adjustments, performance model, and an alternative mark-compact mode. It does not define:
+- The 64-bit GC design (already specified; this is an extension/alternative)
+- The T1 JIT compiler (must emit 32-bit-specific barriers)
+- The runtime system (consumes this subsystem)
+
+**Normative References:**
+- Jones, R. and Lins, R. "Garbage Collection: Algorithms for Automatic Dynamic Memory Management" (mark-compact algorithms)
+- Bacon, D. et al. "Concurrent Cycle Collection in Reference Counted Systems" (bitmap-based marking)
+- Standard GC literature for 32-bit heap management
+
+**Known Limitations:**
+- Higher barrier overhead compared to 64-bit (2-3 memory accesses per load vs. 1).
+- Mark-compact mode has longer pauses (STW) compared to concurrent relocation.
+- Limited address space (4 GB) constrains heap size and may require more frequent collections.
+
+---
+
+## 6. 32-Bit Target Support
+
+### 6.1 Purpose and Design Rationale
+
+On 32-bit targets, all 32 bits of a pointer are used for the address. There are no unused high bits to encode GC metadata (mark state, forwarding info, etc.). Therefore, the colored-pointer scheme used on 64-bit targets is not feasible.
+
+**Design choices.** We consider three approaches:
+
+1. **Side-table approach**: Maintain a parallel hash table mapping object addresses to GC state. *Rejected*: too expensive (hash lookup on every barrier).
+
+2. **Header-only approach**: Store all GC state in the object header. *Rejected*: requires loading the header on every reference load, which is expensive.
+
+3. **Hybrid approach**: Use the mark bitmap for marking (same as 64-bit) and the object header for forwarding. The load barrier checks the header only when necessary. *Selected*: balances performance and complexity.
+
+**Alternative mode.** For simpler implementation, we also support a mark-compact mode where old-generation collection is STW (no concurrent relocation). This eliminates the need for a load barrier during old-generation collection but results in longer pauses.
+
+### 6.2 Object Header Layout (32-bit)
+
+The object header is modified to accommodate 32-bit constraints:
+
+```
+struct ObjectHeader32 {
+    mark_word:    u32,   // hash code / lock state / age / forwarding pointer
+    klass_ptr:    u32,   // pointer to type metadata
+    size:         u16,   // object size in bytes (max 64 KB; larger objects use humongous regions)
+    flags:        u8,    // generation, humongous, pinned, forwarded bit
+    _pad:         u8,
+}
+```
+
+**Total header size**: 12 bytes (padded to 16 bytes for alignment).
+
+**Forwarding bit.** The `flags` field includes a `FORWARDED` bit (bit 0). When an object is relocated, this bit is set in the old object's header, and the `mark_word` field is overwritten with the new address.
+
+```
+FLAG_FORWARDED = 0x01
+```
+
+**Forwarding pointer.** When `flags & FLAG_FORWARDED` is set, the `mark_word` field contains the new address of the object. The forwarding pointer is a full 32-bit address.
+
+### 6.3 Mark Bitmap (32-bit)
+
+The mark bitmap is identical to the 64-bit design: one bit per minimum object size (16 bytes). The bitmap is stored in a metadata region and is accessed via a fast index computation:
+
+```
+mark_bitmap_index(obj) = (obj - region_base) / 16
+mark_bitmap_byte(index) = index / 8
+mark_bitmap_bit(index) = index % 8
+```
+
+**Mark states.** Each bit can be in one of two states:
+- **0 (white/unmarked)**: the object has not been marked in the current cycle.
+- **1 (black/marked)**: the object has been marked as reachable.
+
+The tri-color abstraction is simplified on 32-bit: we only distinguish white and black (gray is implicit: an object is gray if it is marked but not yet scanned).
+
+### 6.4 Forwarding Mechanism (Header-Based)
+
+**Forwarding installation.** When an object is relocated during old-generation evacuation:
+
+```
+forward_object(old_obj, new_obj):
+    // Set the forwarded bit in the old object's header
+    old_obj.flags |= FLAG_FORWARDED
+    
+    // Store the new address in the old object's mark_word
+    old_obj.mark_word = new_obj
+    
+    // Ensure the write is visible to other threads
+    atomic_fence()
+```
+
+**Forwarding check.** To check if an object has been forwarded:
+
+```
+is_forwarded(obj) -> bool:
+    return (obj.flags & FLAG_FORWARDED) != 0
+
+get_forwarding_pointer(obj) -> pointer:
+    if is_forwarded(obj):
+        return obj.mark_word
+    else:
+        return obj
+```
+
+**Atomicity.** The forwarding installation must be atomic with respect to concurrent loads. On 32-bit targets, we use a compare-and-swap (CAS) on the `flags` field to ensure that only one thread installs the forwarding pointer:
+
+```
+forward_object_atomic(old_obj, new_obj) -> bool:
+    old_flags = old_obj.flags
+    if old_flags & FLAG_FORWARDED:
+        return false  // already forwarded by another thread
+    
+    new_flags = old_flags | FLAG_FORWARDED
+    if atomic_cas(&old_obj.flags, old_flags, new_flags):
+        old_obj.mark_word = new_obj
+        return true
+    else:
+        return false  // another thread forwarded it first
+```
+
+### 6.5 Load Barrier (32-bit)
+
+The load barrier on 32-bit is more expensive than on 64-bit because it must check the object header for forwarding info.
+
+**Load barrier implementation.**
+
+```
+load(obj, offset) -> ref:
+    raw = obj[offset]
+    if raw == null:
+        return null
+    
+    // Fast path: check if the object is forwarded
+    if (raw.flags & FLAG_FORWARDED) == 0:
+        return raw  // not forwarded, use as-is
+    
+    // Slow path: object has been forwarded; follow the forwarding pointer
+    new_ref = raw.mark_word
+    
+    // Self-healing: update the slot to point to the new location
+    obj[offset] = new_ref
+    
+    return new_ref
+```
+
+**Cost analysis.**
+- **Fast path** (not forwarded): 1 load (the pointer) + 1 load (the flags field) + 1 comparison + 1 conditional branch = ~3-5 cycles.
+- **Slow path** (forwarded): fast path + 1 load (the mark_word) + 1 store (self-healing) = ~10-15 cycles.
+
+**Optimization: thread-local forwarding cache.** To reduce the overhead of checking the header on every load, each mutator thread maintains a small thread-local cache of recently-forwarded pointers:
+
+```
+struct ForwardingCache {
+    entries: [(old_addr, new_addr); CACHE_SIZE],  // e.g., CACHE_SIZE = 64
+    count: u32,
+}
+
+load_with_cache(obj, offset, cache) -> ref:
+    raw = obj[offset]
+    if raw == null:
+        return null
+    
+    // Check the cache first
+    for i in 0..cache.count:
+        if cache.entries[i].old_addr == raw:
+            return cache.entries[i].new_addr
+    
+    // Cache miss: check the header
+    if (raw.flags & FLAG_FORWARDED) == 0:
+        return raw
+    
+    new_ref = raw.mark_word
+    
+    // Update the cache
+    if cache.count < CACHE_SIZE:
+        cache.entries[cache.count] = (raw, new_ref)
+        cache.count += 1
+    
+    // Self-healing
+    obj[offset] = new_ref
+    
+    return new_ref
+```
+
+**Cache cost.**
+- **Cache hit**: 1 load (the pointer) + cache lookup (O(CACHE_SIZE)) = ~5-10 cycles.
+- **Cache miss, not forwarded**: fast path = ~3-5 cycles.
+- **Cache miss, forwarded**: slow path + cache update = ~15-20 cycles.
+
+The cache is most effective for hot loops that repeatedly access the same forwarded objects.
+
+### 6.6 Write Barrier (32-bit)
+
+The write barrier on 32-bit is similar to 64-bit, but the SATB check uses the mark bitmap instead of pointer colors.
+
+**Write barrier implementation.**
+
+```
+store(obj, offset, value):
+    obj[offset] = value
+    
+    // Generational part: same as 64-bit
+    if obj is in old region and value is in young region:
+        card = card_of(obj + offset)
+        if card_table[card] != CARD_DIRTY:
+            card_table[card] = CARD_DIRTY
+    
+    // SATB part: check the mark bitmap
+    obj_index = mark_bitmap_index(obj)
+    if mark_bitmap[obj_index] == 1:  // obj is marked (black)
+        if value == null:
+            satb_queue.push(obj)
+        else:
+            value_index = mark_bitmap_index(value)
+            if mark_bitmap[value_index] == 0:  // value is unmarked (white)
+                satb_queue.push(obj)
+```
+
+**Cost analysis.**
+- **Fast path** (young-to-young or old-to-old with no marking concern): 1 comparison + 1 conditional branch = ~1 cycle.
+- **Slow path** (SATB enqueue): 2 mark bitmap loads + 1 comparison + queue push = ~20-30 cycles.
+
+### 6.7 Alternative Mode: Mark-Compact (STW)
+
+For simpler implementation or when concurrent relocation is not needed, the 32-bit GC supports a mark-compact mode where old-generation collection is performed stop-the-world.
+
+**Mark-compact phases.**
+
+1. **Initial mark (STW)**: scan roots, mark directly-reachable objects.
+2. **Concurrent mark**: same as 64-bit, but using the mark bitmap.
+3. **Remark (STW)**: drain remaining gray objects, finalize mark bitmap.
+4. **Compact (STW)**: compute forwarding addresses, update all references, copy objects to their new locations.
+5. **Resume mutator**.
+
+**Compaction algorithm.** Uses the LIS (Lisp 2) algorithm:
+1. **Compute forwarding addresses**: scan the heap from low to high, computing the new address for each live object.
+2. **Update references**: scan all objects and update references to point to the new addresses.
+3. **Copy objects**: copy each live object to its new address.
+
+**Pause time.** The compaction phase is STW and takes O(|live old|) time. For a 100 MB old generation with 50% occupancy, the pause is ~10-50 ms on modern hardware.
+
+**When to use mark-compact.**
+- When the application can tolerate longer pauses.
+- When the implementation complexity of concurrent relocation is not justified.
+- When the heap is small enough that compaction is fast.
+
+### 6.8 Performance Model (32-bit)
+
+**Barrier overhead.**
+- **Load barrier**: 3-5 cycles (fast path) + cache overhead. Amortized cost: ~5-10 cycles per load.
+- **Write barrier**: 1 cycle (fast path) + SATB overhead. Amortized cost: ~2-5 cycles per store.
+
+**Pause times.**
+- **Concurrent relocation mode**: same as 64-bit (initial mark, remark, pause remap).
+- **Mark-compact mode**: compaction pause = O(|live old|) = 10-50 ms for typical heaps.
+
+**Throughput overhead.**
+- **Barrier overhead**: 3-5% of mutator time (higher than 64-bit due to load barrier).
+- **GC work**: 2-5% of total time (same as 64-bit).
+
+**Memory overhead.**
+- **Mark bitmap**: 0.78% of heap (same as 64-bit).
+- **Card table**: 0.2% of heap (same as 64-bit).
+- **Forwarding cache**: per-thread, ~1 KB per thread.
+- **Total**: ~1% of heap (same as 64-bit).
+
+**Comparison to 64-bit.**
+- **Load barrier**: 2-3x more expensive (3-5 cycles vs. 1-2 cycles).
+- **Write barrier**: same cost.
+- **Pause times**: same for concurrent mode; longer for mark-compact mode.
+- **Throughput**: 2-3% lower due to load barrier overhead.
+
+### 6.9 Validity Invariants (32-bit)
+
+Valid_GC_32bit(H) holds iff all of the following hold:
+
+**1. Heap well-formedness.** Same as 64-bit.
+
+**2. Tri-color marking invariant.** Same as 64-bit, but using the mark bitmap instead of pointer colors.
+
+**3. Generational invariant.** Same as 64-bit.
+
+**4. Forwarding invariant (32-bit).**
+- Every forwarded object has the `FLAG_FORWARDED` bit set in its header.
+- The `mark_word` field of a forwarded object contains a valid pointer to the new location.
+- The forwarding installation is atomic with respect to concurrent loads.
+
+**5. Load-barrier correctness (32-bit).**
+- Every reference load either returns a valid (non-forwarded) object or follows the forwarding pointer to the new location.
+- The self-healing update is correct (the slot is updated to point to the new location).
+
+**6-8.** Same as 64-bit.
+
+### 6.10 Integration with T1 JIT
+
+The T1 JIT must emit 32-bit-specific barriers:
+
+**Load barrier emission.**
+```
+// UGB bytecode: LOAD r0, [r1]
+// T1 compiled code (32-bit):
+    load r0, [r1]
+    if r0 != null:
+        if (r0.flags & FLAG_FORWARDED) != 0:
+            call slow_path_load(r0)  // runtime helper
+```
+
+**Write barrier emission.** Same as 64-bit, but the SATB check uses the mark bitmap.
+
+**Forwarding cache integration.** The T1 JIT can optionally inline the forwarding cache check for hot loads:
+
+```
+// Hot load with cache check:
+    load r0, [r1]
+    if r0 != null:
+        cache_hit = lookup_cache(r0, thread_local_cache)
+        if cache_hit:
+            r0 = cache_hit.new_addr
+        else:
+            if (r0.flags & FLAG_FORWARDED) != 0:
+                call slow_path_load(r0)
+```
+
+### 6.11 Limitations and Tradeoffs
+
+**Address space limitation.** 32-bit targets have a 4 GB address space. The heap size is limited to ~2-3 GB (leaving room for the runtime, stack, etc.). This may require more frequent collections for large heaps.
+
+**Performance overhead.** The load barrier is 2-3x more expensive than on 64-bit. This results in a 2-3% throughput reduction for reference-heavy workloads.
+
+**Implementation complexity.** The header-based forwarding mechanism is more complex than colored pointers. The atomicity requirements for forwarding installation add complexity.
+
+**Mark-compact mode.** The mark-compact mode has longer pauses (10-50 ms) compared to concurrent relocation. This may not be suitable for latency-sensitive applications.
+
+### 6.12 Representation and Cost Model
+
+**Header size.** 16 bytes (vs. 24 bytes on 64-bit). Smaller headers reduce memory overhead but limit the size of objects (max 64 KB per object; larger objects use humongous regions).
+
+**Mark bitmap.** Same as 64-bit: 0.78% of heap.
+
+**Forwarding cache.** Per-thread, ~1 KB per thread. For 100 threads: ~100 KB.
+
+**Traversal cost.** Load barrier: O(1) fast path, O(CACHE_SIZE) with cache. Write barrier: O(1) fast path.
+
+**Modification cost.** Forwarding installation: O(1) with atomic CAS.
+
+**Memory complexity.** O(|heap| · 1% + |threads| · 1 KB).
+
+**Construction cost.** Same as 64-bit.
+
+---
+
+# Deoptimization Subsystem — Complete Design Document (v1)
+
+## 0. Document Control and Design Scope
+
+**Component:** Deoptimization Subsystem (Region and Effect-Based)
+
+**Version:** 1.0
+
+**Role:** Selective invalidation and state reconstruction. When a speculative assumption is violated in a compiled function, this subsystem deoptimizes only that function (and its inlined descendants), preserving the compiled code of all other functions. Uses the effect-typed IR's region and effect tracking to scope the deoptimization precisely.
+
+**Design Status:** Complete specification.
+
+**Scope:** This document defines the region model, effect tracking, deoptimization scope determination, state reconstruction algorithm, code invalidation strategy, continuation mechanism, integration with tiered compilation, and validity invariants. It does not define:
+- The speculative optimization system (produces the assumptions that may be violated)
+- The tiered compilation system (T0/T1/T2; consumes deoptimization requests)
+- The ET-SoN IR (provides the effect and region model)
+- The GC (provides safepoints for deoptimization)
+
+**Normative References:**
+- Click, C. and Rose, J. "Speedup of Java Programs Using the HotSpot VM" (tiered deoptimization)
+- Würtz, S. et al. "Deoptimization in GraalVM" (region-based deoptimization)
+- Standard JIT literature on speculative optimization and deoptimization
+
+**Known Limitations:**
+- Cross-function inlining invalidation is complex and partially specified
+- Concurrent deoptimization (multiple threads deoptimizing simultaneously) is partially specified
+- Exact cost model for deoptimization is approximate
+
+---
+
+## 1. Goals, Non-Goals, and Constraints
+
+### Goals
+
+1. Deoptimize only the function (region) that violated a speculative assumption, preserving compiled code for all other functions.
+2. Use the effect-typed IR's region and effect tracking to precisely scope the deoptimization.
+3. Reconstruct the source-level state for the deoptimized function and its inlined descendants.
+4. Continue execution in a lower tier (T1 or T0) for the deoptimized function while keeping higher-tier code for other functions.
+5. Handle inlining: if a deoptimized function was inlined into a caller, invalidate only the inlined portion, not the entire caller.
+6. Maintain correctness: the deoptimized execution must produce the same observable behavior as the speculative execution would have.
+7. Minimize deoptimization overhead: fast state reconstruction, minimal code invalidation.
+
+### Non-Goals
+
+1. Deoptimize the entire program (only the affected region).
+2. Preserve compiled code that depends on the deoptimized function's speculative assumptions (callers that inlined it must be patched).
+3. Support deoptimization of native code (only JIT-compiled code).
+4. Provide zero-overhead deoptimization (deoptimization is inherently expensive).
+
+### Constraints
+
+- Deoptimization pause time: ≤ 10 ms for typical functions (state reconstruction + code invalidation).
+- Code invalidation must be precise: only invalidate the deoptimized function and its inlined descendants.
+- State reconstruction must be complete: all live variables at the deoptimization point must be correctly mapped to source-level state.
+- The deoptimized function must be recompiled or interpreted immediately (no lazy deoptimization).
+- Deoptimization must be thread-safe: multiple threads can deoptimize simultaneously without corrupting state.
+
+---
+
+## 6. Deoptimization Subsystem
+
+### 6.1 Purpose and Domain
+
+The Deoptimization Subsystem handles the case where a speculative assumption made during compilation is violated at runtime. Its purpose is to:
+
+1. Detect the violation (via guard checks inserted by the compiler).
+2. Determine the scope of deoptimization (which function, which inlined portions).
+3. Reconstruct the source-level state at the deoptimization point.
+4. Invalidate the compiled code for the affected region.
+5. Transfer execution to a lower tier (T1 or T0) for the deoptimized function.
+6. Allow execution to continue in the lower tier while preserving compiled code for unaffected functions.
+
+The subsystem uses the **region model** from the ET-SoN IR to define the scope of deoptimization, and the **effect model** to track which effects have been produced by the deoptimized region.
+
+### 6.2 Mathematical Specification
+
+| Requirement | Specification |
+|---|---|
+| **Domain** | (F, S, A): a compiled function F, the current machine state S, and the violated assumption A. |
+| **Codomain** | (S', T): the reconstructed source-level state S' and the target tier T for continuation. |
+| **Definitions** | R: region (function + inlined descendants). E: effect set (state tokens, memory effects, etc.). Deopt: deoptimization function. Invalidate: code invalidation function. Reconstruct: state reconstruction function. |
+| **Preconditions** | The assumption A has been violated. The function F is compiled in tier T_n (n > 0). The machine state S is at a deoptimization point (safepoint). |
+| **Postconditions** | The source-level state S' is correctly reconstructed. The compiled code for region R is invalidated. Execution continues in tier T_{n-1} (or T0 if n=1). All other compiled code remains valid. |
+| **Invariants** | Region isolation, effect consistency, state reconstruction correctness, code invalidation precision, continuation correctness. |
+| **Relations** | Region-to-function mapping (→_func), effect-to-state mapping (→_state), deoptimization scope (→_scope). |
+| **Failure behavior** | If state reconstruction fails (e.g., missing deopt metadata), raise an InternalCompilerError. If code invalidation fails, raise an InternalCompilerError. |
+| **Complexity** | Deoptimization: O(|inlined functions| · |live vars| + |code to invalidate|). |
+| **Correctness** | ⟦F⟧_Tn under assumption A = ⟦Deopt(F, S, A)⟧_Tn-1. The deoptimized execution produces the same observable behavior as the speculative execution would have. |
+
+### 6.3 Region Model
+
+**Region definition.** A region is a function and all functions that have been inlined into it. Formally:
+
+```
+Region = {
+    root_function: Function,           // The function that was compiled
+    inlined_functions: [InlinedCall],  // Functions inlined into the root
+    deopt_points: [DeoptPoint],        // Safepoints where deoptimization can occur
+}
+
+InlinedCall = {
+    callee: Function,                  // The inlined function
+    call_site: PC,                     // The PC in the caller where the call was inlined
+    deopt_metadata: DeoptMetadata,     // Metadata for reconstructing state at this inlined call
+}
+```
+
+**Region scope.** When a deoptimization is triggered at a deopt point within an inlined function, the deoptimization scope is:
+- The inlined function itself.
+- All functions inlined into the inlined function (transitively).
+- The portion of the caller that contains the inlined code (not the entire caller).
+
+**Region isolation.** The key property of the region model is that deoptimization is isolated to the region. Other functions' compiled code is not affected unless they directly depend on the deoptimized region's speculative assumptions.
+
+### 6.4 Effect Tracking
+
+**Effect model.** The ET-SoN IR tracks effects via state tokens and region classes. Each effectful operation has:
+- A state token (representing the memory/synchronization state).
+- An effect kind (MemRead, MemWrite, Alloc, Call, Trap, Barrier).
+- A region class (for memory disambiguation).
+
+**Effect tracking during execution.** As the compiled code executes, it produces effects:
+- Memory writes modify the heap.
+- Allocations create new objects.
+- Calls may produce arbitrary effects (depending on the callee).
+- State tokens are threaded through effectful operations.
+
+**Effect snapshot at deoptimization.** When deoptimization is triggered, the current effect state is captured:
+- The current heap state (all objects and their references).
+- The current state tokens (for each region class).
+- The current call stack (for reconstructing the execution context).
+
+**Effect consistency.** The deoptimized execution must produce the same effects as the speculative execution would have. This is ensured by:
+- Reconstructing the source-level state (variables, call stack) at the deoptimization point.
+- Continuing execution in the lower tier from that point.
+- The lower tier produces the same effects (by definition, since it implements the source semantics).
+
+### 6.5 Deoptimization Scope Determination
+
+**Scope determination algorithm.** When a guard check fails at a deopt point:
+
+```
+determine_scope(deopt_point) -> Region:
+    // Find the innermost inlined function containing the deopt point
+    inlined_func = find_innermost_inlined(deopt_point)
+    
+    // The scope is the inlined function and all its inlined descendants
+    scope = {
+        root: inlined_func,
+        inlined: find_all_inlined_descendants(inlined_func),
+        affected_caller_portion: find_caller_portion(inlined_func),
+    }
+    
+    return scope
+```
+
+**Inlining handling.** If the deoptimized function was inlined into a caller:
+- The inlined portion of the caller is invalidated (replaced with a call to the lower-tier version).
+- The rest of the caller's compiled code remains valid.
+- If the caller has multiple inlined calls to the same function, only the affected call site is patched.
+
+**Example.** Suppose function `A` inlines `B` at line 10, and `B` inlines `C` at line 5. If a deoptimization is triggered in `C`:
+- The scope is `C` (and any functions inlined into `C`).
+- The inlined portion of `B` that contains `C` is invalidated (replaced with a call to `C`'s lower-tier version).
+- The rest of `B`'s compiled code remains valid.
+- The inlined portion of `A` that contains `B` remains valid (it just calls `B`, which now calls `C`'s lower-tier version).
+
+### 6.6 State Reconstruction
+
+**State reconstruction algorithm.** The state reconstruction algorithm maps the current machine state (registers, stack, heap) to the source-level state (variables, call stack) at the deoptimization point.
+
+```
+reconstruct_state(deopt_point, machine_state) -> SourceState:
+    // Get the deoptimization metadata for this point
+    metadata = deopt_point.deopt_metadata
+    
+    // Reconstruct the call stack
+    call_stack = []
+    for frame in metadata.frames:
+        source_frame = SourceFrame {
+            function: frame.function,
+            pc: frame.source_pc,
+            variables: {},
+        }
+        
+        // Reconstruct each live variable
+        for var in frame.live_variables:
+            location = metadata.var_location(var)
+            value = extract_value(machine_state, location)
+            source_frame.variables[var] = value
+        
+        call_stack.push(source_frame)
+    
+    return SourceState {
+        call_stack: call_stack,
+        heap: machine_state.heap,  // heap is shared
+    }
+```
+
+**Deoptimization metadata.** For each deopt point, the compiler generates metadata describing how to reconstruct the source-level state:
+
+```
+DeoptMetadata = {
+    deopt_point_id: u32,               // Unique identifier for this deopt point
+    frames: [FrameMetadata],           // Metadata for each frame (including inlined frames)
+}
+
+FrameMetadata = {
+    function: Function,                // The function (or inlined function)
+    source_pc: PC,                     // The source-level PC
+    live_variables: [Variable],        // Variables live at this point
+    var_locations: Map<Variable, Location>,  // Where each variable lives
+}
+
+Location = 
+    | Register(phys_reg)               // Variable is in a physical register
+    | Stack(offset)                    // Variable is at a stack offset
+    | Const(value)                     // Variable has a compile-time constant value
+    | Materialized(insn_seq)           // Variable must be computed by executing instructions
+    | Piece(locations...)              // Variable is split across multiple locations
+```
+
+**Materialized values.** Some variables may not be directly available in registers or stack slots (e.g., they were optimized away or computed on-the-fly). In this case, the deopt metadata includes a sequence of instructions to compute the value:
+
+```
+Materialized(insn_seq) = {
+    instructions: [Instruction],       // Instructions to compute the value
+    result_reg: phys_reg,              // The register where the result will be
+}
+```
+
+The deoptimization runtime executes these instructions to materialize the value.
+
+### 6.7 Code Invalidation
+
+**Code invalidation strategy.** The code invalidation strategy is precise: only invalidate the compiled code for the deoptimized region.
+
+**Invalidation algorithm.**
+
+```
+invalidate_code(scope: Region):
+    // Invalidate the root function's compiled code
+    root_code = scope.root.compiled_code
+    if root_code != null:
+        mark_code_invalid(root_code)
+        root_code.compiled_code = null
+    
+    // Invalidate all inlined functions' compiled code
+    for inlined in scope.inlined_functions:
+        inlined_code = inlined.callee.compiled_code
+        if inlined_code != null:
+            mark_code_invalid(inlined_code)
+            inlined_code.compiled_code = null
+    
+    // Patch the caller's inlined portion
+    if scope.affected_caller_portion != null:
+        patch_caller(scope.affected_caller_portion)
+```
+
+**Marking code as invalid.** Compiled code is marked as invalid by setting a flag in the code header:
+
+```
+struct CompiledCode {
+    function: Function,
+    code_ptr: pointer,                 // Pointer to the compiled machine code
     code_size: u32,
-    code_ptr_rx: *u8,       // Pointer to the RX view in the Code Pool
-    region_count: u16,
-    regions: [RegionDescriptor], // Entry offsets, deopt targets
-    safepoint_count: u16,
-    safepoints: [SafepointRecord], // PC offsets, register maps, stack maps
-    dependencies: [AOSS_Dependency], // LayoutIDs, Call targets this code relies on
-    state: enum (Active, DeoptPending, Zombie)
+    is_valid: bool,                    // Flag indicating if the code is valid
+    tier: u8,                          // The compilation tier (T0, T1, T2)
+    deopt_points: [DeoptPoint],        // Deoptimization points in this code
+}
+
+mark_code_invalid(code: CompiledCode):
+    code.is_valid = false
+    // Optionally: unmap the code memory to reclaim space
+```
+
+**Patching the caller.** If the deoptimized function was inlined into a caller, the caller's inlined portion must be patched to call the lower-tier version instead:
+
+```
+patch_caller(caller_portion: InlinedCall):
+    // Replace the inlined code with a call to the lower-tier version
+    callee_lower_tier = caller_portion.callee.get_lower_tier_code()
+    
+    // Emit a call instruction at the call site
+    emit_call(caller_portion.call_site, callee_lower_tier)
+    
+    // Optionally: recompile the caller without inlining the deoptimized function
+    // (This is a more aggressive optimization, deferred for now)
+```
+
+**Thread safety.** Code invalidation must be thread-safe. If multiple threads are executing the same compiled code, they must all see the invalidation. This is achieved by:
+- Using atomic operations to set the `is_valid` flag.
+- Ensuring that all threads check the flag at safepoints.
+- If a thread is executing invalid code, it will deoptimize at the next safepoint.
+
+### 6.8 Continuation Mechanism
+
+**Continuation algorithm.** After state reconstruction and code invalidation, execution continues in the lower tier:
+
+```
+continue_execution(source_state: SourceState, target_tier: u8):
+    // Get the lower-tier code for the innermost function
+    innermost_func = source_state.call_stack.top().function
+    lower_tier_code = innermost_func.get_code(target_tier)
+    
+    if lower_tier_code == null:
+        // Compile the function in the lower tier
+        lower_tier_code = compile(innermost_func, target_tier)
+        innermost_func.set_code(target_tier, lower_tier_code)
+    
+    // Set up the machine state for the lower-tier code
+    machine_state = setup_machine_state(source_state, lower_tier_code)
+    
+    // Jump to the lower-tier code
+    jump(lower_tier_code.entry_point, machine_state)
+```
+
+**Tier selection.** The target tier is determined by:
+- If the current tier is T2, deoptimize to T1.
+- If the current tier is T1, deoptimize to T0 (interpreter).
+- If the current tier is T0, this is an error (T0 should not deoptimize).
+
+**Machine state setup.** The machine state is set up to match the lower-tier code's expectations:
+- Registers are loaded with the reconstructed variable values.
+- The stack is set up with the reconstructed call stack.
+- The PC is set to the deoptimization target in the lower-tier code.
+
+### 6.9 Integration with Tiered Compilation
+
+**Tier transitions.** The deoptimization subsystem integrates with the tiered compilation system:
+
+- **T2 → T1 deoptimization:** When a T2-compiled function violates a speculative assumption, it deoptimizes to T1. The T1 code is less optimized but does not make the same speculative assumptions.
+- **T1 → T0 deoptimization:** When a T1-compiled function encounters an error (e.g., a type mismatch), it deoptimizes to T0 (the interpreter). The interpreter is the most general but slowest tier.
+- **Re-compilation:** After deoptimization, the function may be re-compiled in a higher tier if it becomes hot again. The profiling data from the lower tier is used to guide the re-compilation.
+
+**Profiling data preservation.** When a function is deoptimized, the profiling data collected by the higher tier is preserved and passed to the lower tier. This allows the lower tier to make better decisions (e.g., which branches are hot, which types are common).
+
+**Deoptimization counters.** Each function has a deoptimization counter that tracks how many times it has been deoptimized. If a function is deoptimized too many times (e.g., > 10), the compiler may disable speculative optimizations for that function to avoid repeated deoptimizations.
+
+### 6.10 Validity Invariants
+
+Valid_Deopt(F, S, A) holds iff all of the following hold:
+
+**1. Region isolation.**
+- The deoptimization scope is precisely the region containing the deopt point.
+- No other functions' compiled code is invalidated (unless they directly depend on the deoptimized region).
+- The deoptimized function's callers are patched correctly (if they inlined the deoptimized function).
+
+**2. Effect consistency.**
+- The deoptimized execution produces the same effects as the speculative execution would have.
+- The heap state is consistent before and after deoptimization.
+- State tokens are correctly threaded through the deoptimized execution.
+
+**3. State reconstruction correctness.**
+- All live variables at the deoptimization point are correctly reconstructed.
+- The call stack is correctly reconstructed (including inlined frames).
+- Materialized values are correctly computed.
+
+**4. Code invalidation precision.**
+- Only the deoptimized region's compiled code is invalidated.
+- The invalidation is atomic (all threads see the invalidation simultaneously).
+- The invalidated code is not executed by any thread after invalidation.
+
+**5. Continuation correctness.**
+- Execution continues in the correct lower tier.
+- The machine state is correctly set up for the lower-tier code.
+- The lower-tier code produces the same observable behavior as the speculative execution would have.
+
+**6. Thread safety.**
+- Multiple threads can deoptimize simultaneously without corrupting state.
+- Code invalidation is visible to all threads.
+- State reconstruction is thread-local (no shared mutable state).
+
+**7. Performance bounds.**
+- Deoptimization pause time is ≤ 10 ms for typical functions.
+- Code invalidation cost is proportional to the size of the deoptimized region.
+- State reconstruction cost is proportional to the number of live variables.
+
+**8. Correctness under re-compilation.**
+- If the deoptimized function is re-compiled in a higher tier, the new compilation does not make the same speculative assumptions (or makes them with better evidence).
+- The deoptimization counter is correctly incremented.
+
+### 6.11 Representation and Cost Model
+
+**Region representation.** Regions are represented as a tree structure: the root function, with children for each inlined function. Each node in the tree has deoptimization metadata.
+
+**Effect representation.** Effects are represented as state tokens (from the ET-SoN IR). The current effect state is captured at the deoptimization point.
+
+**Deoptimization metadata representation.** Deoptimization metadata is stored in a side table, indexed by deopt point ID. Each entry contains the frame metadata and variable locations.
+
+**Compiled code representation.** Compiled code is represented as a `CompiledCode` structure (see §6.7). The `is_valid` flag is used for invalidation.
+
+**Traversal cost.** Determining the deoptimization scope: O(|inlined functions|). State reconstruction: O(|live vars|). Code invalidation: O(|code to invalidate|). Continuation: O(1).
+
+**Modification cost.** Code invalidation: O(1) per code block (set the `is_valid` flag). Patching the caller: O(1) per call site (emit a call instruction).
+
+**Memory complexity.** O(|deopt points| · metadata_size + |compiled code| · code_header_size).
+
+**Construction cost.** Deoptimization metadata generation: O(|functions| · |live vars|) at compile time. Deoptimization at runtime: O(|inlined functions| · |live vars| + |code to invalidate|).
+
+---
+# Concurrent Deoptimization Subsystem — Complete Design Document (v1)
+
+## 0. Document Control and Design Scope
+
+**Component:** Concurrent Deoptimization Subsystem (extension to Deoptimization Subsystem)
+
+**Version:** 1.0
+
+**Role:** Coordinates deoptimization when multiple mutator threads simultaneously violate speculative assumptions in the same or related compiled code. Ensures that concurrent deoptimization requests are handled correctly without data races, double-invalidation, missed invalidations, or threads executing invalidated code.
+
+**Design Status:** Complete specification.
+
+**Scope:** This document defines the thread-local deopt state, the deopt request protocol, safepoint coordination, concurrent invalidation protocol, per-thread state reconstruction, re-compilation coordination, handling of shared inlined functions, memory ordering requirements, edge cases (FFI, blocked threads), validity invariants, and cost model. It does not define:
+- The single-thread deoptimization algorithm (already specified; this extends it)
+- The safepoint mechanism itself (already specified; this consumes it)
+- The tiered compilation system (consumes re-compilation requests)
+- The GC (interacts via safepoints but does not coordinate with deopt)
+
+**Normative References:**
+- Adl-Tabatabai, A.-R. et al. "Safe and Efficient Fine-Grained STM Interfacing through Object-based Safepoints" (safepoint coordination)
+- Click, C. and Rose, J. "Speedup of Java Programs Using the HotSpot VM" (concurrent deopt in HotSpot)
+- Boehm, H. "Threads and Signals" (thread interruption semantics)
+- C11/C++11 memory model (for memory ordering primitives)
+
+**Known Limitations:**
+- Asynchronous deoptimization (deopt triggered by an external signal, not a guard failure) is not covered.
+- Deoptimization of threads in non-cooperative native code is partially specified (relies on FFI return-to-safepoint).
+- Cross-process deoptimization is out of scope.
+
+---
+
+## 1. Goals, Non-Goals, and Constraints
+
+### Goals
+
+1. Allow multiple mutator threads to trigger deoptimization concurrently without serializing on a global lock for the common case.
+2. Ensure that no thread ever executes code that has been invalidated by another thread's deoptimization.
+3. Ensure that code invalidation is idempotent: multiple concurrent requests to invalidate the same code result in exactly one invalidation.
+4. Ensure that re-compilation is coordinated: only one thread compiles a given function for a given tier at a time.
+5. Handle the case where the same function is inlined into multiple callers and different threads deoptimize different inlined instances.
+6. Maintain bounded pause times: no single thread's deoptimization should block other threads for more than the single-thread deopt pause budget.
+7. Preserve all correctness invariants of the single-thread deoptimization subsystem under concurrent execution.
+
+### Non-Goals
+
+1. Zero-pause concurrent deoptimization (some coordination is required).
+2. Deoptimization of threads executing non-cooperative native code without returning to a safepoint.
+3. Cross-process deoptimization.
+4. Asynchronous deoptimization triggered by external signals.
+
+### Constraints
+
+- Per-thread deopt overhead (when no deopt is pending): ≤ 1 cycle at each safepoint (a single flag check).
+- Deopt coordination overhead: O(|threads deopting|) for the coordinator, O(1) for each participating thread.
+- Maximum pause time for any single thread during concurrent deopt: ≤ 15 ms (slightly above single-thread budget due to coordination).
+- No global lock held across the entire deopt process (only short critical sections for state updates).
+- Memory ordering: all invalidation and state updates use release-acquire semantics or stronger.
+
+---
+
+## 6. Concurrent Deoptimization Subsystem
+
+### 6.1 Purpose and Domain
+
+The Concurrent Deoptimization Subsystem extends the single-thread deoptimization algorithm to handle the case where multiple mutator threads simultaneously trigger deoptimization. The key challenges are:
+
+1. **Race between invalidation and execution**: Thread A invalidates code that thread B is about to execute.
+2. **Double invalidation**: Two threads request invalidation of the same code.
+3. **Shared inlined functions**: Function F is inlined into both G and H; thread 1 deopts F-in-G, thread 2 deopts F-in-H.
+4. **Re-compilation races**: Two threads both try to recompile the same function.
+5. **Safepoint coordination**: Threads must be parked at safepoints during critical phases of deopt.
+
+The design uses a **per-thread deopt state** model with a **deopt coordinator** thread (which may be one of the mutator threads or a dedicated GC/runtime thread). Each thread handles its own state reconstruction; coordination is only needed for code invalidation and re-compilation.
+
+### 6.2 Mathematical Specification
+
+| Requirement | Specification |
+|---|---|
+| **Domain** | (T, S, R): a set of threads T, each with machine state S_t, and a set of deopt requests R. |
+| **Codomain** | (S', C'): updated machine states S'_t for each thread, and updated code state C'. |
+| **Definitions** | Deopt: concurrent deoptimization function. Coord: coordinator function. Inv: invalidation function. Recomp: re-compilation function. |
+| **Preconditions** | Each thread t ∈ T is at a safepoint or will reach one within bounded time. All deopt requests are well-formed. |
+| **Postconditions** | For each thread t, S'_t is correctly reconstructed. Code state C' reflects all invalidations exactly once. All threads resume in the correct lower tier. |
+| **Invariants** | No-thread-executes-invalid-code, invalidation-idempotence, re-compilation-serializability, safepoint-consistency, memory-ordering-correctness. |
+| **Relations** | Thread-to-request (→_req), request-to-code (→_code), invalidation-visibility (→_vis). |
+| **Failure behavior** | If a thread cannot reach a safepoint within bounded time, raise a DeoptTimeout error. If re-compilation fails, fall back to the next lower tier. |
+| **Complexity** | Coordination: O(|threads deopting|). Per-thread work: O(|live vars| + |code to invalidate|). Total: O(|threads| · |live vars| + |code|). |
+| **Correctness** | For all reachable concurrent executions, the observable behavior matches a sequential execution where deopts happen one at a time in some order. |
+
+### 6.3 Thread-Local Deopt State
+
+Each mutator thread maintains a thread-local deopt state:
+
+```
+struct ThreadDeoptState {
+    // Current state
+    state: DeoptThreadState,           // RUNNING | DEOPT_REQUESTED | DEOPT_PARKED | DEOPT_IN_PROGRESS | DEOPT_DONE
+    
+    // Pending deopt request (set by this thread when a guard fails)
+    pending_request: Option<DeoptRequest>,
+    
+    // Set by the coordinator when this thread should park
+    park_flag: Atomic<bool>,
+    
+    // Set by the coordinator when invalidation is complete and this thread can resume
+    resume_flag: Atomic<bool>,
+    
+    // The result of deoptimization (filled in by this thread during state reconstruction)
+    deopt_result: Option<DeoptResult>,
+    
+    // Thread-local deopt counter (for statistics and throttling)
+    deopt_count: u32,
+}
+
+enum DeoptThreadState {
+    RUNNING,              // Normal execution
+    DEOPT_REQUESTED,      // Guard failed, request recorded
+    DEOPT_PARKED,         // Parked at safepoint, waiting for coordinator
+    DEOPT_IN_PROGRESS,    // Performing state reconstruction
+    DEOPT_DONE,           // Ready to resume in lower tier
 }
 ```
 
-#### 4.2 In the Code Pool (RX)
-```text
-[ Executable Instructions ]
-    - Prologue / Stack allocation
-    - Region 1 (Loop A)
-    - Region 2 (Straight-line)
-    - Epilogue / Return
-[ Read-Only Constant Pool ]
-    - 64-bit float literals, large integer immediates, method pointers
+**Memory ordering.** The `park_flag` and `resume_flag` use release-acquire semantics:
+- The coordinator writes `park_flag` with release semantics.
+- The mutator reads `park_flag` with acquire semantics.
+- The coordinator writes `resume_flag` with release semantics.
+- The mutator reads `resume_flag` with acquire semantics.
+
+This ensures that all writes performed by the coordinator before setting `resume_flag` are visible to the mutator after it reads the flag.
+
+### 6.4 Deopt Request Protocol
+
+When a guard check fails, the thread executes the following protocol:
+
+```
+guard_failed(deopt_point, violated_assumption):
+    // Step 1: Record the deopt request in thread-local state
+    thread_state.pending_request = Some(DeoptRequest {
+        deopt_point: deopt_point,
+        violated_assumption: violated_assumption,
+        machine_state: capture_machine_state(),
+        timestamp: now(),
+    })
+    thread_state.state = DEOPT_REQUESTED
+    
+    // Step 2: Signal the deopt coordinator
+    deopt_coordinator.enqueue_request(current_thread_id, thread_state.pending_request)
+    
+    // Step 3: Park at the current safepoint
+    thread_state.park_flag.wait_until_true()  // blocks until coordinator sets the flag
+    
+    // Step 4: Perform state reconstruction (see §6.7)
+    thread_state.state = DEOPT_IN_PROGRESS
+    result = reconstruct_state(deopt_point, machine_state)
+    thread_state.deopt_result = Some(result)
+    thread_state.state = DEOPT_DONE
+    
+    // Step 5: Wait for resume signal
+    thread_state.resume_flag.wait_until_true()
+    
+    // Step 6: Resume in lower tier
+    continue_execution(result.source_state, result.target_tier)
 ```
 
----
+**Non-blocking fast path.** If no deopt is pending, the safepoint check is a single atomic load of `park_flag`:
 
-### 5. Allocation & Fragmentation Management
-The Code Pool is notorious for fragmenting as methods are compiled, deoptimized, and recompiled.
-
-#### 5.1 Compiler Thread-Local Allocation Buffers (TLABs)
-To prevent lock contention when multiple compiler threads (T2/T3) emit code simultaneously:
-1. The Code Pool maintains a global free-list of large memory chunks (e.g., 256KB).
-2. When a compiler thread needs space, it claims a chunk (TLAB) via an atomic pointer bump.
-3. The thread allocates its CodeBlob locally within its TLAB without locks.
-4. If the TLAB is exhausted, it requests a new one.
-
-#### 5.2 Size-Segregated Arenas
-To prevent a massive T3 method from fragmenting the space needed for tiny FFI stubs, the Code Pool is divided into size classes:
-- **Arena S (Small)**: Stubs, trampolines, T1a stencils (< 1KB).
-- **Arena M (Medium)**: T1c/T2 methods (1KB - 16KB).
-- **Arena L (Large)**: T3/T4 highly optimized methods (> 16KB).
-Allocation only occurs within the appropriate arena.
-
----
-
-### 6. Region-Based Deopt & Patching Protocol
-How do we patch a Region's entry point to jump to a Deopt Stub without violating W^X or causing race conditions?
-
-#### 6.1 The Patchable NOP Sled
-When T2/T3 emits a Region, the first 4 to 16 bytes of the Region's entry point are reserved as a **Patchable NOP Sled** (e.g., `NOP; NOP; NOP; NOP` on x86, or `BTI` / `NOP` equivalents on AArch64).
-
-#### 6.2 Safepoint-Synchronized Patching
-When the AOSS DependencyMap detects a global invalidation (e.g., a LayoutID transition):
-1. The JIT marks the `CodeBlobHeader` as `DeoptPending`.
-2. The JIT waits for the next **Global Safepoint** (where all mutator threads are paused).
-3. At the safepoint, the JIT uses the **RW View** of the Code Pool to overwrite the NOP sled with a `JMP deopt_stub`.
-4. The JIT flushes the ICache for that specific region.
-5. Mutator threads resume. Any thread that was about to enter the region now hits the `JMP` and deoptimizes safely.
-
-**CODE-INV-02**: Code patching *never* occurs while mutator threads are actively executing the patched region. Patching is strictly serialized with global safepoints.
-
----
-
-### 7. Lifecycle & Reclamation (Sweeping)
-When a method deoptimizes, its CodeBlob cannot be immediately freed because threads might still have return addresses pointing into it (the "Zombie" problem).
-
-#### 7.1 State Machine
-1. **Active**: Executable, referenced by AOSS dependencies.
-2. **DeoptPending**: Dependencies invalidated. Entry points patched to deopt stubs.
-3. **Zombie**: All mutator threads have passed through a safepoint since the patch. No thread can possibly be executing the old code.
-4. **Reclaimable**: Ready to be freed.
-
-#### 7.2 The Sweeper
-During a GC safepoint, the GC and JIT coordinate:
-1. The JIT scans all thread stacks. If a return address falls within a `DeoptPending` CodeBlob, the stack is rewritten to point to the T0 interpreter frame (or the code is kept alive).
-2. If no stack references a `DeoptPending` CodeBlob, it transitions to `Zombie`.
-3. The Sweeper reclaims the memory in the Code Pool and Metadata Pool.
-4. To prevent Code Pool fragmentation, the Sweeper can optionally perform **Code Compaction** (moving live CodeBlobs to defragment the RX heap), updating all internal pointers and stack maps atomically during the safepoint.
-
----
-
-### 8. CODE-1 Invariants
-
-| ID | Invariant |
-| :--- | :--- |
-| **CODE-INV-01** | **W^X Strictness**: No page in the Code/Stub Pool is ever simultaneously writable and executable. Dual-mapping or OS-specific JIT toggles are mandatory. |
-| **CODE-INV-02** | **Metadata Separation**: Safepoint maps, dependency records, and CodeBlob headers reside in the RW Metadata Pool, not the RX Code Pool. |
-| **CODE-INV-03** | **ICache Coherency**: Any write to the Code/Stub Pool via the RW view must be followed by an architecture-specific ICache invalidation before the RX view is exposed to mutators. |
-| **CODE-INV-04** | **Safepoint Patching**: Instruction patching for Region Deopt only occurs during a global safepoint. Mutators never observe a partially patched instruction stream. |
-| **CODE-INV-05** | **Zombie Safety**: A CodeBlob's executable memory is never reclaimed until a full safepoint has occurred *after* its invalidation, guaranteeing no thread holds a stale return address. |
-| **CODE-INV-06** | **Lock-Free Allocation**: Compiler threads allocate Code Pool memory via TLABs without acquiring global mutexes. |
----
-
-## CONC-1: Concurrency & Lock-Free Compiler Structures
-**Version 1.1 · Adds the dependency add-vs-invalidate handshake**
-
-### 1. Fundamental Design Philosophy
-In a multi-tier JIT with a concurrent GC, compiler threads (T2/T3/T4) and mutator threads must operate concurrently without blocking each other. Global mutexes on the compilation or execution hot paths are strictly forbidden. We achieve this through **lock-free data structures**, **Read-Copy-Update (RCU)** patterns, and **Epoch-Based Reclamation (EBR)** tied to the GC's safepoint protocol.
-
-### 2. Core Lock-Free Data Structures
-
-#### 2.1 AOSS DependencyMap (RCU-Based)
-The DependencyMap tracks which compiled Regions depend on which `CanonicalLayoutHandle`s. 
-- **Read Path (Compilers/Invalidators)**: Reads are completely lock-free. We use an RCU (Read-Copy-Update) linked-list or hash-map per layout. Compilers traverse the list without acquiring locks.
-- **Write Path (Mutators/Shape Transitions)**: When a new dependency is added, the compiler allocates a new node, copies the existing list, and atomically swaps the head pointer using `memory_order_release`.
-- **Reclamation**: Old list nodes are not freed immediately. They are placed in a thread-local retirement queue. The concurrent GC's epoch-based reclamation (triggered at safepoints) safely frees these nodes once all compiler threads have passed the current epoch.
-
-#### 2.1.1 The Add-vs-Invalidate Handshake (Corrected Addition)
-
-The 1.0 RCU description leaves one race unspecified (finding CONC-1, resolved): a compiler thread adding a dependency to a layout's list while the runtime invalidates that layout. If the invalidator's traversal misses the concurrently added dependency, compiled code survives with an assumption the shape transition already violated. Missing the dependency is not a performance defect; it is unsoundness.
-
-The corrected protocol publishes additions through a per-layout seqlock and bounds invalidation by a retry loop, with a safepoint handshake as the escalation path:
-
-- **Per-layout sequence lock**: each CanonicalLayoutHandle's dependency list carries an even/odd sequence counter. A compiler thread adding a dependency: (1) reads the counter; (2) if odd, spins with a cpu-relax hint (an invalidation traversal or another publish is in progress); (3) installs the new node by Copy-on-Write of the list it observed; (4) publishes with a release increment of the counter to the next even value.
-- **Invalidator traversal**: the invalidator (shape transition handler) reads the counter (must be even, else spins briefly), records it, traverses the published list, and re-reads the counter. If the counter changed, the traversal overlapped a publication window and is retried. Because publishes use release ordering and the re-check uses acquire ordering, any dependency published before the invalidator's final re-read is visible to a completed traversal.
-- **Publication bound (soundness argument)**: a shape transition must not complete its invalidation step until one traversal finishes with an unchanged sequence counter. An add that started before the transition either published before the successful traversal (and is seen) or is still mid-publish (counter odd; invalidator spins or retries). An add that starts after the successful traversal targets the new layout generation and is rejected by the install-time generation check.
-- **Generation check on install**: a dependency records the layout generation it was compiled against. If the generation advanced between the compiler's read and its publish, the dependency is stale on arrival; the compiler discards it and re-derives from current state.
-- **Escalation to safepoint handshake (rare)**: if a layout's sequence counter is contended beyond a bounded spin count, the invalidator escalates to the thread-local handshake (section 3): compiler threads pause at their next safepoint flag check, the invalidator traverses quiescent lists, and compilers resume. This path is expected to be rare; its existence removes reliance on unbounded live-lock behavior.
-
-#### 2.2 Inline Cache (IC) Stub Array (Atomic Pointers)
-ICs are shared across different compiled versions of a method.
-- **Structure**: The IC Stub Array holds atomic pointers to the current fast-path stub.
-- **Update Protocol**: When a mutator thread experiences an IC miss, it constructs a new stub in the Stub Pool. It then publishes the new stub using an atomic store (`atomic_store_explicit(..., memory_order_release)`). 
-- **Read Protocol**: Compiled code loads the stub pointer using `atomic_load_explicit(..., memory_order_acquire)`. This guarantees that mutators never see a partially constructed stub, and no locks are held during execution.
-
-#### 2.3 Layout Registry (Sharded Concurrent Hash Table)
-The registry interns layout descriptors to produce `CanonicalLayoutHandle`s.
-- **Mechanism**: A sharded lock-free hash table. The shard is selected by hashing the layout description. 
-- **Collision Resolution**: If two threads attempt to intern the same layout simultaneously, one wins the atomic CAS (Compare-And-Swap) on the shard bucket. The loser discards its duplicate descriptor and uses the winner's handle.
-
-#### 2.4 Code Cache Global Allocator (TLABs + Lock-Free Stack)
-- **Thread-Local Allocation Buffers (TLABs)**: Compiler threads allocate code bytes locally within their TLABs without any synchronization.
-- **Global Free-List**: When a TLAB is exhausted, the compiler thread requests a new large chunk (e.g., 256KB) from the global free-list. The free-list is implemented as a lock-free Treiber stack. Push and pop operations use atomic CAS, ensuring sub-microsecond allocation latency.
-
-### 3. Thread-Local Handshake & Safepoints
-Compiler threads cannot be ignored by the GC. If a compiler thread is allocating GC-managed metadata (like IC stubs), it must respect safepoints.
-- **Handshake Mechanism**: We use a thread-local flag (e.g., `ThreadLocalHandshake::requested`). The GC sets this flag globally. Compiler threads check this flag at safe points (e.g., between compiling methods, or after allocating large metadata blocks).
-- **Action**: If requested, the compiler thread pauses its work, flushes its local allocation buffers, and waits at a safepoint barrier until the GC finishes its phase.
-
-### 4. CONC-1 Invariants
-| ID | Invariant |
-|---|---|
-| **CONC-INV-01** | **No Global Mutexes on Hot Paths**: Neither mutator execution nor compiler IR traversal may acquire a global mutex. |
-| **CONC-INV-02** | **Atomic IC Publication**: IC stub pointers must be updated and read using atomic operations with appropriate memory ordering (release/acquire). |
-| **CONC-INV-03** | **Epoch-Based Reclamation**: Memory retired from lock-free structures (DependencyMap, ICs) must only be freed after a full GC epoch/safepoint has passed. |
-| **CONC-INV-04** | **Compiler Safepoint Compliance**: Compiler threads must respond to thread-local handshake requests and pause at safepoints when allocating GC-managed metadata. |
-| **CONC-INV-05** | **Lock-Free Code Allocation**: Code Pool TLAB exhaustion must be resolved via a lock-free global free-list, not a mutex. |
-| **CONC-INV-06** | **Invalidation Completeness**: A shape transition must not complete its invalidation step until one dependency traversal has finished with an unchanged per-layout sequence counter. A dependency installed before the transition started must either be visible to that traversal or force a retry. |
-| **CONC-INV-07** | **Stale Install Rejection**: A dependency publication that observes an advanced layout generation must be discarded by the compiler, never installed. |
-
----
-
-## DEBUG-1: Debugging & Profiling Tooling Interface (DWARF)
-**Version 1.0 · Core Execution Contract**
-
-### 1. Fundamental Design Philosophy
-With Adaptive Representation Selection (ARS), Region-Based Deoptimization, and Stencil T1, the physical state of the program diverges wildly from the source-level semantics. The JIT must dynamically generate and expose **DWARF 5** debug information and **JIT profiling markers** so that debuggers (GDB/LLDB) and profilers (perf, VTune) can function correctly without knowing the JIT's internal architecture.
-
-### 2. DWARF Generation Strategy
-DWARF is not written to disk; it is generated in memory and exposed via the GDB JIT Interface (`__jit_debug_descriptor`).
-
-#### 2.1 T0 (Interpreter)
-Standard, static DWARF is emitted for the interpreter loop. Virtual registers are mapped to the VM stack frame.
-
-#### 2.2 T1 (Stencil Baseline)
-Because T1 uses a fixed physical map (or simple location allocation), the mapping from VM registers to physical registers/stack slots is deterministic based on the stencil selected.
-- **Pre-computed Fragments**: At VM startup, we pre-compile DWARF `.debug_info` and `.debug_line` fragments for every stencil variant.
-- **Stitching**: When T1 emits code, it copies the corresponding DWARF fragments into the in-memory debug section, patching the PC ranges to match the generated code.
-
-#### 2.3 T2/T3 (Optimizing Tiers)
-The compiler generates DWARF dynamically during MIR emission.
-- **DWARF 5 Location Lists**: This is mandatory for ARS. A variable's physical location and representation change over its live range. 
-  - *Example*: Variable `v` is in `RAX` (I64) from PC `0x100-0x110`, then spilled to `[RSP+16]` (TAGGED) from `0x110-0x120`. The Location List explicitly maps these PC ranges to the physical locations and representations.
-- **DWARF Expressions**: For complex ARS transitions (e.g., a value that must be unboxed on the fly for the debugger), we emit DWARF expressions (e.g., `DW_OP_breg0`, `DW_OP_lit16`, `DW_OP_shr`, `DW_OP_stack_value`) that instruct the debugger how to reconstruct the source-level value from the physical state.
-
-### 3. Region-Based Deopt & DWARF
-When a Region's entry is patched with a `JMP deopt_stub`, the original physical bytes remain in the Code Pool.
-- **Original Code**: The DWARF for the original bytes remains perfectly valid. If a debugger sets a breakpoint inside the patched region, it will hit the `JMP`, deopt, and resume in T0.
-- **Deopt Stubs**: Deopt stubs are marked in DWARF as compiler-generated (no source line mapping). If the debugger steps into a deopt stub, it sees the runtime state reconstruction logic.
-
-### 4. Profiler Integration (perf / VTune)
-Profilers need to map physical PCs to method names and source lines.
-- **perf (Linux)**: The JIT maintains a `/tmp/perf-<pid>.map` file. Every time a `CodeBlob` is published, the JIT appends a line: `<start_addr> <size> <method_name>`.
-- **VTune (Intel)**: The JIT uses the Intel JIT Profiling API (`iJIT_NotifyEvent`) to register the method name, start address, size, and line number table upon publication.
-- **Invariant**: A profiler must never see an "unknown" PC for JIT-compiled code. All executable bytes must be registered.
-
-### 5. DEBUG-1 Invariants
-| ID | Invariant |
-|---|---|
-| **DEBUG-INV-01** | **Complete PC Coverage**: Every physical byte of executable code must have a valid DWARF mapping to a source location, or be explicitly marked as compiler-generated (e.g., deopt stubs, trampolines). |
-| **DEBUG-INV-02** | **ARS Location Accuracy**: DWARF Location Lists must accurately reflect the physical register/stack location and representation (TAGGED, I64, F64, REF_OFF) of every variable at every safepoint. |
-| **DEBUG-INV-03** | **Dynamic Registration**: All published CodeBlobs must be immediately registered with OS-level profiler interfaces (perf map, VTune API, GDB JIT descriptor). |
-| **DEBUG-INV-04** | **Deopt Transparency**: Breakpoints set in optimized code must safely trigger deoptimization and resume execution in T0 without corrupting the debugger's state. |
-
----
-
-## SIMD-1: Vectorization Strategy for Tagged Values
-**Version 1.1 · Retcon of SIMD-INV-01 and homogeneity-gated Strategy B**
-
-### 1. Fundamental Design Philosophy
-NaN-boxing is hostile to SIMD **for mixed or integer-tagged data**. The 1.0 philosophy ("we do not attempt to SIMD process tagged values directly") was too absolute, and it is retconned here (finding SIMD-RETCON, resolved; see also NUM-1).
-
-The decisive fact: NV-1 floating-point values are stored as **native IEEE-754 binary64 bits**. A float is not boxed in any sense that SIMD arithmetic can observe; its tag is its value. Consequently, homogeneous tagged-float SIMD arithmetic is bit-exact with unboxed SIMD arithmetic, subject only to reserved-space collision canonicalization (section 4). Direct SIMD math on **homogeneous tagged-float lanes** is therefore legal. Direct SIMD math on **integer lanes** is legal only through masked payload arithmetic with explicit overflow fallback (section 3.2), because the 0xFFFC tag occupies bits that participate in wrap-around. Direct SIMD math on **mixed or unknown** lanes remains prohibited.
-
-### 2. The NV-1 Float Advantage
-Recall from NV-1 that floating-point values are stored as **direct binary64 representations**. The "tag" for a float is simply its native IEEE-754 bits. The reserved tag space (`0xFFFC...`) is only used for integers, references, and special values.
-- **Crucial Insight**: If an array contains *only* floats, a SIMD load of 4x F64 (or 2x F64 on RV64) works natively. The bits are already in the correct format for the FPU. No unboxing is required for the float bits themselves!
-
-### 3. Vectorization Strategies
-
-#### 3.1 Strategy A: Structural Array Specialization (Primary Path)
-Driven by AOSS and the Profiler (PROF-1), the compiler proves an array is homogeneous.
-- **Mechanism**: The array's `CanonicalLayoutHandle` transitions from `Array<TAGGED>` to `Array<F64>` or `Array<I64>`.
-- **Physical Layout**: Elements are stored natively (8 bytes each, no tags). 
-- **Vectorization**: Standard Auto-Vectorization and SLP apply. The compiler emits `vmovupd` (x86) or `ldr q0` (AArch64) to load 4x/2x elements, performs SIMD math, and stores them back.
-- **Profitability**: This is the fastest path. It yields native C/C++ SIMD performance.
-
-#### 3.2 Strategy B: Direct Tagged SIMD (Retconned: Floats Free, Integers Masked)
-
-If the array remains `Array<TAGGED>`, SIMD is still available, with different rules per element kind.
-
-**B-F: Float lanes (zero-cost vectorization).** Because tagged floats are raw binary64 bits, a PACKED_TAGGED load (vmovupd of 4x64 into YMM, or 8x64 into ZMM) followed directly by vaddpd / vmulpd / vfmadd computes correct results for every non-colliding lane. The upper 16 bits of a valid float can never equal a reserved tag: an IEEE-754 value with an all-ones exponent is a NaN, and NV-1 canonicalizes colliding NaN patterns at the value boundary (NUM-1 section 1). After the math, if any lane's result bit pattern falls in the reserved tag region 0xFFFC-0xFFFF, a single masked blend replaces those lanes with the canonical NaN:
-
-```asm
-; YMM0, YMM1 = 4x tagged-f64 operands
-vaddpd      YMM2, YMM0, YMM1     ; Direct math on tagged float bits
-; Collision canonicalization (elidable when provably collision-free, section 4):
-vpsrld      YMM3, YMM2, 48       ; per-lane top 16 bits, replicated in dword view
-vpcmpud     k1, YMM3, [tag_hi_bounds], 5   ; k1 = lanes whose top16 is in 0xFFFC..0xFFFF
-vmovdqu32   YMM2{k1}, [canonical_nan_broadcast] ; blend canonical NaN into colliding lanes
 ```
-(AArch64 uses cmhi + bsl; RV64 vector uses vmsltu + vmerge. The canonicalization is one compare and one masked blend.)
-
-**B-I: Integer lanes (AVX-512 masked payload arithmetic).** Tagged integers are 0xFFFC + signed 48-bit payload. 8x64-bit tagged integers fit one ZMM register. The sequence is:
-
-1. **Load**: vmovupd 8x tagged words into ZMM0.
-2. **Extract**: vpandq ZMM1, ZMM0, [payload_mask] isolates the 48-bit payloads.
-3. **Compute**: vpaddq / vpsubq / vpmullq on the payloads.
-4. **Overflow check**: vpcmpq against the sign-extension pattern of bit 47 produces a mask of overflowed lanes; kortestw branches to the scalar boxing fallback for the whole vector if any lane overflowed.
-5. **Re-tag**: vporq ZMM0, ZMM1, [tag_0xFFFC_broadcast] re-applies 0xFFFC to all 8 lanes simultaneously.
-
-Cost: for add/subtract, the extract and re-tag are two extra 64-bit lane ops per vector plus one fused compare-branch. This is profitable only under the gating rules of section 3.4.
-
-**B-X: Mixed or unknown lanes are prohibited.** If profiling cannot establish homogeneity (section 3.4), Strategy B is not applied. There is no mixed-lane tagged SIMD.
-
-#### 3.2.1 PACKED_TAGGED as a First-Class Representation
-
-To let the register allocator keep tagged vectors in SIMD registers across loop iterations without scalar unboxing, PACKED_TAGGED is added as a first-class register representation in LLIR/MIR, alongside TAGGED, I64, F64, REF_OFF, REF_RAW:
-
-| Property | Value |
-|---|---|
-| Width | 128/256/512 bits (2/4/8 NV-1 lanes) |
-| Register class | Vector (XMM/YMM/ZMM) |
-| Lane domain | Homogeneous F64 or homogeneous I64 payloads; never mixed |
-| GC interaction | No references may live in a PACKED_TAGGED value; safepoint maps describe it as non-rooted |
-| Spill | Full vector spill/reload; no lane splitting |
-| Legal ops | Lane-wise FP/int arithmetic, blends, shuffles, lane extract/insert |
-| Illegal ops | Anything requiring per-lane tag interpretation (e.g. LOAD_FIELD on a lane) |
-
-ARS may promote TAGGED scalars into PACKED_TAGGED lanes when the SLP pass (section 3.3) proves lane homogeneity; demotion back to scalar TAGGED at observable boundaries applies the same canonicalization rules as scalar boxing.
-
-#### 3.3 Strategy C: Superword Level Parallelism (SLP)
-SLP packs independent scalar operations within a single basic block into SIMD instructions.
-- **Mechanism**: If ARS has unboxed scalars into FPRs/GPRs (e.g., `a = x + y; b = z + w;`), the MIR instruction scheduler and SLP pass pack `x, y, z, w` into a SIMD register, perform the adds, and unpack.
-- **Constraint**: SLP only operates on values that ARS has already committed to unboxed representations (I64, F64). It does not operate on TAGGED values.
-
-#### 3.4 Strategy B Profitability Gating (Required)
-
-Strategy B's guard and mask overhead is only amortized by real vector work. Ungated, it is slower than scalar execution on short loops (finding SIMD-1, resolved). Strategy B on Array<TAGGED> may be selected only when all of the following hold:
-
-1. **Trip count**: the loop's profiled iteration count (PROF-1 section 2, Memory/Vector domain) exceeds SIMD_TAGGED_MIN_TRIP (default 64), or the trip count is statically provable to exceed it.
-2. **Homogeneity**: the element profile for the accessed array proves at least 99.99% homogeneous lane domain (float or integer) across the profile window, with zero observed foreign-tag stores in the current window.
-3. **Body width**: the loop body contains at least two vectorizable lane operations, so guard overhead amortizes.
-4. **No interior serialization**: the loop must not contain per-element layout guards that would serialize the vector.
-
-Otherwise the compiler falls back to Strategy A (if AOSS can transition the layout) or to scalar unboxed loops (ARS). The gating decision and its inputs are recorded in region metadata so deopt reasoning can cite them.
-
-Strategy A (structural Array<F64>/Array<I64> specialization, NUM-1 section 3) has no such gate beyond standard vectorization profitability, because it carries no per-access tag cost.
-
-### 4. NaN Canonicalization in SIMD
-When SIMD floating-point math produces a NaN, the hardware may generate a NaN payload that collides with our reserved NV-1 tag space.
-- **Normalization Step**: Before storing a SIMD float result back to a `TAGGED` context (or an `Array<TAGGED>`), the compiler must emit a normalization sequence.
-- **x86-64 Implementation**:
-  ```asm
-  ; YMM0 contains 4x F64 results
-  vpcmpeqd YMM1, YMM0, [reserved_tag_mask] ; Check for reserved NaN patterns
-  vptest   YMM1, YMM1                      ; Test if any lane collided
-  jz       .no_collision                    ; If zero, no collision, skip
-  ; Slow path: blend with canonical NaN 0x7FF8000000000000
-  vblendvpd YMM0, YMM0, [canonical_nan], YMM1
-  .no_collision:
-  vmovupd  [mem], YMM0
-  ```
-- **Optimization**: If the result is stored directly into an `Array<F64>` (Strategy A), and the array is never read as `TAGGED`, the normalization can be deferred or elided entirely, relying on the VM's deferred normalization rules.
-
-### 5. SIMD-1 Invariants
-| ID | Invariant |
-|---|---|
-| **SIMD-INV-01** | **No Direct Tagged SIMD Math on Mixed or Unknown Lanes** (retconned): SIMD arithmetic must not operate on lanes of mixed or unproven tag domain. Homogeneous tagged-float SIMD math is legal (lanes are raw binary64 bits), subject to collision canonicalization. Tagged-integer SIMD math is legal only via masked payload arithmetic with explicit 48-bit overflow fallback. |
-| **SIMD-INV-02** | **Integer Overflow Fallback**: Tagged-integer vector math must detect any 48-bit payload overflow per vector and fall back to scalar boxing for the whole vector. Silent wrap-through of the tag bits is a correctness violation. |
-| **SIMD-INV-03** | **NaN Canonicalization**: SIMD floating-point results that cross into a `TAGGED` observable boundary must be normalized to the VM canonical NaN (`0x7FF8000000000000`) if they collide with the reserved tag space. |
-| **SIMD-INV-04** | **Guard Deoptimization**: Guarded SIMD paths on `Array<TAGGED>` must deoptimize to scalar code if the SIMD type-check guard fails. They must not silently produce incorrect results. |
-| **SIMD-INV-05** | **Profitability Gating**: Strategy B on tagged arrays requires the section 3.4 gate (trip count, homogeneity, body width). Ungated tagged-array vectorization is a specification violation. |
-| **SIMD-INV-06** | **PACKED_TAGGED Purity**: A PACKED_TAGGED value must never contain heap references. Safepoint maps must classify it as non-rooted. |
-| **SIMD-INV-07** | **Canonicalization Elision Proof**: Eliding the NaN collision canonicalization requires a compiler proof that no lane can produce a reserved-space bit pattern; the proof is recorded in region metadata. |
-
-
-Defining the exception handling, inline cache evolution, memory model mapping, and barrier fast-paths completes the physical execution and runtime integration contract. These subsystems are where the theoretical elegance of the IR meets the harsh realities of OS unwinders, megamorphic workloads, hardware memory models, and GC concurrency.
-
-Here is the formal, exhaustive specification for **EXC-1**, **IC-1**, **MEM-1**, and **BARRIER-1**.
-
----
-
-## EXC-1: Zero-Cost Exception Handling & Unwind Tables
-**Version 1.0 · Core Execution Contract**
-
-### 1. Fundamental Design Philosophy
-Exceptions are rare; the happy path must have **absolute zero overhead**. We do not use setjmp/longjmp or explicit exception state threading in the IR. Instead, we rely entirely on **table-driven unwinding** provided by the OS, using dynamically generated metadata that maps physical PCs to catch handlers and deoptimization targets.
-
-### 2. Unwind Table Generation & Registration
-The JIT must generate standard OS unwind metadata so that when a native exception (or a JIT-thrown exception) unwinds through JIT code, the OS can correctly restore the stack pointer and frame pointer.
-
-#### 2.1 Target-Specific Unwind Formats
-- **Linux/ELF (x86-64, AArch64, RV64)**: Generate **DWARF Call Frame Information (CFI)** (`.eh_frame`).
-- **Windows/PE (x86-64)**: Generate **`.pdata` and `.xdata`** (RUNTIME_FUNCTION and UNWIND_INFO structures).
-
-#### 2.2 Tier-Specific Unwind Strategies
-- **T0 (Interpreter)**: The interpreter loop has a single, static, pre-compiled unwind descriptor registered at VM startup.
-- **T1 (Stencil Baseline)**: Because T1 enforces a strict, uniform frame layout (the Fixed Physical Map), **all T1 code shares a single, static unwind descriptor**. When a T1 CodeBlob is published, we do not generate new unwind info; we just register the existing T1 descriptor for the new code range.
-- **T2/T3 (Optimizing Tiers)**: The MIR emitter dynamically generates DWARF CFI / `.pdata` records alongside the machine code. 
-  - *Prologue*: Emits CFI directives for stack allocation and callee-saved register pushes.
-  - *Safepoints/Deopts*: Emits CFI directives to reconstruct the virtual frame if unwinding stops at a safepoint.
-
-#### 2.3 Dynamic Registration Protocol
-When a CodeBlob is published to the Code Pool (RX view):
-1. The JIT allocates the unwind metadata in the Metadata Pool (RW).
-2. The JIT calls the OS-specific registration API:
-   - Linux: `__register_frame(unwind_info_ptr)`
-   - Windows: `RtlAddFunctionTable(pdata_ptr, count, base_addr)`
-3. When the CodeBlob is reclaimed by the Sweeper, the JIT calls the corresponding unregistration API.
-
-### 3. Exception Dispatch & The Exception Table
-When a JIT-compiled method throws an exception, it does not call a generic runtime function. It jumps to a **Throw Stub**.
-
-#### 3.1 The Throw Stub
-1. The Throw Stub captures the current physical PC and stack pointer.
-2. It queries the **Exception Table** in the current `CodeBlobHeader`.
-3. The Exception Table is a sorted array of `(PC_Start, PC_End, Handler_Offset, Deopt_ID)` tuples.
-4. The runtime performs a binary search to find the innermost enclosing `try-catch` or `try-finally` block.
-5. If a handler is found, the stack is unwound to that frame, and execution jumps to the handler.
-6. If no handler is found in the current CodeBlob, the OS unwinder takes over, using the DWARF/`.pdata` metadata to walk up the stack to the caller.
-
-#### 3.2 Interaction with Region-Based Deoptimization
-If an exception is thrown, and the PC falls inside a **Deopt Stub** (because the region was invalidated):
-- The Deopt Stub is marked in the Exception Table with a special `Deopt_ID`.
-- The runtime recognizes this, reconstructs the T0 interpreter frame, and **transfers the pending exception into the T0 exception state**.
-- T0 then resumes execution and handles the exception using the interpreter's standard exception dispatch.
-
-### 4. EXC-1 Invariants
-| ID | Invariant |
-|---|---|
-| **EXC-INV-01** | **Zero Happy-Path Cost**: No instructions are executed on the happy path to maintain exception state. All mapping is done via out-of-band tables. |
-| **EXC-INV-02** | **Complete PC Coverage**: Every executable byte in the Code Pool must be covered by a valid unwind descriptor. |
-| **EXC-INV-03** | **Atomic Registration**: Unwind tables must be registered with the OS *before* the CodeBlob's RX pointer is published to mutators. |
-| **EXC-INV-04** | **Deopt-Exception Safety**: If unwinding hits a deopt stub, the runtime must correctly reconstruct the T0 frame and preserve the exception object. |
-
----
-
-## IC-1: Megamorphic Fallback & Inline Cache Evolution
-**Version 1.0 · Core Execution Contract**
-
-### 1. Fundamental Design Philosophy
-Inline Caches (ICs) must evolve gracefully from monomorphic to megamorphic without causing unbounded memory growth, infinite deopt storms, or catastrophic performance cliffs. The IC state machine is strictly bounded, and megamorphic execution relies on optimized generic stubs, not unbounded polymorphic switches.
-
-### 2. The IC State Machine
-Every property access and call site maintains a state machine driven by the Profiler (PROF-1).
-
-| State | Condition | T0/T1 Execution | T2/T3 Compilation Strategy |
-|---|---|---|---|
-| **Uninitialized** | Never executed | Generic runtime lookup | N/A |
-| **Monomorphic** | 1 unique LayoutID observed | 1-tap IC check | Emit single `GuardLayout` + direct offset load. |
-| **Polymorphic** | 2 to $N$ LayoutIDs (e.g., $N=4$) | Linear scan of $N$ entries | Emit a switch statement of $N$ `GuardLayout` checks. |
-| **Megamorphic** | $> N$ LayoutIDs observed | Hash-table or generic lookup | **Stop specializing.** Emit a "Generic Region" using dictionary lookups. |
-
-### 3. Megamorphic Execution Strategy
-When a site becomes megamorphic, T3 **must not** compile a 50-way switch statement. Instead, it compiles a **Generic Region**.
-
-#### 3.1 The Generic Region
-- The Generic Region abandons AOSS shape specialization for this specific site.
-- It emits a call to a highly optimized, JIT-compiled **Megamorphic Stub**.
-- The Megamorphic Stub uses a fast, lock-free hash table (keyed by LayoutID) to resolve the field offset or call target.
-- *Alternative*: If the language semantics permit, the Generic Region can use a "dictionary object" layout where properties are stored in a hash map attached to the object, and the JIT emits direct hash-table lookup instructions.
-
-#### 3.2 Preventing Deopt Storms
-If a site is marked Megamorphic, the AOSS DependencyMap **stops tracking** shape transitions for that specific site. 
-- If the object's shape changes, the Generic Region does not deopt. It simply performs the dictionary lookup and continues.
-- This breaks the "compile $\rightarrow$ deopt $\rightarrow$ compile" loop.
-
-### 4. IC Memory Management
-IC state is not embedded in the executable code (which would bloat the Code Pool and complicate patching). It is stored in the **IC Side-Table** in the Metadata Pool.
-- The compiled code contains a `LOAD_IC_STUB(index)` instruction.
-- The IC Side-Table holds the current state and the pointer to the active fast-path stub.
-- When a CodeBlob is reclaimed, its associated IC Side-Table entries are freed.
-
-### 5. IC-1 Invariants
-| ID | Invariant |
-|---|---|
-| **IC-INV-01** | **Bounded Polymorphism**: The compiler will never emit a polymorphic guard chain longer than $N$ entries. It must transition to Megamorphic execution. |
-| **IC-INV-02** | **Megamorphic Stability**: Once a site is marked Megamorphic, it cannot be reverted to Monomorphic/Polymorphic, and it does not trigger deoptimization on shape changes. |
-| **IC-INV-03** | **Side-Table Separation**: IC state must reside in the RW Metadata Pool, not the RX Code Pool. |
-| **IC-INV-04** | **Atomic IC Updates**: Updates to the IC Side-Table must be atomic with respect to mutator threads. |
-
----
-
-## MEM-1: Hardware Memory Model Mapping
-**Version 1.0 · Core Execution Contract**
-
-### 1. Fundamental Design Philosophy
-UGB defines the source-level memory model (assumed to be at least as strong as C11/Java: acquire/release semantics for synchronization, sequential consistency for volatile). The JIT must map these abstract semantics to hardware-specific fences (x86-TSO, ARM-Weak, RVWMO) without over-synchronizing, while strictly preventing the optimizer from reordering operations in violation of the model.
-
-### 2. IR Representation of Memory Order
-In VSDG and SoN, memory operations and fences carry an explicit `MemoryOrder` tag:
-- **Relaxed**: No ordering guarantees.
-- **Acquire**: Subsequent loads/stores cannot be reordered before this operation.
-- **Release**: Preceding loads/stores cannot be reordered after this operation.
-- **AcqRel**: Both Acquire and Release.
-- **SeqCst**: Acts as Release + Acquire, and prevents all Store-Load reordering globally.
-
-### 3. Optimization Rules (SoN / LLIR)
-The optimizer must respect the following hard constraints when reordering memory operations:
-1. **Acquire Load**: Cannot be moved *up* (before) any preceding memory operation. Can be moved *down* past other loads, but not past stores.
-2. **Release Store**: Cannot be moved *down* (after) any succeeding memory operation. Can be moved *up* past other stores, but not past loads.
-3. **SeqCst**: Cannot be reordered with *any* other memory operation across the fence.
-4. **Relaxed**: Can be freely reordered by the optimizer, subject only to data dependencies.
-
-### 4. Target-Specific Lowering (MIR)
-The MIR instruction selector maps the abstract `MemoryOrder` to hardware instructions.
-
-#### 4.1 x86-64 (TSO - Total Store Order)
-Hardware already guarantees Acquire/Release semantics for normal loads/stores.
-- **Relaxed / Acquire / Release**: Normal `MOV` instructions. (Zero overhead).
-- **SeqCst**: Requires a `MFENCE` instruction, OR using a `LOCK` prefix on the store (e.g., `LOCK XCHG`).
-- **Atomic RMW**: `LOCK XADD`, `LOCK CMPXCHG` inherently provide SeqCst.
-
-#### 4.2 AArch64 (Weak Memory Model)
-Hardware requires explicit instructions for ordering.
-- **Relaxed**: `LDR` / `STR`
-- **Acquire**: `LDAR` (Load-Acquire)
-- **Release**: `STLR` (Store-Release)
-- **AcqRel**: `LDAR` / `STLR`
-- **SeqCst**: `LDR` / `STR` followed by `DMB ISH` (Data Memory Barrier, Inner Shareable).
-
-#### 4.3 RV64 (RVWMO)
-Hardware uses bits in the instruction encoding or explicit fences.
-- **Relaxed**: `LW` / `SW`
-- **Acquire**: `LW` with `.aq` bit set.
-- **Release**: `SW` with `.rl` bit set.
-- **SeqCst**: `FENCE RW, RW` instruction.
-
-### 5. MEM-1 Invariants
-| ID | Invariant |
-|---|---|
-| **MEM-INV-01** | **Semantic Preservation**: The optimizer must never reorder an Acquire load before a preceding store, or a Release store after a succeeding load. |
-| **MEM-INV-02** | **Target Correctness**: The MIR emitter must emit the exact hardware instructions required to satisfy the `MemoryOrder` tag for the target ISA. |
-| **MEM-INV-03** | **No Redundant Fences**: The optimizer must eliminate redundant fences (e.g., an Acquire load immediately followed by a SeqCst fence). |
-
----
-
-## BARRIER-1 (Revised): Fully Concurrent Load Barriers
-**Version 1.2 · Correcting the Fully Concurrent GC Contract**
-**1.2 change: the fast path now verifies the reference tag before testing GC color bits. The 1.1 fast path false-triggered on tagged integers (finding BARRIER-1, resolved). See §2.0.**
-
-### 1. The Mathematical Trick: 3 Free Bits from Alignment
-Recall from **HEAP-1** that all heap entities are strictly **8-byte aligned**. 
-Because the NV-1 reference payload is a 48-bit byte offset, and the offset is always a multiple of 8, the **lower 3 bits of the payload are always `000`**.
-
-We can hijack these 3 zero-bits to store **Concurrent GC Colors** directly inside the NV-1 reference itself. This gives us a ZGC-style colored pointer mechanism without expanding the 64-bit word or shrinking the 256 TiB heap (since $2^{45} \text{ offsets} \times 8 \text{ bytes} = 256 \text{ TiB}$).
-
-#### 1.1 The 3-Bit Color Allocation
-| Bit | Name | Meaning |
-|-----|------|---------|
-| 0 | `Marked0` | Part of concurrent marking cycle 0 |
-| 1 | `Marked1` | Part of concurrent marking cycle 1 |
-| 2 | `Remapped` | Object has been relocated; offset needs resolution |
-
-When the GC concurrently moves an object, it updates the object's header with a forwarding offset and changes the color bits in the heap. When a mutator loads a reference, it checks these bits.
-
-### 2. The Load Barrier Fast-Path
-Because the colors are embedded in the lower 3 bits of the NV-1 word, the Load Barrier is incredibly cheap. It requires exactly **one `TEST` instruction and one conditional branch**.
-
-#### 2.0 Tag Precedence: The Barrier Classifies Before It Tests (Correctness Correction)
-
-The 1.1 fast path executed `test al, 0x07` on the loaded 64-bit word without first verifying that the word is a heap reference. That is operationally broken, and the flaw is corrected here (finding BARRIER-1, resolved).
-
-NV-1 encodes immediate integers as `0xFFFC` in bits 63-48 with a signed 48-bit payload in bits 47-0. The integer `5` is the word `0xFFFC000000000005`. Its lower three bits are `101`, so `test al, 0x07` sets ZF=0 and branches to the slow path. Every odd integer, and many even integers whose payload low bits are set, false-triggers the barrier. The CPU does not know that the value is "supposed to be a reference"; it only sees bits. On integer-heavy workloads this is a systematic slow-path storm, not a statistical accident.
-
-The corrected fast path performs tag classification before the color test. A word is color-tested only when its 16-bit tag equals `0xFFFD` (heap reference). Integers, special immediates, and floating-point values never reach the color test because their tags differ. The slow path is therefore entered only when a genuine reference carries an unresolved GC color.
-
-#### 2.1 x86-64 Assembly (The Fast Path)
-```asm
-; RAX contains the loaded 64-bit NV-1 word from memory.
-; Bits 63-48: tag. For references the tag is 0xFFFD and bits 2-0 carry GC colors.
-
-; 1. Classify: is this word a heap reference at all?
-mov r8, rax
-shr r8, 48                  ; Extract the 16-bit tag
-cmp r8, 0xFFFD              ; Heap reference?
-jne .fast_path_clean        ; No (int, float, special): no GC color exists. Fast exit.
-
-; 2. It is a reference. Now, and only now, test the color bits.
-test al, 0x07               ; Test the 3 GC color bits
-jnz .load_barrier_slow      ; Any color set: resolve via slow path
-
-; 3. FAST PATH: clean reference. The lower 3 bits are 0, so RAX holds the
-; pure (0xFFFD << 48) | 48-bit offset. Reconstruct and load.
-and rax, 0x0000FFFFFFFFFFFF ; Clear the tag, keep the offset
-lea rbx, [heap_base + rax]  ; Reconstruct the native address
-mov rcx, [rbx + field_offset]
-```
-**Cost:** 1 `MOV`, 1 `SHR`, 1 `CMP`, 1 `JNE`, then 1 `TEST` and 1 `JNZ` on the reference path only. The non-reference exit is a highly predictable not-taken branch for reference-typed loads, and the color test remains exactly as cheap as in 1.1 for genuine references. The added shift-and-compare pair occupies 2-3 cycles on the reference fast path and overlaps with the load latency. This is the correct price for eliminating a slow-path storm on every tagged non-reference word.
-
-#### 2.2 The Load Barrier Slow-Path
-If the `Remapped` bit (or marking bits) is set, the mutator must resolve the true location of the object.
-
-```asm
-.load_barrier_slow:
-; 1. Extract the 48-bit offset (mask out the tag and the color bits)
-mov r8, rax
-and r8, 0x0000FFFFFFF8   ; Clear lower 3 bits (colors) and upper 16 bits (tag)
-
-; 2. Reconstruct the native pointer to the object header
-lea r9, [heap_base + r8]
-
-; 3. Read the object header to find the forwarding offset or true state
-mov r10, [r9]            ; Load the 128-bit header (first 64 bits)
-
-; 4. Call the runtime Load Barrier Resolver
-; The resolver checks the header, finds the new offset, updates the 
-; mutator's local register/stack slot with the clean offset, and 
-; returns the corrected NV-1 reference in RAX.
-call rt_load_barrier_resolve
-jmp .resume_fast_path
+safepoint_check():
+    if thread_state.park_flag.load_acquire():
+        park_for_deopt()
+    // otherwise, continue execution (1 cycle)
 ```
 
-### 3. Interaction with NV-1 and ARS (Adaptive Representation Selection)
-How does this affect the compiler's unboxed live ranges?
+### 6.5 Safepoint Coordination
 
-1. **Tagged References (`TAGGED`)**: The Load Barrier operates directly on the 64-bit NV-1 word. The 3 color bits are checked, and if clean, the value is used as-is.
-2. **Unboxed Offsets (`REF_OFF`)**: If ARS decides to keep a reference as an unboxed 48-bit offset in a GPR to avoid repeated tag extraction, the Load Barrier still applies. The compiler simply emits the `TEST` on the raw offset register.
-3. **Raw Pointers (`REF_RAW`)**: If ARS reconstructs a raw native pointer (`heap_base + offset`), the Load Barrier **must** execute *before* the pointer is reconstructed. You cannot safely use a raw pointer if the object is concurrently moving. 
-   - **INV-BARRIER-NEW**: `REF_RAW` values must never be materialized until the Load Barrier has verified the `REF_OFF` is clean.
+The deopt coordinator is responsible for ensuring that all threads that need to deopt are parked before invalidation begins.
 
-### 4. GC Write Barrier Synergy (SATB / Generational)
-The Load Barrier handles *reads* of moving objects. The Write Barrier (defined previously) handles *writes* for the concurrent marker and generational remembered sets.
-- **Concurrent Marking**: If the GC is doing concurrent marking (e.g., SATB or COLORED), the Load Barrier ensures the mutator never reads a stale object. If the mutator *writes* a reference, the Write Barrier logs the old value or marks the card.
-- **No Read-Barrier for Non-Moving**: If the engine ever runs in a mode where the GC is *not* moving (e.g., a non-moving concurrent marker), the `Remapped` bit is never set, and the Load Barrier fast-path remains exactly the same (just checking marking bits if required, or elided entirely if the GC design permits).
+**Coordinator algorithm.**
 
-### 5. Updated BARRIER-1 Invariants
-
-| ID | Invariant |
-|---|---|
-| **BARRIER-INV-01** | **Fast-Path Purity (Write)**: The write barrier fast-path must not execute memory writes unless the slow-path is taken. |
-| **BARRIER-INV-02** | **Load Barrier Presence**: Because the GC is fully concurrent and moving, every heap reference load must pass through the Load Barrier fast-path (checking the 3 alignment bits). |
-| **BARRIER-INV-03** | **Alignment Guarantee**: The Load Barrier relies on the invariant that all heap objects are 8-byte aligned, guaranteeing the lower 3 bits of the offset are available for GC colors. |
-| **BARRIER-INV-04** | **No Raw Pointers Across Barriers**: A `REF_RAW` (native pointer) must never be materialized or used for memory access until the Load Barrier has verified the underlying `REF_OFF` is clean (no `Remapped` bit set). |
-| **BARRIER-INV-05** | **Elision Safety**: The Load Barrier can only be elided by the compiler if it mathematically proves the object is thread-local, newly allocated in the current TLAB, and cannot possibly be seen or moved by the concurrent GC. |
-| **BARRIER-INV-06** | **Tag Precedence**: The color test (`test al, 0x07`) may only execute on words whose 16-bit tag equals `0xFFFD`. A non-reference word must exit the barrier on the fast path without a color test. A barrier implementation that color-tests arbitrary NV-1 words is incorrect. |
-| **BARRIER-INV-07** | **Slow-Path Classification**: The load barrier slow path is entered only for words already classified as references (invariant 06). Resolution logic may assume a genuine heap reference. |
-| **BARRIER-INV-08** | **Numeric Array Load Elision**: Loads from `Layout_NumericArray_F64` or `Layout_NumericArray_I64` payloads (NUM-1) contain no references and take no load barrier. The layout check that selects the raw-load path substitutes for the barrier. |
----
-
-## SNAP-1: Native Image & Snapshot Specification
-**Version 1.0 · Core Execution Contract**
-
-### 1. Fundamental Design Philosophy
-A Native Image is a complete, self-contained executable that includes:
-- Pre-compiled machine code (all tiers)
-- A serialized heap snapshot (pre-allocated objects)
-- All metadata (AOSS dependencies, IC stubs, layout registry, profiling data)
-- Debug and profiling information (DWARF, perf maps)
-
-The goal is **near-zero startup**: the application begins execution with all hot code already compiled, all inline caches already populated, and all objects already allocated. The only remaining work is runtime initialization (thread-local state, GC setup, assumption validation).
-
-**Key Insight**: Our NV-1 48-bit heap-relative offsets are already position-independent. This eliminates the biggest pain point of traditional native images (pointer relocation). We only need to set `heap_base` correctly on startup, and all references in the snapshot are automatically valid.
-
----
-
-### 2. Snapshot Composition
-A snapshot file (`.snap`) contains five distinct sections:
-
-| Section | Contents | Position-Independent? |
-|---------|----------|----------------------|
-| **Code Image** | All CodeBlobs (T1/T2/T3/T4), stencils, deopt stubs, unwind tables | Partially (requires relocation for absolute addresses) |
-| **Heap Image** | Serialized heap objects (classes, prototypes, constants, closures, strings) | Yes (uses NV-1 48-bit offsets) |
-| **Metadata Image** | AOSS dependency maps, IC stub arrays, layout registry, type profiles | Partially (contains pointers to code/heap) |
-| **Debug Image** | DWARF info, perf maps, source line tables | Yes (uses relative offsets) |
-| **Header** | Version, checksum, entry point, relocation table, assumption list | N/A |
-
-#### 2.1 Code Image
-The code image contains all compiled methods, organized by tier:
-- **T1 Stencils**: Pre-assembled stencil templates (shared across all instances).
-- **T2/T3 CodeBlobs**: Optimized machine code with embedded region metadata, safepoint maps, and deopt stubs.
-- **T4 Trace Code**: Specialized trace code with guard metadata.
-- **FFI Trampolines**: Pre-generated trampolines for known foreign function calls.
-
-**Relocation Requirements**:
-- Branch targets (relative offsets) are already position-independent.
-- Absolute addresses (e.g., `heap_base`, external symbols) require relocation.
-- We emit a relocation table that lists all absolute addresses and their fixup types.
-
-#### 2.2 Heap Image
-The heap image is a serialized dump of the VM heap at a safepoint:
-- **Object Layout**: Each object is serialized as `[Header (128-bit)][Payload...]`.
-- **References**: All heap references are NV-1 48-bit offsets, which are already position-independent.
-- **Special Objects**: Classes, prototypes, interned strings, and pre-allocated constants are included.
-
-**GC State**:
-- The entire snapshot heap is treated as **old generation** on startup (already promoted).
-- The mark bitmap is initialized to "all marked" (no need to re-trace).
-- The card table is initialized to "clean" (no young-to-old references to scan).
-- If the snapshot includes young objects (e.g., pre-allocated for performance), they are explicitly marked in the header.
-
-#### 2.3 Metadata Image
-The metadata image contains all runtime metadata:
-- **AOSS DependencyMap**: Maps `CanonicalLayoutHandle` to lists of dependent regions.
-- **IC Stub Arrays**: Pre-populated inline caches with monomorphic/polymorphic stubs.
-- **Layout Registry**: Interned layout descriptors with their canonical handles.
-- **Type Profiles**: Pre-collected profiling data (type frequencies, call site counts).
-
-**Relocation Requirements**:
-- Pointers to CodeBlobs and heap objects require relocation.
-- We use the same relocation table as the code image.
-
-#### 2.4 Debug Image
-The debug image contains all debugging and profiling information:
-- **DWARF 5**: Complete debug info for all CodeBlobs, including ARS location lists.
-- **Perf Maps**: `/tmp/perf-<pid>.map` entries for all methods.
-- **VTune JIT API**: Registration data for Intel VTune.
-
-This is already position-independent (uses relative offsets).
-
-#### 2.5 Header
-The snapshot header contains:
-- **Magic Number**: Identifies the file as a snapshot.
-- **Version**: Snapshot format version (for compatibility checking).
-- **Checksum**: Integrity verification.
-- **Entry Point**: The bytecode PC or method ID to start execution.
-- **Relocation Table**: List of absolute addresses to fix up.
-- **Assumption List**: List of assumptions that must be validated on startup (e.g., "class X exists", "method Y has signature Z").
-- **Heap Base Offset**: The offset of the heap image within the snapshot file.
-
----
-
-### 3. Serialization Protocol
-The snapshot is generated by T5 (or a dedicated snapshot tool) after the application has reached a stable state (e.g., after warm-up).
-
-#### 3.1 Serialization Steps
-1. **Reach a Global Safepoint**: Pause all mutator threads.
-2. **Freeze the Heap**: No further mutations are allowed.
-3. **Serialize the Heap Image**:
-   - Traverse all live objects (using the GC's mark bitmap).
-   - For each object, serialize the header and payload.
-   - Record the object's offset within the heap image.
-4. **Serialize the Code Image**:
-   - Collect all active CodeBlobs from the code cache.
-   - Emit the machine code and metadata.
-   - Generate the relocation table.
-5. **Serialize the Metadata Image**:
-   - Serialize the AOSS dependency map, IC stubs, layout registry, etc.
-   - Generate relocations for pointers to code/heap.
-6. **Serialize the Debug Image**:
-   - Emit DWARF info, perf maps, etc.
-7. **Write the Header**:
-   - Compute the checksum.
-   - Write the entry point, relocation table, assumption list, etc.
-8. **Resume Execution**: The application can continue running (the snapshot is now complete).
-
-#### 3.2 Incremental Serialization
-For large applications, we support incremental snapshots:
-- **Base Snapshot**: Contains the core runtime and common libraries.
-- **Delta Snapshot**: Contains only the changes since the base snapshot (new classes, new methods, modified objects).
-- On startup, we load the base snapshot, then apply the delta.
-
-This allows fast iteration during development (rebuild only the changed parts).
-
----
-
-### 4. Startup / Deserialization Protocol
-When the native image is executed, the runtime performs the following steps:
-
-#### 4.1 Startup Steps
-1. **Map the Snapshot File**:
-   - Use `mmap` (or equivalent) to map the snapshot file into memory.
-   - The code image is mapped as executable (RX).
-   - The heap and metadata images are mapped as read-write (RW).
-
-2. **Apply Relocations**:
-   - Parse the relocation table from the header.
-   - For each relocation, fix up the absolute address:
-     - `heap_base` is set to the start of the heap image.
-     - External symbols (e.g., libc functions) are resolved via the dynamic linker.
-   - This step can be parallelized across multiple threads.
-
-3. **Initialize the Runtime**:
-   - Set up thread-local state (GC buffers, safepoint flags, etc.).
-   - Initialize the GC (mark bitmap, card table, remembered sets).
-   - Initialize the AOSS subsystem (load the dependency map).
-   - Initialize the IC subsystem (load the stub arrays).
-
-4. **Validate Assumptions**:
-   - Parse the assumption list from the header.
-   - For each assumption, check that it still holds:
-     - "Class X exists" → Check the class registry.
-     - "Method Y has signature Z" → Check the method descriptor.
-     - "Layout L has field F at offset O" → Check the layout registry.
-   - If any assumption fails, **abort snapshot loading** and fall back to normal startup (discard the snapshot, start from bytecode).
-
-5. **Jump to Entry Point**:
-   - If all assumptions are valid, jump to the entry point (a pre-compiled T3 method or a trace).
-   - The application begins execution with near-zero startup overhead.
-
-#### 4.2 Startup Time Breakdown
-| Step | Estimated Time |
-|------|----------------|
-| Map snapshot file | ~1 ms |
-| Apply relocations | ~5-10 ms (parallelized) |
-| Initialize runtime | ~2-5 ms |
-| Validate assumptions | ~1-2 ms |
-| **Total** | **~10-20 ms** |
-
-This is "near zero" compared to traditional JIT startup (which can take seconds for large applications).
-
----
-
-### 5. Relocation and Position Independence
-The key to a robust native image is minimizing relocation work. Our architecture has several advantages:
-
-#### 5.1 NV-1 Heap References
-All heap references are 48-bit offsets from `heap_base`. These are already position-independent:
-- No relocation needed for heap references.
-- Just set `heap_base` correctly on startup.
-
-#### 5.2 Position-Independent Code (PIC)
-The code image uses PIC wherever possible:
-- Branch targets use relative offsets (already position-independent).
-- Data references use RIP-relative addressing (x86-64) or ADRP (AArch64).
-- Only absolute addresses (e.g., external symbols) require relocation.
-
-#### 5.3 Relocation Table
-The relocation table lists all absolute addresses that need fixup:
 ```
-RelocationEntry {
-    offset: u64,          // Offset within the code/metadata image
-    type: enum {
-        HEAP_BASE,        // Fix up to heap_base
-        EXTERNAL_SYMBOL,  // Fix up to external symbol (resolved by dynamic linker)
-        CODE_BLOB,        // Fix up to another CodeBlob
-        HEAP_OBJECT,      // Fix up to a heap object (should be rare, use offsets instead)
-    },
-    symbol_name: string,  // For EXTERNAL_SYMBOL
+coordinator_main_loop():
+    while true:
+        // Wait for at least one deopt request
+        requests = deopt_coordinator.wait_for_requests()
+        
+        // Phase 1: Collect all pending requests
+        all_requests = collect_all_pending_requests()
+        
+        // Phase 2: Determine which threads need to park
+        threads_to_park = determine_threads_to_park(all_requests)
+        
+        // Phase 3: Signal threads to park
+        for thread_id in threads_to_park:
+            thread_state[thread_id].park_flag.store_release(true)
+        
+        // Phase 4: Wait for all threads to park
+        for thread_id in threads_to_park:
+            wait_until(thread_state[thread_id].state == DEOPT_PARKED)
+        
+        // Phase 5: Perform concurrent invalidation (see §6.6)
+        invalidate_code_concurrently(all_requests)
+        
+        // Phase 6: Coordinate re-compilation (see §6.8)
+        coordinate_recompilation(all_requests)
+        
+        // Phase 7: Signal threads to resume
+        for thread_id in threads_to_park:
+            thread_state[thread_id].resume_flag.store_release(true)
+        
+        // Phase 8: Wait for threads to complete state reconstruction
+        for thread_id in threads_to_park:
+            wait_until(thread_state[thread_id].state == DEOPT_DONE)
+        
+        // Phase 9: Clean up
+        clear_requests(all_requests)
+```
+
+**Determining which threads need to park.** A thread needs to park if:
+- It has a pending deopt request.
+- It is executing code that will be invalidated by another thread's deopt request.
+
+The coordinator determines this by analyzing the deopt requests and the code they affect:
+
+```
+determine_threads_to_park(all_requests) -> Set<ThreadId>:
+    threads = {}
+    code_to_invalidate = {}
+    
+    for request in all_requests:
+        scope = determine_scope(request.deopt_point)
+        code_to_invalidate = code_to_invalidate ∪ scope.code_to_invalidate
+    
+    for thread in all_mutator_threads:
+        if thread has pending request:
+            threads.add(thread.id)
+        else if thread.current_code ∈ code_to_invalidate:
+            // Thread is executing code that will be invalidated
+            threads.add(thread.id)
+            // Mark this thread for deopt even though it didn't trigger one
+            thread.pending_request = Some(SYNTHETIC_DEOPT_REQUEST)
+    
+    return threads
+```
+
+**Synthetic deopt requests.** If a thread is executing code that will be invalidated by another thread's deopt, the coordinator creates a synthetic deopt request for that thread. The thread will park and reconstruct its state, even though it did not itself violate an assumption.
+
+### 6.6 Concurrent Invalidation Protocol
+
+The invalidation protocol ensures that code invalidation is:
+- **Idempotent**: multiple requests to invalidate the same code result in exactly one invalidation.
+- **Atomic**: all threads see the invalidation at the same time (via memory ordering).
+- **Complete**: all code that needs to be invalidated is invalidated.
+
+**Invalidation algorithm.**
+
+```
+invalidate_code_concurrently(all_requests):
+    // Step 1: Compute the union of code to invalidate
+    code_to_invalidate = {}
+    for request in all_requests:
+        scope = determine_scope(request.deopt_point)
+        code_to_invalidate = code_to_invalidate ∪ scope.code_to_invalidate
+    
+    // Step 2: Invalidate each code block atomically
+    for code in code_to_invalidate:
+        // Use atomic CAS to ensure idempotence
+        old_valid = code.is_valid.compare_exchange_strong(true, false, 
+            ordering=release, failure_ordering=relaxed)
+        
+        if old_valid == true:
+            // We were the first to invalidate this code
+            // Perform any additional cleanup (e.g., unmap memory)
+            cleanup_code(code)
+        // else: another thread already invalidated it; no-op
+    
+    // Step 3: Emit a full memory fence to ensure invalidation is visible
+    atomic_fence(seq_cst)
+    
+    // Step 4: Patch callers (see §6.9)
+    patch_callers_concurrently(code_to_invalidate)
+```
+
+**Idempotence.** The `compare_exchange_strong` ensures that only one thread successfully sets `is_valid` to false. Other threads see the old value as false and skip the cleanup.
+
+**Memory ordering.** The `seq_cst` fence ensures that all writes performed during invalidation (setting `is_valid`, unmapping memory, patching callers) are visible to all threads before they resume execution.
+
+### 6.7 Per-Thread State Reconstruction
+
+Each thread performs its own state reconstruction independently. This is naturally thread-safe because each thread only accesses its own machine state.
+
+**Reconstruction algorithm.**
+
+```
+reconstruct_state(deopt_point, machine_state) -> DeoptResult:
+    // Get the deoptimization metadata
+    metadata = get_deopt_metadata(deopt_point)
+    
+    // Reconstruct the call stack (same as single-thread algorithm)
+    call_stack = []
+    for frame in metadata.frames:
+        source_frame = SourceFrame {
+            function: frame.function,
+            pc: frame.source_pc,
+            variables: {},
+        }
+        
+        for var in frame.live_variables:
+            location = metadata.var_location(var)
+            value = extract_value(machine_state, location)
+            source_frame.variables[var] = value
+        
+        call_stack.push(source_frame)
+    
+    // Determine the target tier
+    current_tier = get_current_tier(deopt_point)
+    target_tier = current_tier - 1
+    
+    return DeoptResult {
+        source_state: SourceState {
+            call_stack: call_stack,
+            heap: machine_state.heap,
+        },
+        target_tier: target_tier,
+    }
+```
+
+**Thread safety.** State reconstruction only reads the thread's own machine state and the shared (immutable) deopt metadata. No synchronization is needed.
+
+### 6.8 Re-Compilation Coordination
+
+After deoptimization, the deoptimized function may need to be re-compiled in the lower tier. To prevent multiple threads from compiling the same function simultaneously, we use a per-function compilation lock.
+
+**Compilation lock.**
+
+```
+struct CompilationLock {
+    lock: Mutex<()>,
+    compiling_thread: Option<ThreadId>,
+    compiled_code: Option<CompiledCode>,
 }
 ```
 
-On startup, we iterate through the relocation table and apply the fixups. This is a simple, fast process.
+**Re-compilation coordination algorithm.**
 
----
-
-### 6. GC Integration
-The snapshot must integrate seamlessly with our concurrent, generational GC.
-
-#### 6.1 Heap State on Startup
-- The entire snapshot heap is treated as **old generation**.
-- The mark bitmap is initialized to "all marked" (no need to re-trace).
-- The card table is initialized to "clean" (no young-to-old references to scan).
-- The remembered set is empty (no old-to-young references).
-
-#### 6.2 New Allocations
-After startup, new allocations follow the normal GC protocol:
-- New objects are allocated in the young generation.
-- Write barriers track young-to-old references.
-- The GC runs concurrently as usual.
-
-#### 6.3 Snapshot Heap Compaction (Corrected: Non-Relocatable by Contract)
-
-The 1.0 text stated that the GC treats the snapshot heap like any other old-generation heap and relocates objects with reference updates. That is contradictory and unsafe, and it is corrected here (finding SNAP-1, resolved).
-
-A shared base snapshot is mapped `PROT_READ` across processes. Relocating an object requires writing a forwarding pointer into read-only memory, which faults. If the OS resolves such faults by Copy-on-Write, every faulting process silently privatizes the shared pages, which destroys exactly the memory-sharing benefit the shared snapshot exists to provide. There is no configuration in which moving snapshot objects is correct.
-
-Therefore, snapshot heap memory is strictly non-relocatable:
-
-- **Pinning by page descriptor**: every page belonging to a snapshot heap image is marked `PINNED | IMMORTAL` in its page descriptor at map time. The evacuation candidate selector never selects pinned pages. This is selection-time exclusion, not fault-time discovery.
-- **Marking still traces snapshot pages**: reachability analysis must traverse snapshot objects, because snapshot objects can reference runtime-allocated objects and runtime objects can reference snapshot objects. Marking never mutates snapshot object payloads or headers. Mark bits for snapshot pages live in the GC side tables (HEAP-1 side metadata), which are runtime-private, writable, and per-process.
-- **Fragmentation is absorbed, not compacted**: fragmentation inside the snapshot image is permanent by design. Dead snapshot objects are not reclaimed by the running GC. The remedy for a fragmented or stale base snapshot is snapshot rebuilding (§6.4), an offline operation, not a GC compaction phase.
-- **Snapshot-to-young references use an external remembered set**: snapshot pages are read-only, so no card mark can be stored into a snapshot card table. References from snapshot objects into the mutable heap are tracked in a runtime-private, per-process snapshot remembered set allocated in normal memory. It is populated by the write barrier when a mutator stores a snapshot-derived reference into a mutable object, and it is scanned as a root source during young-generation collection.
-- **Write barrier obligation on snapshot targets is removed**: a mutator can never store into a snapshot object; a store whose target page is a snapshot page traps (Snapshot Violation, SNAP-INV-09). The only snapshot-related barrier obligation on the fast path is the remembered-set barrier for stores of snapshot-derived references into mutable objects, which the generational barrier already performs.
-
-#### 6.4 Snapshot Rebuilding
-If the application runs for a long time and the snapshot heap becomes fragmented or outdated, we can rebuild the snapshot:
-- Serialize the current heap state.
-- Re-compile hot methods with updated profiling data.
-- Write a new snapshot file.
-
-This can be done offline (e.g., during a maintenance window).
-
----
-
-### 7. Dynamic Code and Class Loading
-If the application loads new classes or code at runtime (e.g., via `eval`, dynamic class loading, or plugin systems), the snapshot cannot contain them.
-
-#### 7.1 Fallback to JIT
-- The runtime detects that a class/method is not in the snapshot.
-- It falls back to normal JIT compilation (T0 → T1 → T2 → T3).
-- The newly compiled code is added to the code cache as usual.
-
-#### 7.2 Assumption Invalidation
-- If a dynamically loaded class invalidates an assumption in the snapshot (e.g., adds a new subclass that breaks a devirtualization), the AOSS dependency map triggers region-based deopt.
-- The affected regions are re-compiled with the new information.
-
-#### 7.3 Closed-World vs. Open-World
-- **Closed-World**: The snapshot contains all possible code and classes. No dynamic loading is allowed. This is the fastest startup, but least flexible.
-- **Open-World**: The snapshot contains the core application, but allows dynamic loading. This is more flexible, but may require more deopts.
-
-We support both modes, depending on the application's needs.
-
----
-
-### 8. Assumption Validation
-The snapshot was built with certain assumptions (e.g., "class X has layout Y"). If the runtime environment differs (e.g., different library versions), these assumptions may be invalid.
-
-#### 8.1 Assumption Types
-| Assumption Type | Example | Validation Method |
-|-----------------|---------|-------------------|
-| Class Existence | "Class X exists" | Check the class registry |
-| Method Signature | "Method Y has signature Z" | Check the method descriptor |
-| Layout Stability | "Layout L has field F at offset O" | Check the layout registry |
-| Call Target | "Call site C targets method M" | Check the method registry |
-| Type Profile | "Variable V is always type T" | Check the type profile (optional, can be re-validated lazily) |
-
-#### 8.2 Validation Protocol
-On startup, we iterate through the assumption list and validate each one:
-- If all assumptions are valid, proceed with snapshot loading.
-- If any assumption fails, abort snapshot loading and fall back to normal startup.
-
-#### 8.3 Lazy Validation
-For performance-critical assumptions (e.g., type profiles), we can defer validation:
-- On startup, we skip the validation.
-- When the assumption is first used (e.g., a guard check), we validate it.
-- If the validation fails, we deopt and re-compile.
-
-This reduces startup time at the cost of potential deopts later.
-
----
-
-### 9. Incremental and Shared Snapshots
-For large applications or multi-tenant environments, we support incremental and shared snapshots.
-
-#### 9.1 Incremental Snapshots
-- **Base Snapshot**: Contains the core runtime and common libraries.
-- **Delta Snapshot**: Contains only the changes since the base snapshot (new classes, new methods, modified objects).
-- On startup, we load the base snapshot, then apply the delta.
-
-This allows fast iteration during development (rebuild only the changed parts).
-
-#### 9.2 Shared Snapshots
-- Multiple applications can share a common base snapshot (e.g., the JavaScript runtime, common libraries).
-- Each application has its own delta snapshot (application-specific code and data).
-- The base snapshot is mapped read-only (shared across processes) and is pinned and non-relocatable per 6.3 and SNAP-INV-08/09/10.
-- The delta snapshot is mapped read-write (private to each process).
-
-This reduces memory usage and startup time for multi-tenant environments. Sharing remains beneficial only if the shared pages are never written; the non-relocatability contract is what keeps that true for the process lifetime. References from the shared base into per-process delta heaps are prohibited at snapshot-construction time (the base must be self-contained or reference only other shared bases), which removes the need for a shared cross-process remembered set entirely.
-
----
-
-### 10. SNAP-1 Invariants
-
-| ID | Invariant |
-|----|-----------|
-| **SNAP-INV-01** | **Position Independence**: All heap references in the snapshot use NV-1 48-bit offsets, requiring no relocation. |
-| **SNAP-INV-02** | **Relocation Completeness**: All absolute addresses in the code and metadata images are listed in the relocation table. |
-| **SNAP-INV-03** | **Assumption Validation**: All assumptions in the snapshot are validated on startup. If any fail, the snapshot is discarded. |
-| **SNAP-INV-04** | **GC Consistency**: The snapshot heap is in a consistent GC state (all objects marked, no young-to-old references). |
-| **SNAP-INV-05** | **Dynamic Loading Fallback**: If a class/method is not in the snapshot, the runtime falls back to normal JIT compilation. |
-| **SNAP-INV-06** | **Incremental Compatibility**: Delta snapshots can be applied to base snapshots without corruption. |
-| **SNAP-INV-07** | **Debug Integration**: The debug image provides complete DWARF info for all snapshot code. |
-| **SNAP-INV-08** | **Snapshot Non-Relocatability**: No GC phase may select a snapshot page as an evacuation or compaction candidate. Snapshot pages are pinned and immortal for the lifetime of the mapping. A GC that relocates a snapshot object is incorrect by definition. |
-| **SNAP-INV-09** | **Shared Immutability**: A base snapshot mapped for sharing is mapped read-only. Mutator stores whose target page is a snapshot page trap (Snapshot Violation). The engine must not rely on Copy-on-Write to handle such stores. |
-| **SNAP-INV-10** | **External Snapshot Remembered Set**: Card marks and remembered references for snapshot pages reside in runtime-private memory outside the snapshot image. No GC or barrier protocol may write GC state into shared read-only snapshot pages. |
----
-
-## UGB-1: Universal Guest Bytecode Specification
-**Version 1.0 · Core Execution Contract**
-
-### 1. Fundamental Design Philosophy
-UGB is designed around three non-negotiable pillars:
-1. **Universal Representation**: It must be expressive enough to map the semantics of JS, Python, Ruby, Lua, and custom DSLs without losing fidelity.
-2. **Capability-Based Security**: There is zero ambient authority. All access to resources (I/O, FFI, memory mapping, network) requires a first-class Capability object.
-3. **Register-Based Execution**: It operates on a register-based VM model, dynamically allocating virtual registers per method, perfectly aligning with the NV-1 64-bit value model and the JIT's Adaptive Representation Selection (ARS).
-
-### 2. The Capability Security Model (Polyglot Isolation)
-In a polyglot engine, if Python code can access the filesystem, and JS code shares the same global namespace or runtime environment, a malicious JS script could exploit the Python runtime to escape its sandbox. UGB prevents this via **Object Capabilities**.
-
-#### 2.1 How Capabilities Work
-- A Capability is a standard heap object (with a specific `LayoutID`, e.g., `Layout_Capability`).
-- It contains an **Authority Mask** (e.g., `AUTH_FILE_READ`, `AUTH_FFI`, `AUTH_NETWORK`) and a **Resource Handle** (e.g., a file descriptor, a socket, a C function pointer).
-- **No Global Functions**: There is no global `open_file()` or `ffi_call()`. To open a file, you must invoke a method on a `FileSystem` capability.
-- **Delegation**: A host (the C++/Rust embedder) creates capabilities and passes them to the entry point of a script. The script can delegate (pass) these capabilities to child functions or other languages, but it cannot forge them.
-
-#### 2.2 Polyglot Boundary Security
-When JS calls Python:
-1. The JS code must explicitly pass a Capability to the Python entry point if the Python code needs to do anything privileged.
-2. The Python code runs in an isolated lexical scope. It cannot "reach out" to grab ambient authority.
-3. If the Python code attempts an FFI call without an `FFI_Capability`, the UGB `CAP_CHECK` opcode throws a `SecurityError`.
-
-### 3. Execution State & Frame Layout
-UGB is register-based. Every method invocation creates a **Frame**.
-
-#### 3.1 Frame Structure
-```text
-[ Frame Header ]
-  - Method ID
-  - Return Address (PC in caller)
-  - Caller Frame Pointer
-  - Capability Environment Pointer (Lexical scope of authorities)
-[ Virtual Registers ]
-  - Reg_0 to Reg_N (Each is a 64-bit NV-1 slot)
-  - Includes Arguments, Locals, and Temporaries
-[ Upvalue Pointers ]
-  - Pointers to closed-over variables from enclosing scopes
+```
+coordinate_recompilation(all_requests):
+    // Group requests by (function, target_tier)
+    recomp_requests = group_by(all_requests, |r| (r.function, r.target_tier))
+    
+    for (func, tier) in recomp_requests.keys():
+        lock = func.compilation_lock
+        
+        // Try to acquire the lock
+        if lock.try_lock():
+            // We got the lock; compile the function
+            lock.compiling_thread = Some(current_thread_id)
+            
+            // Check if another thread already compiled it
+            if lock.compiled_code == None:
+                code = compile(func, tier)
+                lock.compiled_code = Some(code)
+                func.set_code(tier, code)
+            
+            lock.compiling_thread = None
+            lock.unlock()
+        else:
+            // Another thread is compiling; wait for it to finish
+            wait_until(lock.compiled_code != None)
 ```
 
-#### 3.2 Register Allocation
-- The method header declares `arg_count` and `register_count`.
-- The interpreter allocates `register_count * 8` bytes on the VM stack.
-- All virtual registers are initially treated as `TAGGED` (NV-1) values. The JIT (T2/T3) will later apply ARS to keep them unboxed in physical CPU registers where profitable.
+**Fallback.** If compilation fails (e.g., out of memory), the function falls back to the next lower tier (T0 interpreter).
 
-### 4. Instruction Encoding
-To balance L1 I-cache density with the need for large methods, UGB uses a **Hybrid Variable-Length Encoding**.
+### 6.9 Handling Shared Inlined Functions
 
-- **Standard Instruction (95% of code)**: 
-  `[ 1-byte Opcode ] [ 1-byte Reg A ] [ 1-byte Reg B ] ...`
-  Supports up to 256 virtual registers per method. Extremely compact.
-- **Extended Instruction (Prefix 0xFF)**: 
-  `[ 0xFF ] [ 1-byte Opcode ] [ 2-byte Reg A ] [ 2-byte Reg B ] ...`
-  Supports up to 65,536 virtual registers. Used for massive methods or complex FFI calls.
+When a function F is inlined into multiple callers (e.g., G and H), and different threads deoptimize different inlined instances, the invalidation must be precise:
 
-### 5. The Opcode Taxonomy (116 Opcodes)
-UGB defines exactly 116 opcodes, grouped into 12 functional domains.
+**Scenario.** Thread 1 deopts F-in-G at call site CS1. Thread 2 deopts F-in-H at call site CS2.
 
-#### 5.1 Constants & Literals (10)
-| Opcode | Name | Operands | Semantics |
-|--------|------|----------|-----------|
-| `0x00` | `LOAD_NULL` | `dst` | `dst = Null` |
-| `0x01` | `LOAD_UNDEF` | `dst` | `dst = Undefined` |
-| `0x02` | `LOAD_TRUE` | `dst` | `dst = True` |
-| `0x03` | `LOAD_FALSE` | `dst` | `dst = False` |
-| `0x04` | `LOAD_INT8` | `dst, imm8` | `dst = SignExtend(imm8)` |
-| `0x05` | `LOAD_INT16` | `dst, imm16` | `dst = SignExtend(imm16)` |
-| `0x06` | `LOAD_INT32` | `dst, imm32` | `dst = SignExtend(imm32)` |
-| `0x07` | `LOAD_INT64` | `dst, imm64` | `dst = imm64` (Requires extended encoding) |
-| `0x08` | `LOAD_FLOAT` | `dst, imm64` | `dst = binary64(imm64)` |
-| `0x09` | `LOAD_CONST` | `dst, pool_idx` | `dst = ConstantPool[pool_idx]` |
+**Invalidation scope.**
+- Thread 1's deopt invalidates the inlined portion of F within G at CS1.
+- Thread 2's deopt invalidates the inlined portion of F within H at CS2.
+- The two invalidations are independent and do not affect each other.
 
-#### 5.2 Registers & Variables (12)
-| Opcode | Name | Operands | Semantics |
-|--------|------|----------|-----------|
-| `0x10` | `MOVE` | `dst, src` | `dst = src` |
-| `0x11` | `LOAD_LOCAL` | `dst, local_idx` | `dst = Frame[local_idx]` |
-| `0x12` | `STORE_LOCAL` | `local_idx, src` | `Frame[local_idx] = src` |
-| `0x13` | `LOAD_UPVALUE` | `dst, upval_idx` | `dst = *UpvaluePtr[upval_idx]` |
-| `0x14` | `STORE_UPVALUE` | `upval_idx, src` | `*UpvaluePtr[upval_idx] = src` |
-| `0x15` | `LOAD_GLOBAL` | `dst, name_idx` | `dst = GlobalEnv[name_idx]` |
-| `0x16` | `STORE_GLOBAL` | `name_idx, src` | `GlobalEnv[name_idx] = src` |
-| `0x17` | `LOAD_ARG` | `dst, arg_idx` | `dst = Args[arg_idx]` |
-| `0x18` | `STORE_ARG` | `arg_idx, src` | `Args[arg_idx] = src` |
-| `0x19` | `LOAD_THIS` | `dst` | `dst = ThisBinding` |
-| `0x1A` | `STORE_THIS` | `src` | `ThisBinding = src` |
-| `0x1B` | `LOAD_ENV` | `dst, env_idx` | `dst = CapabilityEnv[env_idx]` |
+**Patching algorithm.**
 
-#### 5.3 Arithmetic & Bitwise (16)
-*All operate on NV-1 TAGGED values. The JIT unboxes them to I64/F64 if ARS proves it is safe.*
-| Opcode | Name | Operands | Semantics |
-|--------|------|----------|-----------|
-| `0x20` | `ADD` | `dst, a, b` | `dst = a + b` (Handles int/float/string concat) |
-| `0x21` | `SUB` | `dst, a, b` | `dst = a - b` |
-| `0x22` | `MUL` | `dst, a, b` | `dst = a * b` |
-| `0x23` | `DIV` | `dst, a, b` | `dst = a / b` |
-| `0x24` | `MOD` | `dst, a, b` | `dst = a % b` |
-| `0x25` | `POW` | `dst, a, b` | `dst = a ** b` |
-| `0x26` | `NEG` | `dst, a` | `dst = -a` |
-| `0x27` | `ABS` | `dst, a` | `dst = |a|` |
-| `0x28` | `MIN` | `dst, a, b` | `dst = min(a, b)` |
-| `0x29` | `MAX` | `dst, a, b` | `dst = max(a, b)` |
-| `0x2A` | `BIT_AND` | `dst, a, b` | `dst = a & b` |
-| `0x2B` | `BIT_OR` | `dst, a, b` | `dst = a | b` |
-| `0x2C` | `BIT_XOR` | `dst, a, b` | `dst = a ^ b` |
-| `0x2D` | `BIT_SHL` | `dst, a, b` | `dst = a << b` |
-| `0x2E` | `BIT_SHR` | `dst, a, b` | `dst = a >>> b` (Logical) |
-| `0x2F` | `BIT_SAR` | `dst, a, b` | `dst = a >> b` (Arithmetic) |
+```
+patch_callers_concurrently(code_to_invalidate):
+    for code in code_to_invalidate:
+        for call_site in code.inlined_call_sites:
+            if call_site.is_invalidated:
+                // Replace the inlined code with a call to the lower-tier version
+                callee_lower_tier = call_site.callee.get_code(call_site.target_tier)
+                emit_call(call_site.pc, callee_lower_tier)
+                
+                // Mark the call site as patched (idempotent)
+                call_site.is_patched.compare_exchange_strong(false, true, 
+                    ordering=release, failure_ordering=relaxed)
+```
 
-#### 5.4 Comparison & Logic (8)
-| Opcode | Name | Operands | Semantics |
-|--------|------|----------|-----------|
-| `0x30` | `EQ` | `dst, a, b` | `dst = (a == b)` (Abstract equality) |
-| `0x31` | `NE` | `dst, a, b` | `dst = (a != b)` |
-| `0x32` | `LT` | `dst, a, b` | `dst = (a < b)` |
-| `0x33` | `LE` | `dst, a, b` | `dst = (a <= b)` |
-| `0x34` | `GT` | `dst, a, b` | `dst = (a > b)` |
-| `0x35` | `GE` | `dst, a, b` | `dst = (a >= b)` |
-| `0x36` | `IS_NULL` | `dst, a` | `dst = (a == Null)` |
-| `0x37` | `IS_UNDEF` | `dst, a` | `dst = (a == Undefined)` |
+**Idempotence.** The `compare_exchange_strong` ensures that each call site is patched exactly once, even if multiple threads try to patch it.
 
-#### 5.5 Control Flow (10)
-| Opcode | Name | Operands | Semantics |
-|--------|------|----------|-----------|
-| `0x40` | `JUMP` | `offset` | `PC += offset` |
-| `0x41` | `JUMP_TRUE` | `cond, offset` | `if (cond) PC += offset` |
-| `0x42` | `JUMP_FALSE` | `cond, offset` | `if (!cond) PC += offset` |
-| `0x43` | `JUMP_NULL` | `val, offset` | `if (val == Null) PC += offset` |
-| `0x44` | `JUMP_NOT_NULL`| `val, offset` | `if (val != Null) PC += offset` |
-| `0x45` | `SWITCH_TABLE` | `val, table_idx` | Jump via dense jump table |
-| `0x46` | `SWITCH_SPARSE` | `val, table_idx` | Jump via sparse hash/map |
-| `0x47` | `CALL` | `dst, target, argc` | `dst = target(args...)` |
-| `0x48` | `TAIL_CALL` | `target, argc` | Tail-recursive call |
-| `0x49` | `RETURN` | `val` | Return `val` to caller |
+### 6.10 Memory Ordering
 
-#### 5.6 Objects & Arrays (14)
-| Opcode | Name | Operands | Semantics |
-|--------|------|----------|-----------|
-| `0x50` | `ALLOC_OBJ` | `dst, layout_id` | Allocate object with given layout |
-| `0x51` | `ALLOC_ARRAY` | `dst, len` | Allocate array of length `len` |
-| `0x52` | `ALLOC_STRING` | `dst, len, enc` | Allocate string (Latin-1/UTF-16) |
-| `0x53` | `ALLOC_CLOSURE`| `dst, func_id` | Allocate closure (upvalues bound later) |
-| `0x54` | `LOAD_FIELD` | `dst, obj, offset` | `dst = obj[offset]` |
-| `0x55` | `STORE_FIELD` | `obj, offset, val` | `obj[offset] = val` |
-| `0x56` | `LOAD_INDEX` | `dst, arr, idx` | `dst = arr[idx]` (Bounds checked) |
-| `0x57` | `STORE_INDEX` | `arr, idx, val` | `arr[idx] = val` (Bounds checked) |
-| `0x58` | `LOAD_LENGTH` | `dst, obj` | `dst = obj.length` |
-| `0x59` | `HAS_FIELD` | `dst, obj, name` | `dst = obj.hasOwnProperty(name)` |
-| `0x5A` | `DELETE_FIELD` | `obj, name` | `delete obj[name]` |
-| `0x5B` | `ITER_NEXT` | `dst, iter` | `dst = iter.next()` |
-| `0x5C` | `ITER_DONE` | `dst, iter` | `dst = iter.done` |
-| `0x5D` | `ALLOC_ITER` | `dst, obj` | `dst = obj[Symbol.iterator]()` |
+The concurrent deoptimization protocol relies on specific memory ordering guarantees:
 
-#### 5.7 Capabilities & Security (10)
-*The core of the polyglot security model.*
-| Opcode | Name | Operands | Semantics |
-|--------|------|----------|-----------|
-| `0x60` | `CAP_CREATE` | `dst, auth, handle`| Create new capability with authority mask |
-| `0x61` | `CAP_CHECK` | `cap, req_auth` | Throws `SecurityError` if `cap` lacks `req_auth` |
-| `0x62` | `CAP_DELEGATE` | `dst, cap, sub_auth`| Create a derived capability with reduced authority |
-| `0x63` | `CAP_REVOKE` | `cap` | Revokes the capability and all its delegates |
-| `0x64` | `CAP_INVOKE` | `dst, cap, method` | Invoke a method on the capability's resource |
-| `0x65` | `CAP_SEAL` | `cap` | Prevents further delegation of this capability |
-| `0x66` | `CAP_GET_AUTH` | `dst, cap` | `dst = cap.authority_mask` |
-| `0x67` | `CAP_DROP` | `cap` | Explicitly drop a capability (helps GC) |
-| `0x68` | `CAP_WRAP` | `dst, obj, auth` | Wrap a raw object in a capability envelope |
-| `0x69` | `CAP_UNWRAP` | `dst, cap` | Extract the raw object (requires authority check) |
+**Release-acquire pairs.**
+- Coordinator writes `park_flag` with release → mutator reads with acquire.
+- Coordinator writes `resume_flag` with release → mutator reads with acquire.
+- Invalidation writes `is_valid` with release → mutator reads with acquire (at safepoint check).
 
-#### 5.8 Exceptions & Unwinding (6)
-| Opcode | Name | Operands | Semantics |
-|--------|------|----------|-----------|
-| `0x70` | `THROW` | `val` | Throw exception `val` |
-| `0x71` | `TRY_BEGIN` | `catch_offset` | Push exception handler to `catch_offset` |
-| `0x72` | `TRY_END` | | Pop exception handler |
-| `0x73` | `CATCH` | `dst` | `dst = thrown_exception` |
-| `0x74` | `FINALLY_BEGIN`| | Mark start of finally block |
-| `0x75` | `FINALLY_END` | | Mark end of finally block |
+**Sequential consistency fence.** After invalidation, a `seq_cst` fence ensures that all invalidation writes are visible to all threads before they resume.
 
-#### 5.9 Closures & Environments (6)
-| Opcode | Name | Operands | Semantics |
-|--------|------|----------|-----------|
-| `0x80` | `MAKE_CLOSURE`| `dst, func, upvals`| Bind upvalues to closure |
-| `0x81` | `CLOSE_UPVALUES`| `reg` | Close all upvalues pointing to `reg` |
-| `0x82` | `OPEN_UPVALUE` | `dst, reg` | Create open upvalue for `reg` |
-| `0x83` | `LOAD_ENV` | `dst, env_idx` | Load from capability environment |
-| `0x84` | `STORE_ENV` | `env_idx, src` | Store to capability environment |
-| `0x85` | `CLONE_ENV` | `dst, src` | Clone a capability environment scope |
+**Why not relaxed ordering?** Relaxed ordering would allow threads to see stale values of `is_valid`, potentially executing invalidated code. Release-acquire ensures that once a thread sees `resume_flag == true`, it also sees all invalidation writes.
 
-#### 5.10 FFI & Foreign Interop (8)
-*All FFI operations require an `FFI_Capability`.*
-| Opcode | Name | Operands | Semantics |
-|--------|------|----------|-----------|
-| `0x90` | `FFI_LOAD_LIB` | `dst, cap, name` | Load foreign library (Requires `AUTH_FFI`) |
-| `0x91` | `FFI_LOOKUP` | `dst, cap, lib, sym`| Lookup symbol in library |
-| `0x92` | `FFI_CALL` | `dst, cap, ptr, args`| Call foreign function pointer |
-| `0x93` | `FFI_CAST` | `dst, cap, val, type`| Cast value to foreign type |
-| `0x94` | `FFI_PIN` | `cap, obj` | Pin object in memory (prevents GC move) |
-| `0x95` | `FFI_UNPIN` | `cap, obj` | Unpin object |
-| `0x96` | `FFI_CALLBACK` | `dst, cap, func` | Create a callable foreign callback |
-| `0x97` | `FFI_SYSCALL` | `dst, cap, num, args`| Direct OS syscall (Requires `AUTH_SYSCALL`) |
+### 6.11 Edge Cases
 
-#### 5.11 Type & Reflection (8)
-| Opcode | Name | Operands | Semantics |
-|--------|------|----------|-----------|
-| `0xA0` | `TYPE_OF` | `dst, val` | `dst = typeof(val)` |
-| `0xA1` | `INSTANCE_OF` | `dst, val, type` | `dst = val instanceof type` |
-| `0xA2` | `IS_TYPE` | `dst, val, tag` | `dst = (NV1_TAG(val) == tag)` |
-| `0xA3` | `AS_TYPE` | `dst, val, tag` | Cast/Coerce `val` to `tag`, throws on failure |
-| `0xA4` | `GET_PROTOTYPE` | `dst, obj` | `dst = obj.__proto__` |
-| `0xA5` | `SET_PROTOTYPE` | `obj, proto` | `obj.__proto__ = proto` |
-| `0xA6` | `GET_OWN_PROP` | `dst, obj, name` | Get property descriptor |
-| `0xA7` | `ENUM_PROPS` | `dst, obj` | `dst = Object.keys(obj)` |
+**FFI (native code).** If a thread is executing native code (via FFI), it cannot be interrupted immediately. The protocol:
+1. The coordinator marks the thread as "pending deopt".
+2. When the native code returns to JIT code, it hits a safepoint and parks.
+3. If the native code does not return within a timeout (e.g., 100 ms), the coordinator raises a `DeoptTimeout` error.
 
-#### 5.12 GC, Safepoints & Meta (8)
-| Opcode | Name | Operands | Semantics |
-|--------|------|----------|-----------|
-| `0xB0` | `SAFEPOINT` | | Explicit GC yield point (used in long loops) |
-| `0xB1` | `WRITE_BARRIER`| `obj, val` | Explicit GC write barrier (JIT may elide) |
-| `0xB2` | `GC_ALLOC` | `dst, size` | Raw allocation (bypasses standard alloc) |
-| `0xB3` | `YIELD` | `val` | Yield to coroutine/scheduler |
-| `0xB4` | `DEBUG_BREAK` | | Trigger debugger breakpoint |
-| `0xB5` | `NOP` | | No operation |
-| `0xB6` | `HALT` | | Halt execution immediately |
-| `0xB7` | `SOURCE_MAP` | `line, col` | Debugging metadata (ignored in execution) |
+**Blocked threads.** If a thread is blocked (e.g., waiting on a lock), it cannot park immediately. The protocol:
+1. The coordinator marks the thread as "pending deopt".
+2. When the thread unblocks, it checks the `park_flag` at the next safepoint and parks.
+
+**Thread termination.** If a thread terminates during deopt, the coordinator removes it from the `threads_to_park` set and continues.
+
+**Recursive deopt.** If a thread triggers a deopt while already in the middle of a deopt (e.g., during state reconstruction), the second deopt is queued and handled after the first completes.
+
+**Nested inlining.** If function A inlines B, which inlines C, and a deopt is triggered in C, the scope includes C and the portion of B that contains C. The portion of A that contains B is not invalidated (it just calls B, which now calls C's lower-tier version).
+
+### 6.12 Validity Invariants
+
+Valid_ConcurrentDeopt(T, S, R) holds iff all of the following hold:
+
+**1. No-thread-executes-invalid-code.**
+- After invalidation, no thread executes code that has been marked as invalid.
+- All threads check the `is_valid` flag at safepoints before executing code.
+
+**2. Invalidation-idempotence.**
+- Each code block is invalidated exactly once, even if multiple threads request invalidation.
+- The `compare_exchange_strong` ensures atomicity.
+
+**3. Re-compilation-serializability.**
+- Each (function, tier) pair is compiled at most once per deopt cycle.
+- The compilation lock ensures mutual exclusion.
+
+**4. Safepoint-consistency.**
+- All threads that need to park are parked before invalidation begins.
+- All threads are resumed after invalidation completes.
+- No thread is left parked indefinitely.
+
+**5. Memory-ordering-correctness.**
+- All invalidation writes are visible to all threads before they resume.
+- Release-acquire semantics are used correctly.
+
+**6. State-reconstruction-correctness.**
+- Each thread's state is correctly reconstructed (same as single-thread invariant).
+- State reconstruction is thread-local and does not interfere with other threads.
+
+**7. Continuation-correctness.**
+- Each thread resumes in the correct lower tier.
+- The lower-tier code produces the same observable behavior as the speculative execution would have.
+
+**8. Progress.**
+- Every deopt request is eventually handled (no starvation).
+- Threads that are blocked or in native code eventually return to a safepoint (or timeout).
+
+**9. Performance bounds.**
+- Per-thread deopt overhead (no deopt pending): ≤ 1 cycle.
+- Coordinator overhead: O(|threads deopting|).
+- Maximum pause time per thread: ≤ 15 ms.
+
+**10. Termination.**
+- The concurrent deopt protocol terminates (no deadlocks).
+- All threads eventually resume execution.
+
+### 6.13 Representation and Cost Model
+
+**Thread-local state representation.** Each thread has a `ThreadDeoptState` structure (~64 bytes).
+
+**Coordinator state representation.** The coordinator maintains a queue of deopt requests and a set of threads to park (~1 KB overhead).
+
+**Compilation lock representation.** Each function has a `CompilationLock` structure (~32 bytes).
+
+**Traversal cost.** Coordinator: O(|threads deopting|) to park threads, O(|code to invalidate|) to invalidate, O(|recomp requests|) to coordinate re-compilation. Per-thread: O(|live vars|) for state reconstruction.
+
+**Modification cost.** Invalidation: O(1) per code block (atomic CAS). Patching: O(1) per call site (atomic CAS).
+
+**Memory complexity.** O(|threads| · 64 bytes + |functions| · 32 bytes + |deopt requests| · request_size).
+
+**Construction cost.** Coordinator setup: O(1). Per-deopt: O(|threads deopting| + |code to invalidate| + |live vars|).
 
 ---
 
-### 6. JIT Integration & Capability Optimization
-How does the JIT (T2/T3/T4) handle UGB, especially the capability overhead?
+# GC Interaction Subsystem — Complete Design Document (v1)
 
-#### 6.1 Capability Elision via AOSS
-The `CAP_CHECK` opcode is a potential performance bottleneck if executed on every FFI call. 
-- **AOSS Integration**: When a function receives a `FileSystem` capability, AOSS tracks it as a `SPECIALIZED` value. 
-- **Guard Insertion**: The JIT inserts a single `GuardLayout(cap, Layout_Capability)` and a `GuardAuth(cap, AUTH_FILE_READ)` at the function entry.
-- **Elision**: Inside the function body, all subsequent `CAP_CHECK` opcodes for that same capability are **eliminated** by Sea of Nodes' GVN (Global Value Numbering). The JIT replaces the UGB `CAP_INVOKE` with a direct native call, completely bypassing the runtime check.
-- **Invalidation**: If the capability is revoked (`CAP_REVOKE`), the AOSS DependencyMap invalidates the specialized region, forcing a deopt to the generic, checked path.
+## 0. Document Control and Design Scope
 
-#### 6.2 Polyglot Inlining
-If JS calls Python, and both are compiled by T3:
-- The FFI trampoline is analyzed. If the semantic adapters (exception translation, type conversion) are proven to be no-ops (e.g., both languages use NV-1 integers), the trampoline is **inlined**.
-- The Python function body is directly embedded in the JS method's SoN graph.
-- Result: Cross-language calls execute at native, intra-module speeds.
+**Component:** GC Interaction Subsystem (extension to Concurrent Deoptimization and Garbage Collection Subsystems)
+
+**Version:** 1.0
+
+**Role:** Coordinates the interaction between the Garbage Collector (GC) and the Deoptimization subsystem. Resolves conflicts arising from concurrent use of safepoints, stack scanning during transitional deoptimization states, pointer stability during concurrent relocation, and the lifetime of code metadata.
+
+**Design Status:** Complete specification.
+
+**Scope:** This document defines safepoint arbitration, stack scannability during deoptimization, pointer resolution via load barriers during state reconstruction, epoch-based metadata reclamation, and edge-case handling (e.g., deopt request during a GC pause). It does not define:
+- The core GC algorithm (already specified)
+- The core deoptimization algorithm (already specified)
+- The OS-level thread suspension mechanisms (consumed by both)
+
+**Normative References:**
+- Click, C. and Rose, J. "Speedup of Java Programs Using the HotSpot VM" (safepoint arbitration)
+- Dice, D. "Experience with Always-On Concurrent Garbage Collection" (stack scanning during state transitions)
+- Fraser, K. and Harris, T. "Concurrent Programming Without Locks" (epoch-based reclamation for metadata)
+- C11/C++11 memory model (for memory ordering primitives)
+
+**Known Limitations:**
+- Asynchronous class redefinition triggering deopt during a GC pause is handled by deferral, which may increase pause times slightly.
+- Epoch-based reclamation introduces a bounded delay in freeing invalidated code metadata.
 
 ---
 
-#### 6.3 Capability Version Epochs: Cheap T0 Enforcement (Corrected Addition)
+## 1. Goals, Non-Goals, and Constraints
 
-Section 6.1 covers JIT tiers, where AOSS guards eliminate per-call CAP_CHECK cost. It does not cover T0, where no specialization exists. The 1.0 text left T0 enforcing revocation through full authority-mask validation on every privileged operation, which is slow, or not enforcing it at all, which violates UGB-INV-01. Both outcomes are unacceptable, and the fix is the Capability Version Epoch (finding UGB-1, resolved).
+### Goals
 
-**Object model.** The Capability object's auxiliary header word (revised HEAP-1 128-bit header) reserves 16 bits as the version_epoch, plus 1 bit as the revoked flag. The epoch is a saturating up-counter.
+1. Ensure strict priority of GC safepoints over deoptimization safepoints to maintain GC pause time bounds.
+2. Guarantee that the mutator stack is always in a fully scannable state (described by a valid stack map) whenever the GC pauses threads.
+3. Ensure that pointers extracted during deoptimization state reconstruction are valid and correctly forwarded, even if concurrent GC relocation is active.
+4. Prevent use-after-free of `DeoptMetadata` and `CompiledCode` structures by the GC or mutator threads during concurrent invalidation.
+5. Provide a mathematically verifiable serialization of GC and deoptimization critical sections.
 
-**Runtime model.** The runtime's capability table stores, per capability: authority_mask, resource_handle, epoch (atomic u16), revoked (atomic flag), and a delegation link to its parent. CAP_REVOKE and CAP_SEAL are the only operations that mutate epoch or flag: revocation increments the epoch (saturating at 0xFFFF, where the capability becomes permanently invalid) and sets revoked. Delegation creates a child whose revocation propagates by incrementing every ancestor's epoch.
+### Non-Goals
 
-**T0 fast path.** Each UGB CAP_CHECK / CAP_INVOKE / FFI_* site in a method owns a one-slot epoch cache in the method's metadata (not in the frame, so it is shared across activations of the same method). The interpreter check is:
+1. Allow deoptimization to proceed concurrently with a Stop-The-World (STW) GC phase (deopt is deferred).
+2. Eliminate all deoptimization overhead during GC cycles (some deferral overhead is acceptable).
+3. Support deoptimization of threads that are permanently blocked in non-cooperative native code during a GC cycle.
 
-1. Load the site's cached epoch (thread-local metadata read).
-2. Load the capability's current epoch (single 16-bit load) and its revoked flag.
-3. If equal and not revoked: proceed. Total cost: two loads, one compare, one predicted branch.
-4. On mismatch: slow path. Re-read the full authority table. If the capability moved to a new epoch with the required authority still present, update the cache and proceed. If it was revoked (or authority is insufficient), throw SecurityError (UGB section 5.7).
+### Constraints
 
-A stale cache can only cause a slow path, never a security hole: the authoritative state is the capability object's epoch, and the cache is validated against it on every check. Revocation therefore costs one increment, and every T0 site observes it on its next check with no broadcast, no code patching, and no full-mask evaluation.
+- Safepoint arbitration overhead: ≤ 1 cycle per safepoint check.
+- Stack scannability invariant must hold at all times; no "transitional" stack states are visible to the GC.
+- Metadata reclamation must not block GC progress or mutator execution.
+- Pointer extraction during deopt must incur at most the cost of the GC load barrier (O(1)).
 
-**JIT tiers.** T2/T3 keep the AOSS guard model of section 6.1. The epoch is folded into the guard: GuardEpoch(cap, epoch_at_compile) is GVN'd with the layout guard, and CAP_REVOKE's epoch increment invalidates dependent regions through the AOSS DependencyMap exactly like a layout transition (CONC-1 publication rules apply).
+---
 
-### 7. UGB Invariants
+## 6. GC Interaction Subsystem
 
-| ID | Invariant |
+### 6.1 Purpose and Domain
+
+The GC Interaction Subsystem resolves the fundamental tension between GC and deoptimization: both require mutator threads to reach safepoints, both inspect or modify thread state (stack/registers), and both manipulate memory (GC moves objects, deopt reconstructs state referencing those objects). 
+
+The domain is the set of concurrent executions where GC cycles and deoptimization requests overlap in time. The codomain is a serialized or safely concurrent execution where all GC invariants and deoptimization invariants are preserved.
+
+### 6.2 Mathematical Specification
+
+| Requirement | Specification |
 |---|---|
-| **UGB-INV-01** | **Capability Completeness**: No privileged operation (FFI, I/O, Syscall) can be executed without a valid, unrevoked capability passed explicitly as an operand. |
-| **UGB-INV-02** | **Value Uniformity**: All virtual registers hold exactly one 64-bit NV-1 value. There are no "hidden" types or unboxed values at the UGB level. |
-| **UGB-INV-03** | **Control Flow Safety**: All jumps and branches must target valid bytecode offsets. The interpreter and JIT must verify CFG integrity before execution. |
-| **UGB-INV-04** | **Exception Safety**: Every `TRY_BEGIN` must have a matching `TRY_END`. Unwinding must correctly restore the capability environment and virtual register state. |
-| **UGB-INV-05** | **Safepoint Coverage**: Every loop back-edge and function call must contain or be dominated by a `SAFEPOINT` or implicit safepoint, ensuring the concurrent GC can make progress. |
-| **UGB-INV-06** | **Semantic Preservation**: The JIT must never optimize away a `CAP_CHECK` unless it has mathematically proven the capability's validity and authority via AOSS. |
-| **UGB-INV-07** | **Epoch Cache Safety**: A cached capability epoch may only ever cause a slow path, never a bypass. Every capability-consuming site must validate its cached epoch against the capability object's current epoch before the privileged operation executes. Revocation must be observable to all tiers within one check of the next privileged use. |
+| **Domain** | $E$: the set of concurrent execution traces involving mutator threads, GC threads, and the deopt coordinator. |
+| **Codomain** | $E'$: the set of valid execution traces where GC and deopt invariants hold. |
+| **Definitions** | $S_{gc}$: GC safepoint state. $S_{deopt}$: Deopt safepoint state. $Map(t)$: The active stack map for thread $t$. $Extract(p)$: Pointer extraction function during state reconstruction. |
+| **Preconditions** | GC and deopt subsystems individually satisfy their validity invariants when run in isolation. |
+| **Postconditions** | $E'$ satisfies Stack Scannability, Pointer Validity, and Metadata Liveness invariants. |
+| **Invariants** | Safepoint priority, stack scannability, pointer validity, metadata liveness. |
+| **Relations** | Safepoint arbitration ($\succ$), metadata reclamation ($\rightarrow_{reclaim}$). |
+| **Failure behavior** | If stack scannability is violated, the runtime aborts (InternalCompilerError). If pointer extraction yields an invalid pointer, the runtime aborts. |
+| **Complexity** | Arbitration: O(1). Pointer extraction: O(1) (load barrier cost). Metadata reclamation: O(1) amortized per thread per epoch. |
+| **Correctness** | For any trace $E \in$ Domain, the observable behavior matches a trace $E' \in$ Codomain where GC and deopt operations are safely serialized or concurrently correct. |
+
+### 6.3 Safepoint Arbitration
+
+Safepoint arbitration ensures that GC pauses take strict precedence over deoptimization pauses. 
+
+**Global Safepoint State.** The runtime maintains a global safepoint state:
+
+```
+enum SafepointState {
+    RUNNING,          // No safepoint active
+    GC_PENDING,       // GC has requested a safepoint
+    GC_ACTIVE,        // GC safepoint is active, mutators are parked
+    DEOPT_PENDING,    // Deopt has requested a safepoint (no GC active)
+    DEOPT_ACTIVE,     // Deopt safepoint is active, mutators are parked
+}
+```
+
+**Arbitration Rule.** $GC \succ DEOPT$. If a GC safepoint is requested while a deopt safepoint is pending or active, the deopt safepoint is aborted or deferred, and threads transition to the GC safepoint.
+
+**Thread Safepoint Check.** At every safepoint poll site, a thread executes:
+
+```
+safepoint_poll():
+    state = global_safepoint_state.load_acquire()
+    
+    if state == GC_PENDING or state == GC_ACTIVE:
+        handle_gc_safepoint()
+    else if state == DEOPT_PENDING or state == DEOPT_ACTIVE:
+        if thread_state.pending_request != None:
+            handle_deopt_safepoint()
+        else:
+            // Thread is parked for deopt but has no request of its own
+            // (e.g., synthetic deopt). It waits for the coordinator.
+            wait_for_deopt_coordinator()
+    else:
+        // RUNNING: continue execution
+```
+
+**Deferral of Deopt Requests.** If a guard fails while `global_safepoint_state` is `GC_PENDING` or `GC_ACTIVE`, the thread records the `pending_request` in its thread-local state but does *not* initiate deopt coordination. It parks for the GC safepoint. Once the GC safepoint completes and the state returns to `RUNNING`, the thread (or the deopt coordinator) will notice the pending request and initiate the deopt protocol.
+
+### 6.4 Stack Scannability During Deoptimization
+
+**The Problem.** During state reconstruction, a thread modifies its stack and registers to match the source-level state. If the GC triggers a safepoint mid-reconstruction, the stack may be in a transitional state not described by any valid stack map, causing the GC to miss roots or scan garbage.
+
+**The Solution: Atomic Map Transition.** State reconstruction is performed while the thread is parked at the deopt safepoint. The thread's active stack map is updated *atomically* with respect to the GC.
+
+**Algorithm.**
+
+```
+reconstruct_state_atomically(deopt_point, machine_state):
+    // Step 1: The thread is already parked at the deopt safepoint.
+    // The GC sees the thread as parked, and its stack is described by 
+    // the *old* (pre-deopt) stack map. This is valid.
+    
+    // Step 2: Compute the new source-level state in thread-local memory
+    // (does not modify the actual stack or registers yet).
+    new_source_state = compute_source_state(deopt_point, machine_state)
+    new_stack_map = get_stack_map_for_deopt_target(deopt_point)
+    
+    // Step 3: Atomically update the thread's active stack map and state.
+    // This is a single atomic write (or a pair of writes protected by a 
+    // memory barrier) that the GC will observe as either the old state 
+    // or the new state, never a mix.
+    thread_state.active_stack_map.store_release(new_stack_map)
+    thread_state.current_pc.store_release(new_source_state.target_pc)
+    
+    // Step 4: Apply the state to the actual machine registers/stack.
+    // This is safe because the thread is still parked; the GC will not 
+    // scan the stack until the thread is resumed, at which point the 
+    // new stack map is active and valid.
+    apply_state_to_machine(new_source_state)
+```
+
+**Invariant Guarantee.** At any point where the GC might scan the thread's stack, `thread_state.active_stack_map` points to a valid, consistent map that accurately describes the current contents of the stack and registers.
+
+### 6.5 Pointer Stability and Forwarding Resolution
+
+**The Problem.** During concurrent old-generation evacuation, objects are moved, and their old locations contain forwarding pointers. If the deoptimization state reconstruction reads a pointer from a stack slot or register, it might read a stale (old) address.
+
+**The Solution: Barrier-Aware Extraction.** The `extract_value` function used during state reconstruction must resolve forwarding pointers, exactly as the mutator's load barrier does.
+
+**Algorithm.**
+
+```
+extract_value(machine_state, location) -> Value:
+    raw_value = read_from_location(machine_state, location)
+    
+    if is_reference_type(raw_value) and raw_value != null:
+        // Apply the GC load barrier logic to ensure we get the 
+        // current, valid address, not a stale forwarded address.
+        resolved_value = gc_load_barrier_resolve(raw_value)
+        return resolved_value
+    else:
+        return raw_value
+
+gc_load_barrier_resolve(ptr) -> Pointer:
+    // Check if the object at 'ptr' has been forwarded.
+    // This uses the same logic as the T1 JIT load barrier.
+    if is_forwarded(ptr):
+        new_ptr = get_forwarding_pointer(ptr)
+        return new_ptr
+    else:
+        return ptr
+```
+
+**Correctness.** By applying the load barrier during state reconstruction, the deopt subsystem guarantees that all reconstructed source-level variables point to valid, live objects in the heap, maintaining the Pointer Validity invariant.
+
+### 6.6 Code Metadata Lifetimes (Epoch-Based Reclamation)
+
+**The Problem.** When code is invalidated, its `CompiledCode` structure and associated `DeoptMetadata` cannot be immediately freed. The GC might be concurrently scanning the stack and reading the old stack map, or a thread might be mid-deoptimization and still reading the metadata.
+
+**The Solution: Epoch-Based Reclamation.** Metadata is not freed immediately upon invalidation. Instead, it is marked as "retired" and placed in a retirement queue. It is only freed after a "safe epoch" has passed (e.g., after all threads have passed through a safepoint, guaranteeing no thread holds a reference to the old metadata).
+
+**Algorithm.**
+
+```
+// Global state
+current_epoch: Atomic<u64>
+retirement_queues: Map<u64, List<RetiredMetadata>>
+
+invalidate_code(code: CompiledCode):
+    // Step 1: Mark as invalid (prevents new uses)
+    code.is_valid.store_release(false)
+    
+    // Step 2: Retire the metadata
+    epoch = current_epoch.load_acquire()
+    retirement_queues[epoch].push(RetiredMetadata {
+        code: code,
+        deopt_metadata: code.deopt_metadata,
+    })
+
+// Called by the GC at the end of a safepoint (or by a dedicated reclamation thread)
+advance_epoch_and_reclaim():
+    // Step 1: Advance the epoch
+    new_epoch = current_epoch.fetch_add(1, release) + 1
+    
+    // Step 2: Reclaim metadata from epochs that are now safe.
+    // An epoch is safe if it is <= new_epoch - 2, because any thread 
+    // that started reading metadata in that epoch must have passed 
+    // through a safepoint since then (due to GC or deopt coordination).
+    safe_epoch = new_epoch - 2
+    
+    for e in 0..=safe_epoch:
+        for item in retirement_queues[e]:
+            free(item.code)
+            free(item.deopt_metadata)
+        retirement_queues[e].clear()
+```
+
+**Integration with GC.** The GC naturally advances the epoch at the end of every safepoint (since all threads are guaranteed to have passed through the safepoint). This piggybacks reclamation on existing GC coordination, adding O(1) overhead per safepoint.
+
+### 6.7 Edge Cases
+
+**Deopt Request During GC Pause.**
+- If a mutator thread triggers a guard failure *while* it is already parked for a GC safepoint, it simply sets `thread_state.pending_request`. It does not wake up or initiate deopt coordination.
+- When the GC safepoint ends, the deopt coordinator (or the thread itself upon resuming) will see the pending request and initiate the standard deopt protocol.
+
+**GC Triggered During Deopt Coordination.**
+- If the GC requests a safepoint while the deopt coordinator is in Phase 3 (signaling threads to park) or Phase 5 (waiting for threads to park), the global state transitions to `GC_PENDING` / `GC_ACTIVE`.
+- Threads that were parking for deopt will instead park for GC.
+- The deopt coordinator detects the state change, aborts its current coordination cycle, and yields to the GC.
+- After the GC completes, the deopt coordinator restarts its coordination cycle from Phase 1.
+
+**Concurrent Relocation and Deopt Stack Scanning.**
+- If the GC is in the concurrent relocation phase, mutator threads are running and executing load barriers.
+- If a deopt safepoint is triggered, threads park. The GC's concurrent relocation phase may continue to process some objects, but the parked threads' stacks are stable.
+- When the thread reconstructs state, it uses `gc_load_barrier_resolve` (Section 6.5), ensuring it sees the relocated addresses.
+
+### 6.8 Validity Invariants
+
+Valid_GC_Deopt_Interaction(E) holds iff all of the following hold:
+
+**1. Safepoint Priority.**
+- At any time, if `global_safepoint_state` indicates a GC safepoint, no deoptimization coordination proceeds.
+- Deopt requests are deferred, not lost, during GC safepoints.
+
+**2. Stack Scannability.**
+- At any point where the GC may scan a thread's stack, `thread_state.active_stack_map` points to a valid map that accurately describes the stack and register contents.
+- No transitional stack states are ever visible to the GC.
+
+**3. Pointer Validity.**
+- Every pointer extracted during deoptimization state reconstruction is resolved through the GC load barrier (or equivalent mechanism), ensuring it points to a valid, non-forwarded object.
+
+**4. Metadata Liveness.**
+- No `CompiledCode` or `DeoptMetadata` structure is freed while any thread might be reading it.
+- Epoch-based reclamation ensures metadata is only freed after a safe epoch has passed.
+
+**5. Progress.**
+- Deferred deopt requests are eventually processed after the GC safepoint completes.
+- The GC is not indefinitely blocked by deoptimization (deopt defers to GC).
+
+**6. Memory Ordering.**
+- All transitions of `global_safepoint_state`, `active_stack_map`, and `is_valid` use release-acquire or stronger memory ordering, preventing torn reads or stale views by the GC or mutator threads.
+
+### 6.9 Representation and Cost Model
+
+**Safepoint state representation.** A single atomic variable (`global_safepoint_state`) plus per-thread `pending_request` flags.
+
+**Epoch reclamation representation.** An atomic `current_epoch` counter and an array of retirement queues (size = 3, for current, previous, and safe epochs).
+
+**Traversal cost.** Safepoint poll: 1 atomic load (≤ 1 cycle). Epoch advancement: O(|retired items|) at the end of a GC safepoint.
+
+**Modification cost.** Pointer extraction during deopt: O(1) (adds the cost of the GC load barrier, ~3-5 cycles on fast path). Metadata retirement: O(1) (push to queue).
+
+**Memory complexity.** O(|threads| + |retired metadata|). The retirement queue size is bounded by the amount of code invalidated between GC cycles.
+
+**Construction cost.** Integration adds O(1) overhead to the existing GC and deopt protocols.
+
+---
+# Tiered Compilation System — Complete Design Document (v1)
+
+## 0. Document Control and Design Scope
+
+**Component:** Tiered Compilation System (T2 through T5)
+
+**Version:** 1.0
+
+**Role:** Progressive optimization pipeline. Defines the tier structure, pass allocation per tier, compilation budget model, tier transition policy, profile-guided tier selection, and integration with the deoptimization subsystem. T0 and T1 are already specified elsewhere.
+
+**Design Status:** Complete specification.
+
+**Scope:** This document defines the tier taxonomy, pass complexity classification, per-tier compilation budgets, tier transition triggers, profile data flow, compilation queue scheduling, cost-benefit model, validity invariants, and cost model. It does not define:
+- The specific optimization passes (already specified in the optimizer subsystem document)
+- The T0 interpreter or T1 baseline JIT (already specified)
+- The deoptimization subsystem (already specified; consumes tier transitions)
+- The GC (interacts via safepoints during compilation)
+
+**Normative References:**
+- Click, C. and Rose, J. "Speedup of Java Programs Using the HotSpot VM" (tiered compilation)
+- Fink, S. et al. "Adaptive Optimization for Managed Runtime Environments" (compilation budgets)
+- Suganuma, T. et al. "A Region-based Optimization Framework for Dalvik" (pass scheduling)
+- Standard compiler literature on pass complexity and fixed-point iteration
+
+**Known Limitations:**
+- The exact pass-to-tier assignment is a policy decision; the document specifies the classification rules, not the specific assignments.
+- Cross-tier profile data merging is partially specified.
+- The compilation queue's interaction with OS scheduling is abstracted.
+
+---
+
+## 1. Goals, Non-Goals, and Constraints
+
+### Goals
+
+1. Provide a monotonic tier structure where each higher tier applies strictly more optimization work than the previous.
+2. Classify each optimization pass by its asymptotic complexity and assign it to the lowest tier where its cost-benefit ratio is acceptable.
+3. Bound compilation time per tier so that higher tiers are only applied to sufficiently hot code.
+4. Ensure that tier transitions are monotonic in optimization level: code compiled at tier T_k can be re-compiled at T_{k+1} but never downgraded except via deoptimization.
+5. Preserve all profiling data across tier transitions so that higher tiers can make better decisions.
+6. Provide a mathematically defined cost-benefit model for tier selection.
+7. Integrate cleanly with the deoptimization subsystem: when a speculative assumption at tier T_k is violated, execution falls back to T_{k-1}.
+
+### Non-Goals
+
+1. Specify the individual optimization passes (they are defined elsewhere).
+2. Achieve peak performance at every tier (only T5 targets peak).
+3. Eliminate tier transition overhead (it is bounded, not zero).
+4. Support arbitrary user-defined tiers (the tier count is fixed at 6: T0 through T5).
+
+### Constraints
+
+- Compilation time at tier T_k must be bounded by B_k · |IR| where B_k is the tier-specific budget constant.
+- The budget constants must satisfy B_2 < B_3 < B_4 < B_5.
+- Every pass assigned to tier T_k must have complexity O(|IR|^c) where c ≤ k - 1 (i.e., T2 is O(1) per node, T3 is O(n), T4 is O(n²), T5 is unbounded but terminates).
+- Tier transitions must preserve all profiling data.
+- Deoptimization from T_k must fall back to T_{k-1} (or T0 if k=1).
+
+---
+
+## 6. Tiered Compilation System
+
+### 6.1 Purpose and Domain
+
+The Tiered Compilation System orchestrates the progressive optimization of functions as they become hotter. Its purpose is to amortize compilation cost over execution benefit: cheap compilation for cold code, expensive compilation for hot code.
+
+The system maintains:
+- A **tier taxonomy** defining what each tier does.
+- A **pass complexity classifier** that assigns each optimization pass to a complexity class.
+- A **compilation budget model** that bounds per-tier compilation time.
+- A **tier transition policy** that decides when to move a function to a higher tier.
+- A **compilation queue** that schedules compilation work.
+- A **profile data flow** mechanism that preserves profiling information across tiers.
+
+### 6.2 Mathematical Specification
+
+| Requirement | Specification |
+|---|---|
+| **Domain** | F: set of functions. P: set of optimization passes. Prof: profiling data. H: hotness metric. |
+| **Codomain** | C_k: compiled code at tier T_k, for k ∈ {0, 1, 2, 3, 4, 5}. |
+| **Definitions** | Tier(T_k): the compilation tier. Passes(T_k): the set of passes applied at tier T_k. Budget(T_k): the compilation time budget for tier T_k. Hotness(f): the hotness metric for function f. |
+| **Preconditions** | The function f is well-formed. Profiling data is available. The pass complexity classifier is consistent. |
+| **Postconditions** | The compiled code C_k satisfies Valid_Code(C_k) and ⟦C_k⟧ = ⟦f⟧ (observational equivalence). |
+| **Invariants** | Tier monotonicity, pass complexity classification, budget adherence, profile preservation, deopt consistency. |
+| **Relations** | Pass-to-tier assignment (→_tier), tier transition (→_transition), profile flow (→_profile). |
+| **Failure behavior** | If compilation exceeds the budget, the tier is capped at the current level. If profile data is corrupted, fall back to T1. |
+| **Complexity** | Compilation at T_k: O(|IR|^c_k) where c_k is the tier's complexity class. |
+| **Correctness** | For all tiers, ⟦C_k⟧ = ⟦f⟧. Higher tiers produce code with lower or equal execution cost: Cost(C_{k+1}) ≤ Cost(C_k). |
+
+### 6.3 Tier Taxonomy
+
+**Tier definitions.**
+
+- **T0 (Speculative Register Interpreter).** Executes bytecode directly with speculative optimizations, inline caching, opcode rewriting, and super byte codes. Collects profiling data. No compilation.
+
+- **T1 (Baseline Copy-and-Patch JIT).** Compiles bytecode to native code using pre-compiled templates. No optimization passes. Fast compilation (~10 µs per function). Collects profiling data.
+
+- **T2 (O(1) Passes Tier).** Applies all optimization passes with O(1) per-node complexity. These are single-scan passes that do not iterate to fixed point. Compilation time: O(|IR|).
+
+- **T3 (O(n) Passes Tier).** Applies all T2 passes plus all passes with O(n) or O(n log n) complexity. These include iterative dataflow analyses that converge in O(n) iterations, loop analyses, and simple alias analyses. Compilation time: O(|IR| · log |IR|).
+
+- **T4 (O(n²) Passes Tier).** Applies all T3 passes plus all passes with O(n²) complexity. These include global value numbering with full equivalence classes, interprocedural analyses, and full alias analyses. Compilation time: O(|IR|²).
+
+- **T5 (Full Optimization Tier).** Applies all passes from all lower tiers, iterated to fixed point. Re-runs earlier passes after later passes expose new opportunities. Compilation time: O(|IR|^c) where c is the maximum pass complexity, but bounded by a wall-clock budget.
+
+**Tier monotonicity.** For all k < j, Passes(T_k) ⊆ Passes(T_j). A function compiled at tier T_j has had all the optimization work of tier T_k applied, plus more.
+
+### 6.4 Pass Complexity Classification
+
+**Complexity classes.** Each optimization pass is classified by its asymptotic complexity in terms of the IR size n = |IR|:
+
+- **Class 0 (O(1) per node):** Single-scan passes. The pass visits each node a constant number of times and performs O(1) work per node. Total: O(n). Examples: peephole optimizations, simple constant folding, single-pass dead code elimination, type specialization.
+
+- **Class 1 (O(n) or O(n log n)):** Iterative passes that converge in O(1) or O(log n) iterations. Total: O(n) or O(n log n). Examples: iterative dataflow (reaching definitions, liveness), loop detection, simple alias analysis (type-based).
+
+- **Class 2 (O(n²)):** Passes that require pairwise analysis or iterate O(n) times with O(n) work per iteration. Total: O(n²). Examples: global value numbering with full equivalence, interprocedural analysis, full alias analysis (pointer-based).
+
+- **Class 3 (O(n³) or higher):** Passes with cubic or worse complexity. These are only applied at T5 and only if the function is hot enough to justify the cost.
+
+**Classification rules.** A pass is assigned to the lowest tier T_k such that its complexity class is ≤ k - 2. That is:
+- Class 0 passes → T2
+- Class 1 passes → T3
+- Class 2 passes → T4
+- Class 3+ passes → T5
+
+**Pass ordering within a tier.** Passes within a tier are ordered by a dependency graph. If pass A exposes opportunities for pass B, then A must run before B. The ordering is computed once at startup and is the same for all functions.
+
+### 6.5 Compilation Budget Model
+
+**Budget constants.** Each tier has a budget constant B_k that bounds the compilation time per IR node:
+
+- B_2 = 100 ns per node (T2 compiles ~10M nodes/sec)
+- B_3 = 500 ns per node (T3 compiles ~2M nodes/sec)
+- B_4 = 2 µs per node (T4 compiles ~500K nodes/sec)
+- B_5 = 10 µs per node (T5 compiles ~100K nodes/sec)
+
+**Budget enforcement.** The compilation budget for a function at tier T_k is:
+
+    Budget(f, T_k) = B_k · |IR(f)|
+
+If compilation exceeds this budget, the compiler caps the optimization at the current tier and emits the code. The function may be re-compiled at a higher tier later if it becomes hotter.
+
+**Wall-clock budget for T5.** T5 has an additional wall-clock budget to prevent unbounded compilation:
+
+    WallClockBudget(T5) = max(100 ms, 10 · Budget(f, T4))
+
+If T5 compilation exceeds this wall-clock budget, the compiler stops iterating and emits the current best code.
+
+### 6.6 Tier Transition Policy
+
+**Hotness metric.** The hotness of a function is a composite metric:
+
+    Hotness(f) = α · invocation_count(f) + β · loop_iteration_count(f) + γ · time_in_function(f)
+
+where α, β, γ are configurable weights (default: α=1, β=10, γ=0.001).
+
+**Transition thresholds.** A function is promoted from tier T_k to T_{k+1} when:
+
+    Hotness(f) ≥ Threshold(T_k)
+
+The thresholds are:
+- Threshold(T0 → T1) = 100 (interpreted invocations)
+- Threshold(T1 → T2) = 1,000
+- Threshold(T2 → T3) = 10,000
+- Threshold(T3 → T4) = 100,000
+- Threshold(T4 → T5) = 1,000,000
+
+**Demotion via deoptimization.** When a function at tier T_k deoptimizes, it falls back to T_{k-1}. The hotness metric is not reset; the function may be re-promoted later if it remains hot.
+
+**Adaptive thresholds.** The thresholds are adjusted based on system load:
+- If the compilation queue is backlogged, thresholds are increased (delay promotion).
+- If the compilation queue is empty, thresholds are decreased (accelerate promotion).
+
+### 6.7 Profile Data Flow
+
+**Profile preservation.** When a function is re-compiled at a higher tier, all profiling data collected at lower tiers is preserved and passed to the higher tier's optimization passes. This includes:
+- Execution counts (per bytecode, per branch, per call site)
+- Type feedback (per variable, per inline cache)
+- Loop iteration counts
+- Call site statistics (callee distribution)
+
+**Profile merging.** If a function is deoptimized and re-compiled, the new profiling data is merged with the old:
+- Execution counts are summed.
+- Type feedback sets are unioned.
+- Loop iteration counts are summed.
+
+**Profile decay.** To prevent stale profiling data from dominating, profiles are decayed over time:
+
+    profile_new = 0.9 · profile_old + profile_new_data
+
+This ensures that recent behavior is weighted more heavily than historical behavior.
+
+### 6.8 Compilation Queue Scheduling
+
+**Queue structure.** The compilation queue is a priority queue of compilation requests, ordered by:
+
+    Priority(f) = Hotness(f) / EstimatedCompilationCost(f)
+
+This prioritizes functions that are hot but cheap to compile, maximizing the benefit per unit of compilation time.
+
+**Scheduling algorithm.** The compilation queue is processed by a pool of compiler threads. The scheduler:
+
+1. Dequeues the highest-priority compilation request.
+2. Allocates a compiler thread to the request.
+3. The compiler thread compiles the function at the target tier.
+4. The compiled code is installed atomically (via a code cache update).
+5. Existing frames are deoptimized (if necessary) to use the new code.
+
+**Backpressure.** If the compilation queue exceeds a threshold (e.g., 1000 pending requests), the scheduler increases the tier transition thresholds to reduce the inflow of new requests.
+
+**Fairness.** To prevent starvation of cold functions, the scheduler uses a weighted fair queuing algorithm: each function gets a minimum share of compilation time proportional to its hotness.
+
+### 6.9 Cost-Benefit Model
+
+**Compilation cost.** The cost of compiling a function f at tier T_k is:
+
+    Cost_compile(f, T_k) = B_k · |IR(f)|
+
+**Execution benefit.** The benefit of compiling at tier T_k (vs. T_{k-1}) is the reduction in execution time over the function's remaining lifetime:
+
+    Benefit(f, T_k) = (ExecTime(f, T_{k-1}) - ExecTime(f, T_k)) · RemainingInvocations(f)
+
+**Tier selection rule.** A function is promoted to tier T_k if:
+
+    Benefit(f, T_k) > Cost_compile(f, T_k) · OverheadFactor
+
+where OverheadFactor (default 1.5) accounts for the fact that compilation time is more expensive than execution time (it blocks other work, consumes memory, etc.).
+
+**Break-even analysis.** The break-even point (number of invocations needed to amortize compilation cost) is:
+
+    BreakEven(f, T_k) = Cost_compile(f, T_k) / (ExecTime(f, T_{k-1}) - ExecTime(f, T_k))
+
+If the function's expected remaining invocations exceed BreakEven, the promotion is justified.
+
+### 6.10 Validity Invariants
+
+Valid_TieredCompilation(F, C) holds iff all of the following hold:
+
+**1. Tier monotonicity.**
+- For all k < j, Passes(T_k) ⊆ Passes(T_j).
+- A function is never compiled at a lower tier after being compiled at a higher tier (except via deoptimization).
+
+**2. Pass complexity classification.**
+- Every pass assigned to tier T_k has complexity class ≤ k - 2.
+- The classification is consistent (no pass is assigned to multiple tiers).
+
+**3. Budget adherence.**
+- Compilation at tier T_k does not exceed Budget(f, T_k).
+- T5 compilation does not exceed WallClockBudget(T5).
+
+**4. Profile preservation.**
+- All profiling data is preserved across tier transitions.
+- Profile merging is correct (counts are summed, type sets are unioned).
+- Profile decay is applied correctly.
+
+**5. Deopt consistency.**
+- Deoptimization from T_k falls back to T_{k-1} (or T0 if k=1).
+- The deoptimized code produces the same observable behavior as the speculative code would have.
+
+**6. Observational equivalence.**
+- For all tiers k, ⟦C_k⟧ = ⟦f⟧.
+- Higher tiers produce code with lower or equal execution cost: Cost(C_{k+1}) ≤ Cost(C_k).
+
+**7. Compilation queue correctness.**
+- All compilation requests are eventually processed (no starvation).
+- The queue does not exceed the backpressure threshold for extended periods.
+
+**8. Atomic code installation.**
+- Compiled code is installed atomically (no thread sees a partially-installed code block).
+- Existing frames are correctly deoptimized when new code is installed.
+
+### 6.11 Representation and Cost Model
+
+**Tier state representation.** Each function has a `TierState` structure:
+
+```
+struct TierState {
+    current_tier: u8,                  // Current compilation tier (0-5)
+    compiled_code: [Option<CompiledCode>; 6],  // Compiled code for each tier
+    profile_data: ProfileData,         // Accumulated profiling data
+    hotness: f64,                      // Current hotness metric
+    deopt_count: u32,                  // Number of deoptimizations
+}
+```
+
+**Compilation queue representation.** A priority queue of `CompilationRequest` structures:
+
+```
+struct CompilationRequest {
+    function: Function,
+    target_tier: u8,
+    priority: f64,
+    timestamp: u64,
+}
+```
+
+**Traversal cost.** Tier transition decision: O(1) (compare hotness to threshold). Profile merging: O(|profile data|). Compilation queue scheduling: O(log |queue|) per request.
+
+**Modification cost.** Code installation: O(1) (atomic pointer swap). Deoptimization: O(|frames|) (see deopt subsystem).
+
+**Memory complexity.** O(|functions| · tier_state_size + |queue| · request_size + |profile data| · profile_size).
+
+**Construction cost.** Tier initialization: O(|functions|). Per-compilation: O(|IR|^c_k) where c_k is the tier's complexity class.
+
+---
+# Compilation Cancellation Subsystem — Complete Design Document (v1)
+
+## 0. Document Control and Design Scope
+
+**Component:** Compilation Cancellation Subsystem (extension to Tiered Compilation System)
+
+**Version:** 1.0
+
+**Role:** Detects and handles the cancellation of in-progress compilations when the target function becomes cold, is superseded by a higher-priority request, or the system is under resource pressure. Ensures clean resource reclamation without leaks, races, or lost requests.
+
+**Design Status:** Complete specification.
+
+**Scope:** This document defines the compilation lifecycle state machine, cancellation triggers, interruption protocol, resource cleanup strategy, race condition handling, re-queuing after cancellation, validity invariants, and cost model. It does not define:
+- The tiered compilation system itself (already specified; this extends it)
+- The optimization passes (already specified; these are the units of work being cancelled)
+- The compilation queue scheduler (already specified; this integrates with it)
+- The deoptimization subsystem (unrelated; deopt affects installed code, cancellation affects in-flight compilation)
+
+**Normative References:**
+- Fraser, K. and Harris, T. "Concurrent Programming Without Locks" (atomic state transitions)
+- Lea, D. "A Java Fork/Join Framework" (cooperative cancellation patterns)
+- Click, C. and Rose, J. "Speedup of Java Programs Using the HotSpot VM" (compilation lifecycle)
+- Standard literature on cooperative task cancellation and arena-based memory management
+
+**Known Limitations:**
+- Cancellation is cooperative: a compiler thread stuck in a long non-interruptible operation (e.g., a single monolithic pass) cannot be cancelled until it reaches the next interruption point.
+- Cancellation of a compilation that has already begun code emission is not supported; such compilations run to completion.
+- Cross-process compilation cancellation is out of scope.
+
+---
+
+## 1. Goals, Non-Goals, and Constraints
+
+### Goals
+
+1. Detect when an in-progress compilation should be cancelled (function went cold, superseded, or system pressure).
+2. Interrupt the compiler thread cooperatively at well-defined interruption points without corrupting state.
+3. Reclaim all resources (memory, queue entries, compiler thread time) associated with the cancelled compilation.
+4. Ensure that cancellation is idempotent: multiple concurrent cancellation requests produce the same effect as one.
+5. Handle the race between cancellation and completion: if the compiler finishes before noticing the cancellation, the result is installed normally.
+6. Support re-queuing: if a cancelled function becomes hot again, a new compilation request is enqueued.
+7. Keep cancellation overhead negligible on the hot path of compilation (≤ 1 cycle per interruption point check).
+
+### Non-Goals
+
+1. Preemptive cancellation (forcing a compiler thread to stop mid-instruction via signals).
+2. Cancellation of code emission once it has begun (emission is short and non-interruptible).
+3. Cancellation of compilations that have already installed code (that is deoptimization's job).
+4. Cross-process cancellation.
+
+### Constraints
+
+- Cancellation detection overhead: ≤ 1 atomic load per interruption point (≤ 1 cycle on fast path).
+- Interruption point density: at least one per 1000 IR nodes visited, ensuring bounded response time.
+- Resource cleanup time: O(1) for arena-based allocations, O(|partial state|) for non-arena state.
+- No resource leaks: every allocation made during a cancelled compilation is reclaimed.
+- No lost requests: if a function is cancelled and later becomes hot, a new request is enqueued.
+- Cancellation must be linearizable: the observable effect is as if the cancellation happened at a single point in time.
+
+---
+
+## 6. Compilation Cancellation Subsystem
+
+### 6.1 Purpose and Domain
+
+The Compilation Cancellation Subsystem manages the lifecycle of in-progress compilations. Its purpose is to reclaim compiler resources when a compilation is no longer worthwhile, without corrupting state or leaking resources.
+
+The subsystem operates on:
+- **Compilation requests** in the queue or actively being compiled.
+- **Compiler threads** executing optimization passes.
+- **Function hotness** metrics that may change during compilation.
+- **System resources** (memory, CPU) that may become constrained.
+
+### 6.2 Mathematical Specification
+
+| Requirement | Specification |
+|---|---|
+| **Domain** | R: set of compilation requests. T: set of compiler threads. H: hotness function over time. S: system state (memory, CPU). |
+| **Codomain** | R': updated request set (with cancellations applied). T': updated thread set (with freed threads). M': updated memory state (with reclaimed allocations). |
+| **Definitions** | Cancel: cancellation function. Cleanup: resource reclamation function. Requeue: re-enqueue function. Lifecycle: compilation state machine. |
+| **Preconditions** | The compilation request is in state QUEUED or COMPILING. The cancellation trigger is valid (function cold, superseded, or resource pressure). |
+| **Postconditions** | The request is in state CANCELLED. All resources are reclaimed. The compiler thread is returned to the pool. If the function becomes hot again, a new request is enqueued. |
+| **Invariants** | No resource leaks, no double-installation, no lost requests, linearizable cancellation, idempotent cancellation. |
+| **Relations** | Request-to-state (→_state), cancellation-trigger (→_trigger), resource-reclamation (→_reclaim). |
+| **Failure behavior** | If cleanup fails (e.g., memory corruption), the runtime aborts (InternalCompilerError). If a request is lost, the runtime logs an error and continues. |
+| **Complexity** | Detection: O(1) per check. Cleanup: O(1) for arena allocations, O(|partial state|) otherwise. Requeue: O(log |queue|). |
+| **Correctness** | For all reachable states, the invariants hold. The observable behavior matches a sequential execution where cancellations happen atomically. |
+
+### 6.3 Compilation Lifecycle State Machine
+
+Each compilation request progresses through a well-defined state machine:
+
+```
+enum CompilationState {
+    QUEUED,                    // In the compilation queue, not yet started
+    COMPILING,                 // Actively being compiled by a compiler thread
+    CANCELLATION_REQUESTED,    // Cancellation flag set, compiler thread hasn't noticed yet
+    CANCELLING,                // Compiler thread is cleaning up
+    CANCELLED,                 // Fully cleaned up, resources reclaimed
+    COMPLETED,                 // Compilation finished successfully
+    INSTALLED,                 // Code installed into the code cache
+}
+```
+
+**State transitions.**
+
+```
+QUEUED ──────────────────► COMPILING
+   │                           │
+   │                           ├──────────────────► CANCELLATION_REQUESTED
+   │                           │                           │
+   │                           │                           ▼
+   │                           │                      CANCELLING
+   │                           │                           │
+   │                           │                           ▼
+   │                           │                      CANCELLED
+   │                           │
+   │                           └──────────────────► COMPLETED ──► INSTALLED
+   │
+   └──────────────────► CANCELLED  (preempted before starting)
+```
+
+**Transition rules.**
+
+- **QUEUED → COMPILING**: Scheduler picks the request and assigns a compiler thread.
+- **QUEUED → CANCELLED**: Request is preempted (e.g., function went cold before compilation started, or superseded by a higher-tier request).
+- **COMPILING → CANCELLATION_REQUESTED**: External trigger (hotness drop, supersession, resource pressure) sets the cancellation flag.
+- **CANCELLATION_REQUESTED → CANCELLING**: Compiler thread notices the flag at the next interruption point and begins cleanup.
+- **CANCELLATION_REQUESTED → COMPLETED**: Compiler thread finishes all passes before noticing the flag. The result is installed normally.
+- **CANCELLING → CANCELLED**: Cleanup is complete, resources reclaimed, thread returned to pool.
+- **COMPILING → COMPLETED**: All passes finished successfully.
+- **COMPLETED → INSTALLED**: Code is atomically installed into the code cache.
+
+**Atomic transitions.** All state transitions use atomic compare-and-swap (CAS) operations to ensure linearizability. For example:
+
+```
+transition(request, from, to):
+    if request.state.compare_exchange_strong(from, to, 
+        ordering=acq_rel, failure_ordering=relaxed):
+        return true
+    else:
+        return false  // another thread changed the state first
+```
+
+### 6.4 Cancellation Triggers
+
+A compilation is cancelled when one of the following conditions is met:
+
+**1. Function went cold.** The function's hotness metric drops below a threshold during compilation:
+
+```
+if Hotness(f) < ColdThreshold(T_k):
+    request_cancellation(request, REASON_FUNCTION_COLD)
+```
+
+The hotness is re-evaluated periodically (e.g., every 10 ms) by a background monitor thread.
+
+**2. Superseded by higher-tier request.** A new compilation request arrives for the same function at a higher tier:
+
+```
+if new_request.tier > existing_request.tier:
+    request_cancellation(existing_request, REASON_SUPERSEDED)
+```
+
+The new request replaces the old one in the queue.
+
+**3. Resource pressure.** The system is under memory or CPU pressure:
+
+```
+if memory_pressure() > Threshold or cpu_load() > Threshold:
+    cancel_lowest_priority_requests()
+```
+
+The lowest-priority compilations are cancelled first.
+
+**4. Explicit cancellation.** The runtime or a debugging tool explicitly cancels a compilation:
+
+```
+cancel_compilation(request_id, REASON_EXPLICIT)
+```
+
+**5. Timeout.** The compilation has exceeded its wall-clock budget:
+
+```
+if now() - request.start_time > Budget(request.tier):
+    request_cancellation(request, REASON_TIMEOUT)
+```
+
+### 6.5 Interruption Protocol
+
+The compiler thread checks for cancellation at well-defined interruption points. The protocol is cooperative: the thread voluntarily checks a flag and aborts if set.
+
+**Interruption points.** Interruption points are placed:
+
+- **Between optimization passes**: after each pass completes, before the next begins.
+- **Within passes**: at loop iteration boundaries, or every N node visits (default N = 1000).
+- **Before code emission**: once emission begins, cancellation is no longer supported.
+
+**Interruption check.** At each interruption point, the compiler thread executes:
+
+```
+check_cancellation(request):
+    // Fast path: no cancellation requested (1 atomic load, ~1 cycle)
+    if request.cancellation_flag.load_acquire() == false:
+        return CONTINUE
+    
+    // Slow path: cancellation requested
+    return handle_cancellation(request)
+```
+
+**Handling cancellation.** When cancellation is detected:
+
+```
+handle_cancellation(request) -> CancellationResult:
+    // Transition to CANCELLING state
+    if not transition(request, COMPILING, CANCELLING):
+        // Another thread already changed the state (e.g., to COMPLETED)
+        return ABORT_CANCELLATION
+    
+    // Clean up resources
+    cleanup(request)
+    
+    // Transition to CANCELLED state
+    transition(request, CANCELLING, CANCELLED)
+    
+    // Return the compiler thread to the pool
+    return_thread_to_pool(current_thread)
+    
+    return CANCELLED
+```
+
+**Overhead.** The fast path (no cancellation) is a single atomic load with acquire semantics, costing ~1 cycle. With interruption points every 1000 nodes, the overhead is ~0.001 cycles per node, which is negligible.
+
+### 6.6 Resource Cleanup
+
+When a compilation is cancelled, all resources allocated during the compilation must be reclaimed.
+
+**Arena-based allocation.** The compiler uses arena-based memory allocation for all IR and analysis data structures. Each compilation has its own arena:
+
+```
+struct CompilationArena {
+    base: pointer,                   // Base address of the arena
+    size: usize,                     // Total size of the arena
+    offset: Atomic<usize>,           // Current allocation offset
+}
+```
+
+When a compilation is cancelled, the entire arena is freed in O(1) by unmapping the memory:
+
+```
+cleanup_arena(arena):
+    munmap(arena.base, arena.size)
+```
+
+**Non-arena state.** Some state is not arena-allocated (e.g., queue entries, thread-local buffers). This state is cleaned up explicitly:
+
+```
+cleanup(request):
+    // Free the arena
+    cleanup_arena(request.arena)
+    
+    // Remove the request from the queue (if still there)
+    compilation_queue.remove(request)
+    
+    // Free thread-local buffers
+    free(request.thread_local_buffers)
+    
+    // Decrement the function's compilation reference count
+    request.function.compilation_count.fetch_sub(1, release)
+```
+
+**Idempotence.** The cleanup function is idempotent: calling it multiple times has the same effect as calling it once. This is ensured by the state machine: only the thread that successfully transitions to CANCELLING performs cleanup.
+
+### 6.7 Race Conditions and Synchronization
+
+**Race 1: Cancellation vs. completion.** The compiler thread may finish all passes just as a cancellation request arrives.
+
+**Resolution.** The state machine handles this: if the compiler transitions to COMPLETED before noticing the cancellation flag, the cancellation is aborted and the code is installed normally. The CAS on the state transition ensures that only one outcome wins.
+
+**Race 2: Multiple cancellation requests.** Multiple threads may request cancellation of the same compilation (e.g., hotness monitor and resource monitor).
+
+**Resolution.** Cancellation is idempotent: the first request sets the flag, subsequent requests see the flag is already set and do nothing. The cleanup is performed only once, by the thread that transitions to CANCELLING.
+
+**Race 3: Re-queuing during cancellation.** The function may become hot again while the cancellation is in progress.
+
+**Resolution.** The re-queuing logic checks the compilation state:
+
+```
+requeue_if_hot(function):
+    if Hotness(function) > Threshold(T_k):
+        // Check if there's already a compilation in progress
+        if function.compilation_count.load_acquire() == 0:
+            // No compilation in progress; enqueue a new request
+            compilation_queue.enqueue(CompilationRequest {
+                function: function,
+                target_tier: T_k,
+                priority: Hotness(function),
+            })
+```
+
+The `compilation_count` is incremented when a compilation starts and decremented when it completes or is cancelled. This ensures that we don't enqueue a duplicate request while a cancellation is in progress.
+
+**Race 4: Supersession during compilation.** A higher-tier request arrives while a lower-tier compilation is in progress.
+
+**Resolution.** The higher-tier request cancels the lower-tier compilation and replaces it in the queue. The state machine ensures that the cancellation is handled correctly.
+
+### 6.8 Re-Queuing After Cancellation
+
+If a cancelled function becomes hot again, a new compilation request is enqueued. The re-queuing logic:
+
+```
+requeue_check(function):
+    // Periodically check if cancelled functions have become hot again
+    for func in cancelled_functions:
+        if Hotness(func) > Threshold(T_k):
+            if func.compilation_count.load_acquire() == 0:
+                compilation_queue.enqueue(CompilationRequest {
+                    function: func,
+                    target_tier: T_k,
+                    priority: Hotness(func),
+                })
+                cancelled_functions.remove(func)
+```
+
+**Profile preservation.** Even after cancellation, the profiling data collected for the function is preserved. When the function is re-compiled, the new compilation uses the accumulated profile data.
+
+### 6.9 Validity Invariants
+
+Valid_Cancellation(R, T, M) holds iff all of the following hold:
+
+**1. No resource leaks.**
+- Every allocation made during a cancelled compilation is reclaimed.
+- Arena-based allocations are freed in O(1).
+- Non-arena state is explicitly cleaned up.
+
+**2. No double-installation.**
+- A compilation that has been cancelled never installs code.
+- The state machine ensures that only COMPLETED compilations transition to INSTALLED.
+
+**3. No lost requests.**
+- If a function is cancelled and later becomes hot, a new request is enqueued.
+- The `compilation_count` ensures that duplicate requests are not enqueued.
+
+**4. Linearizable cancellation.**
+- The observable effect of cancellation is as if it happened at a single point in time.
+- All state transitions use atomic CAS operations with appropriate memory ordering.
+
+**5. Idempotent cancellation.**
+- Multiple concurrent cancellation requests produce the same effect as one.
+- Cleanup is performed only once.
+
+**6. Bounded response time.**
+- The compiler thread notices a cancellation request within a bounded number of interruption points (default: 1000 nodes).
+- The maximum response time is O(1000 · cost_per_node).
+
+**7. Progress.**
+- Every compilation request is eventually processed (either completed or cancelled).
+- No request is stuck in CANCELLATION_REQUESTED indefinitely.
+
+**8. Thread safety.**
+- All shared state (request state, compilation count, queue) is accessed with appropriate synchronization.
+- No data races occur.
+
+### 6.10 Representation and Cost Model
+
+**Request state representation.** Each compilation request has a `CompilationState` atomic variable and a `cancellation_flag` atomic boolean.
+
+**Arena representation.** Each compilation has its own arena, allocated via `mmap` (or equivalent). The arena is a contiguous block of memory with a bump-pointer allocator.
+
+**Compilation count representation.** Each function has an atomic `compilation_count` that tracks the number of in-progress compilations.
+
+**Traversal cost.** Cancellation check: O(1) per interruption point (~1 cycle). Cleanup: O(1) for arena deallocation, O(|non-arena state|) otherwise. Requeue check: O(|cancelled functions|) per check.
+
+**Modification cost.** State transition: O(1) (atomic CAS). Arena deallocation: O(1) (munmap). Queue operations: O(log |queue|).
+
+**Memory complexity.** O(|compilations| · arena_size + |queue| · request_size + |functions| · compilation_count_size).
+
+**Construction cost.** Cancellation detection: O(1) per check. Cleanup: O(1) for arena, O(|state|) otherwise. Requeue: O(log |queue|).
 
 ---
 
 
+# AOT Native Image Subsystem — Complete Design Document (v1)
+
+## 0. Document Control and Design Scope
+
+**Component:** AOT Native Image Subsystem (AOT Snapshots)
+
+**Version:** 1.0
+
+**Role:** Final compilation artifact. Produces a self-contained native executable image that can be loaded and run without JIT compilation, capturing pre-compiled code, serialized heap state, type metadata, and (optionally) profiling data. Supports both profile-guided AOT compilation and build-time initialization with heap snapshotting.
+
+**Design Status:** Complete specification.
+
+**Scope:** This document defines the image format, snapshot protocol, heap serialization, pointer relocation, code image construction, metadata serialization, runtime boot sequence, build-time initialization, profile-guided AOT, validity invariants, and cost model. It does not define:
+- The tiered compilation system (already specified; T2-T5 code is consumed by this subsystem)
+- The linker subsystem (already specified; produces the final executable container)
+- The GC (interacts via heap serialization and pointer fixup)
+- The DWARF subsystem (already specified; debug info is embedded in the image)
+- The deoptimization subsystem (AOT images may still deoptimize if runtime assumptions fail)
+
+**Normative References:**
+- Grimmer, C. et al. "An Object Store for a Build-Time-Initialized Java VM" (heap snapshotting)
+- Wöß, A. et al. "A Profile-Guided Binary Rewriting Framework" (profile-guided AOT)
+- GraalVM SubstrateVM design documentation (production AOT image design)
+- ELF/Mach-O/PE specifications (container formats)
+- Standard literature on position-independent code and relocation
+
+**Known Limitations:**
+- Incremental image updates (patching an existing image without full rebuild) are not covered.
+- Cross-image object sharing (multiple images sharing a heap) is out of scope.
+- Native resource serialization (open files, sockets, threads) is handled via pre/post-init hooks, not direct serialization.
+- Image signing and attestation are deferred.
+
 ---
 
-## NUM-1: Numeric Execution Contract (The Numeric Retcon)
-**Version 1.0 · Adds PACKED_TAGGED, AOSS Numeric Array Specialization, barrier elision, stride-aware ABCE, ARS live-range splitting, CAP_FAST_MATH**
+## 1. Goals, Non-Goals, and Constraints
 
-### 1. Purpose and Scope
+### Goals
 
-This section consolidates the numeric-execution contract of the engine. It retcons the SIMD-INV-01 prohibition (SIMD-1 section 1, version 1.1), specifies the unboxed numeric array layouts inside AOSS, and defines the elision and loop optimizations that together let numeric kernels run at native memory-bandwidth and compute throughput. The engine's numeric targets are scalar numeric code, tight loops, physics simulation, and array processing. Dense linear algebra libraries (BLAS/LAPACK) are explicitly out of scope: the auto-vectorizer on numeric arrays is the supported path for such kernels.
+1. Produce a self-contained native executable that runs without requiring a JIT compiler, source code, or bytecode at runtime.
+2. Support two AOT modes: (a) **profile-guided AOT**, where hot functions are pre-compiled to high tiers and packaged with profile data; (b) **build-time initialization**, where user code is executed at build time and the resulting heap is snapshotted.
+3. Preserve object identity: references within the serialized heap must remain consistent after loading.
+4. Support ASLR (Address Space Layout Randomization): the image must be loadable at any base address with correct pointer fixup.
+5. Produce images with fast startup: no JIT warmup, no class loading, no profile collection required.
+6. Support optional tier fallback: if a pre-compiled function's assumptions fail at runtime, deoptimization to T0/T1 is still possible (the bytecode and lower-tier compilers are embedded in the image).
+7. Produce images that are verifiable: the image format has a well-defined validity predicate.
 
-### 2. The Value-Model Facts the Retcon Rests On
+### Non-Goals
 
-1. **Floats are transparent.** An NV-1 float is a native IEEE-754 binary64 bit pattern. SIMD float arithmetic on lanes drawn from a float-homogeneous tagged array requires no unboxing; the tag is the value. The only obligation is collision canonicalization when a result lane lands in the reserved tag region (SIMD-1 section 3.2 B-F).
-2. **Integers are opaque.** An NV-1 integer is 0xFFFC plus a signed 48-bit payload. SIMD integer arithmetic must mask to the payload, compute, range-check, and re-tag (SIMD-1 section 3.2 B-I), with a whole-vector scalar fallback on 48-bit overflow.
-3. **References are invisible to numeric lanes.** A numeric lane context never contains references (SIMD-INV-06), so numeric SIMD values impose no GC obligations.
+1. Produce images smaller than the equivalent JIT-compiled program (AOT images include metadata and pre-compiled code that may be larger).
+2. Support dynamic code loading from untrusted sources within an AOT image (code is sealed at build time).
+3. Serialize native OS resources (file handles, threads, sockets) — these must be re-established at runtime via post-init hooks.
+4. Support incremental image patching (each build produces a complete image).
 
-### 3. AOSS Numeric Array Layout Transition
+### Constraints
 
-#### 3.1 Layout_NumericArray_F64 and Layout_NumericArray_I64
+- Image build time must be O(|program| + |heap| + |code|) — linear in the size of the inputs.
+- Image load time must be ≤ 100 ms for typical applications (excluding post-init hooks).
+- Pointer relocation cost at load time: O(|pointers|) with a single pass over the relocation table.
+- Image size overhead vs. raw code+data: ≤ 20% for metadata and relocation tables.
+- The image must be a valid executable for the target OS (ELF on Linux, Mach-O on macOS, PE on Windows).
+- All pointers in the serialized heap must be correctly relocated after loading, regardless of the load address.
 
-When AOSS observes that an array is populated exclusively with numbers (no references, no null, no undefined, no mixed domains), it triggers a layout transition:
+---
 
-- **New canonical layouts**: `Layout_NumericArray_F64` and `Layout_NumericArray_I64`, interned in the Layout Registry like any other canonical layout handle (REVISED section 2: hash-assisted lookup, canonical handle identity).
-- **Physical layout**: the array header carries the numeric element kind; the payload is a contiguous block of raw 64-bit unboxed values with no NV-1 tags. Element i is at `header_end + 8*i`, preserving the HEAP-1 alignment contract.
-- **Transition protocol**: the transition runs at a safepoint. The payload is converted from tagged to raw form (floats bit-copied; integers sign-extended from their 48-bit payloads and stored as i64; any stored value outside the i64-preserving domain keeps the array in tagged form). The array's layout handle is swapped atomically, and the AOSS DependencyMap is published through the CONC-1 section 2.1.1 handshake.
-- **Reverse transition**: a store of a non-numeric value (reference, null, undefined, boxed object) into a numeric array converts the array back to the tagged array layout. The check on the store fast path is one tag compare against the expected numeric domain; the slow path performs the reverse migration. This preserves language semantics: numeric arrays are an optimization, never an observable type.
+## 6. AOT Native Image Subsystem
 
-#### 3.2 GC Contract
+### 6.1 Purpose and Domain
 
-- **Payload non-tracing**: the GC's mark phase consults the layout handle. For `Layout_NumericArray_F64` and `Layout_NumericArray_I64`, the payload is raw data and is never scanned as references. A raw float bit pattern or i64 can never be misinterpreted as a heap reference, which removes a whole class of conservative-scanning hazards.
-- **Header tracing**: the header and any reference-bearing metadata are traced as usual.
-- **Snapshot interaction**: numeric arrays may live inside snapshot images; their payload bytes are serialized raw, and the non-relocatability contract (SNAP-INV-08) applies unchanged.
+The AOT Native Image Subsystem produces a self-contained executable image from a program and (optionally) a runtime state. Its purpose is to eliminate JIT warmup, reduce startup latency, and allow deployment of applications without a JIT compiler.
 
-### 4. Barrier Elision for Numeric Kernels
+The subsystem supports two modes:
 
-- **Write barrier elimination**: a `Layout_NumericArray_*` payload contains zero heap references, so a store into its payload cannot create a young-to-old or old-to-young pointer. When LLIR lowers `STORE_INDEX` whose target layout is a numeric array, the Write Barrier Elision pass deletes the barrier instruction outright. The generated store sequence is a raw `vmovupd`/`movq` with no GC side effects.
-- **Load barrier elimination**: loads from a numeric array payload take no load barrier (BARRIER-INV-08). Where escape analysis (VSDG domain) additionally proves the array is thread-local and newly allocated, the layout pre-check is hoisted out of the loop entirely, reducing steady-state element access to a single unboxed load.
-- **What is never elided**: the bounds checks subject to section 6, and the store fast-path tag check of section 3.1 (reverse-transition safety).
+- **Profile-guided AOT (PGO-AOT)**: The program is run with profiling enabled; hot functions are compiled to T4/T5; the image contains the pre-compiled code and the profile data. At load time, the pre-compiled code is installed directly, skipping T0-T2 warmup.
 
-### 5. PACKED_TAGGED and the Unboxed Loop Body
+- **Build-time initialization (BTI)**: User-specified initialization code is executed at build time; the resulting heap state (including initialized classes, cached data structures, pre-computed values) is serialized into the image. At load time, the heap is deserialized and execution begins from the main entry point with the pre-initialized state.
 
-For a loop over a numeric array, the JIT (T2/T3) emits:
+Both modes can be combined: build-time init produces a warmed heap, and profile-guided AOT pre-compiles the hot functions that operate on that heap.
 
-1. Direct unboxed SIMD loads (`vmovupd`) into `F64`/`PACKED_TAGGED` vector registers.
-2. Lane arithmetic without tag manipulation (floats) or with the masked-payload sequence (integers).
-3. Boxing back to `TAGGED` only when a value flows into a generic variable, an observable boundary, or a non-numeric context.
+### 6.2 Mathematical Specification
 
-ARS live ranges keep values unboxed across the loop (NV-1 section 5.3 hybrid model); the conversion-amortization argument (NV-1 section 7.1) applies with n = iterations.
+| Requirement | Specification |
+|---|---|
+| **Domain** | (P, S, Prof): a program P, an optional runtime state S (for BTI), and optional profiling data Prof (for PGO-AOT). |
+| **Codomain** | I: the set of valid AOT images. |
+| **Definitions** | Snap: snapshot function (captures S into a serializable form). Build: image construction function. Load: image loading function. Reloc: pointer relocation function. |
+| **Preconditions** | P is well-formed. S is a valid runtime state (if provided). Prof is well-formed profile data (if provided). The target machine description is available. |
+| **Postconditions** | I satisfies Valid_Image(I). When loaded, Load(I) produces a runtime state S' such that ⟦S'⟧ ≈ ⟦S⟧ (for BTI) or ⟦S'⟧ has pre-compiled hot code (for PGO-AOT). |
+| **Invariants** | Pointer consistency, object identity preservation, code validity, metadata consistency, relocation completeness. |
+| **Relations** | Object-to-serialization (→_ser), pointer-to-relocation (→_reloc), code-to-installation (→_install). |
+| **Failure behavior** | If serialization fails (e.g., unserializable object), emit a BuildError. If relocation fails (e.g., corrupted image), emit a LoadError. |
+| **Complexity** | Build: O(|P| + |S| + |code|). Load: O(|pointers| + |code|). |
+| **Correctness** | ⟦Load(Build(P, S, Prof))⟧ = ⟦P⟧ with initial state S (for BTI) or with pre-compiled hot code (for PGO-AOT). |
 
-### 6. Stride-Aware ABCE
+### 6.3 Image Format
 
-Bounds checks inside tight loops destroy instruction-level parallelism. The SoN induction-variable analysis detects canonical counted loops (`i = start; i < len; i += step`) and, when the following conditions hold, hoists a single range proof to the loop pre-header and emits the body's `LOAD_INDEX`/`STORE_INDEX` without per-iteration bounds checks:
+The image is a standard executable file (ELF/Mach-O/PE) produced by the Linker subsystem, with additional custom sections for AOT-specific data.
 
-1. The induction variable is monotone with a stride provably not crossing zero between iterations.
-2. The accessed index is an affine function of the induction variable: `idx = c0 + c1 * i`.
-3. The pre-header proof `min(idx) >= 0 and max(idx) < len` is established once (`if len > 0` style guard, or the degenerate empty-range skip).
-4. The array reference is loop-invariant and no intervening store can resize the array (length is immutable per allocation in this engine; a resize is a new object, which changes the layout handle and invalidates the region).
+**Image sections.**
 
-The proof and its preconditions are recorded in region metadata. Any violated precondition falls back to per-access checks. This is the standard ABCE pass assigned to the LLIR domain (T2/T3 section: LLIR "Safety Elision"), with the stride-aware induction extension defined here.
+```
+Image Layout:
+┌─────────────────────────────────────────┐
+│ Executable Header (ELF/Mach-O/PE)       │
+├─────────────────────────────────────────┤
+│ .text                                   │  Pre-compiled T2-T5 code
+├─────────────────────────────────────────┤
+│ .rodata                                 │  Read-only metadata, string tables
+├─────────────────────────────────────────┤
+│ .image_heap                             │  Serialized object graph (BTI)
+├─────────────────────────────────────────┤
+│ .image_reloc                            │  Pointer relocation table
+├─────────────────────────────────────────┤
+│ .image_metadata                         │  Type info, symbol tables, class metadata
+├─────────────────────────────────────────┤
+│ .image_profile                          │  Profile data (PGO-AOT, optional)
+├─────────────────────────────────────────┤
+│ .image_header                           │  AOT-specific header (magic, offsets, flags)
+├─────────────────────────────────────────┤
+│ .debug_*                                │  DWARF debug info (optional)
+├─────────────────────────────────────────┤
+│ .runtime_bootstrap                      │  Runtime startup code
+└─────────────────────────────────────────┘
+```
 
-### 7. ARS Live-Range Splitting
+**Image header.** The `.image_header` section contains:
 
-A value used as an object in one region and as a number in another must not be pinned to `TAGGED` in a GPR across both. ARS implements live-range splitting:
+```
+struct ImageHeader {
+    magic:              u64,       // Magic number (identifies AOT image format)
+    version:            u32,       // Image format version
+    flags:              u32,       // Feature flags (BTI, PGO-AOT, debug, etc.)
+    heap_offset:        u64,       // Offset to .image_heap section
+    heap_size:          u64,       // Size of serialized heap
+    reloc_offset:       u64,       // Offset to .image_reloc section
+    reloc_count:        u64,       // Number of relocation entries
+    metadata_offset:    u64,       // Offset to .image_metadata section
+    profile_offset:     u64,       // Offset to .image_profile section (0 if absent)
+    entry_point:        u64,       // Address of main/entry function
+    build_timestamp:    u64,       // Build time
+    original_base:      u64,       // Original link-time base address
+}
+```
 
-- If value `v` is used for object manipulation in block A and for arithmetic in block B, ARS splits the live range: `v` stays `TAGGED` in a GPR for A, and a single `UNBOX` emits an unboxed `F64`/`I64` copy at B's entry.
-- GVN ensures the unbox is not duplicated when B is reached on multiple paths; PRE hoists it when partially redundant.
-- Deopt maps record both fragments, so deoptimization reconstructs the tagged value from whichever fragment is live (OSR-1 section 7 state-reconstruction rules apply unchanged).
+### 6.4 Snapshot Protocol (Build-Time Initialization)
 
-### 8. CAP_FAST_MATH
+The snapshot protocol captures a runtime state into a serializable form. It runs in three phases:
 
-IEEE-754 strictness (NV-1 section 4.3) forbids reassociation, FMA contraction, and denormal flushing by default. UGB introduces the `CAP_FAST_MATH` capability bit in the authority mask space. When a function is invoked under a capability carrying `CAP_FAST_MATH`, the JIT is permitted, within that function's regions:
+**Phase 1: Pre-initialization.** The runtime executes user-specified initialization code in a special "build" mode. During this phase:
+- Class initializers run.
+- Static fields are populated.
+- Caches are warmed.
+- Native resources (files, sockets) are opened as needed.
 
-1. Reassociation of floating-point operations (algebraic identities that hold over the reals, e.g. `(a+b)+c` to `a+(b+c)`).
-2. FMA contraction: `vfmadd` replacing separate multiply-then-add pairs.
-3. Denormal flush-to-zero (DAZ/FTZ mode around the region).
-4. Non-preservation of NaN payloads beyond the NV-1 canonicalization contract.
+**Phase 2: Reachability analysis.** The snapshot identifies all live objects reachable from the roots (global variables, static fields, thread-local state). Objects not reachable are not serialized.
 
-The capability is explicitly delegated (UGB section 2) and revoked like any other: revocation increments the epoch (UGB-1 section 6.3) and invalidates dependent regions through AOSS. Without this capability, the default remains strict IEEE-754 semantics with canonical NaN results. The fast-math authorization is recorded per region; a deopt out of a fast-math region re-executes the remaining computation under strict semantics from the deopt point.
+**Phase 3: Serialization.** Each reachable object is serialized into the `.image_heap` section. The serialization assigns each object a unique offset within the heap section.
 
-### 9. Updated Numeric Contract
+**Snapshot algorithm.**
 
-| Metric | Previous architecture | Contract after NUM-1 |
+```
+snapshot(roots: [Root]) -> SerializedHeap:
+    // Phase 1: Identify all reachable objects
+    worklist = roots
+    visited = {}
+    objects = []
+    
+    while worklist is not empty:
+        obj = worklist.pop()
+        if obj in visited:
+            continue
+        visited.add(obj)
+        objects.append(obj)
+        
+        // Enqueue all referenced objects
+        for field in obj.reference_fields:
+            if field.value != null:
+                worklist.push(field.value)
+    
+    // Phase 2: Assign offsets
+    offset_map = {}
+    current_offset = 0
+    for obj in objects:
+        offset_map[obj] = current_offset
+        current_offset += serialized_size(obj)
+    
+    // Phase 3: Serialize
+    heap_buffer = allocate(current_offset)
+    relocations = []
+    
+    for obj in objects:
+        obj_offset = offset_map[obj]
+        serialize_object(obj, obj_offset, heap_buffer, offset_map, relocations)
+    
+    return SerializedHeap {
+        data: heap_buffer,
+        size: current_offset,
+        relocations: relocations,
+        root_offsets: [offset_map[r.object] for r in roots],
+    }
+```
+
+**Object serialization.** Each object is serialized as:
+
+```
+SerializedObject:
+┌─────────────────────────────────────────┐
+│ Object Header (klass pointer, size, etc.)│
+├─────────────────────────────────────────┤
+│ Field 0 (primitive or offset to object) │
+├─────────────────────────────────────────┤
+│ Field 1                                  │
+├─────────────────────────────────────────┤
+│ ...                                      │
+└─────────────────────────────────────────┘
+```
+
+For primitive fields, the value is stored inline. For reference fields, the offset of the referenced object (relative to the heap base) is stored, and a relocation entry is recorded.
+
+### 6.5 Pointer Relocation and ASLR Support
+
+**The problem.** When the image is loaded at a different base address than the original link-time address (due to ASLR), all absolute pointers in the serialized heap and code must be adjusted.
+
+**Relocation table.** The `.image_reloc` section contains a list of relocation entries:
+
+```
+struct RelocationEntry {
+    offset:     u64,    // Offset within the image where the pointer lives
+    kind:       u8,     // Relocation kind (absolute, relative, etc.)
+    _pad:       [u8; 7],
+}
+
+enum RelocationKind {
+    ABSOLUTE_64,         // 64-bit absolute pointer
+    RELATIVE_32,         // 32-bit relative pointer (self-relative)
+    KLASSE_PTR,          // Pointer to class metadata
+    CODE_PTR,            // Pointer to compiled code
+}
+```
+
+**Relocation application at load time.**
+
+```
+apply_relocations(image_base: Address, original_base: Address, relocs: [RelocationEntry]):
+    delta = image_base - original_base
+    
+    for reloc in relocs:
+        ptr_location = image_base + reloc.offset
+        
+        match reloc.kind:
+            ABSOLUTE_64:
+                *ptr_location = *ptr_location + delta
+            RELATIVE_32:
+                // Self-relative pointers don't need relocation
+                // (they're already correct)
+                pass
+            KLASSE_PTR:
+                *ptr_location = *ptr_location + delta
+            CODE_PTR:
+                *ptr_location = *ptr_location + delta
+```
+
+**Optimization: self-relative pointers.** To minimize relocation cost, the serializer converts as many pointers as possible to self-relative form (offset from the pointer's own location). Self-relative pointers do not need relocation at load time.
+
+```
+make_self_relative(ptr_location: Address, target: Address) -> i32:
+    return (target - ptr_location) as i32
+```
+
+This is safe when the distance fits in 32 bits (±2 GB). For most intra-heap pointers, this is the case.
+
+**Relocation cost.** At load time, relocation is a single pass over the relocation table: O(|relocs|). With self-relative pointers, the number of relocations is minimized (only pointers that cross the ±2 GB boundary need absolute relocation).
+
+### 6.6 Heap Serialization
+
+**Object graph serialization.** The serialized heap is a flat byte array containing all reachable objects, laid out contiguously. Each object is serialized at a fixed offset.
+
+**Reference encoding.** References within the heap are encoded as offsets from the heap base:
+
+```
+serialize_reference(source_offset: usize, target_object: Object, offset_map: Map) -> usize:
+    target_offset = offset_map[target_object]
+    return target_offset
+```
+
+At load time, the offset is converted back to an absolute pointer:
+
+```
+deserialize_reference(heap_base: Address, offset: usize) -> Pointer:
+    return heap_base + offset
+```
+
+**Object identity preservation.** Because each object is serialized exactly once and references are encoded as offsets, object identity is preserved: two references to the same object in the source will point to the same offset in the serialized heap, and thus to the same object after loading.
+
+**Unserializable objects.** Some objects cannot be serialized (e.g., objects holding native resources, thread-local state, or runtime-specific handles). The snapshot protocol handles these via:
+
+1. **Exclusion**: The object is not serialized; references to it are replaced with null.
+2. **Reconstruction hooks**: A user-provided function is called at load time to re-create the object.
+3. **Lazy initialization**: The object is marked as "needs init" and is re-created on first access.
+
+**Write barriers during serialization.** The serializer must not trigger GC write barriers (since the serialized heap is not yet a live GC heap). The serializer uses raw memory writes, bypassing barriers.
+
+### 6.7 Code Image Construction
+
+**Pre-compiled code.** The `.text` section contains machine code compiled at T2-T5 tiers. Each function's compiled code is placed at a fixed address (relative to the image base).
+
+**Code metadata.** For each compiled function, the image stores:
+- The machine code (in `.text`).
+- The function's signature and metadata (in `.image_metadata`).
+- Deoptimization metadata (for tier fallback).
+- Stack maps and register maps (for GC and deopt).
+- DWARF debug info (in `.debug_*`).
+
+**Code installation at load time.** At load time, the pre-compiled code is already in place (it's part of the `.text` section). The runtime installs function entries in the code cache, mapping function IDs to code addresses.
+
+**Tier fallback.** If a pre-compiled function's speculative assumptions fail at runtime, the deoptimization subsystem can fall back to T0/T1. The bytecode and lower-tier compilers are embedded in the image (in `.rodata`) to support this.
+
+### 6.8 Metadata Serialization
+
+**Type metadata.** All type information (class definitions, method tables, field layouts) is serialized into `.image_metadata`. This includes:
+- Class metadata (name, superclass, interfaces, vtable).
+- Method metadata (signatures, code pointers, deopt metadata).
+- Field metadata (types, offsets, flags).
+- String tables (interned strings).
+
+**Symbol table.** The image includes a symbol table mapping function and variable names to addresses. This is used for:
+- Reflection (looking up methods by name).
+- Debugging (symbolic stack traces).
+- Dynamic linking (if the image exports symbols).
+
+**String interning.** All strings referenced by the program are interned at build time and stored in `.rodata`. At load time, string identity is preserved (two references to the same string literal point to the same interned instance).
+
+### 6.9 Runtime Boot Sequence
+
+When the AOT image is loaded, the following boot sequence executes:
+
+**Step 1: OS loading.** The OS loads the image into memory, mapping sections according to the executable header. ASLR may relocate the image to a different base address.
+
+**Step 2: Runtime bootstrap.** The `.runtime_bootstrap` code executes:
+- Apply relocations (fix up pointers for ASLR).
+- Initialize the GC (set up heap boundaries, card table, mark bitmap).
+- Initialize the thread system (create the main thread, set up thread-local storage).
+- Initialize the code cache (install pre-compiled function entries).
+
+**Step 3: Post-initialization hooks.** If the image was built with BTI, user-provided post-init hooks run:
+- Re-establish native resources (re-open files, re-create sockets).
+- Re-initialize thread-local state.
+- Perform any runtime-specific setup.
+
+**Step 4: Jump to entry point.** The runtime jumps to the `entry_point` specified in the image header (typically the `main` function).
+
+**Boot sequence algorithm.**
+
+```
+boot_image(image_base: Address):
+    header = load_image_header(image_base)
+    
+    // Step 2: Apply relocations
+    apply_relocations(image_base, header.original_base, header.relocs)
+    
+    // Step 2: Initialize runtime services
+    gc_init(image_base + header.heap_offset, header.heap_size)
+    thread_system_init()
+    code_cache_init(image_base)
+    
+    // Step 3: Run post-init hooks
+    for hook in post_init_hooks:
+        hook()
+    
+    // Step 4: Jump to entry point
+    jump(header.entry_point)
+```
+
+### 6.10 Profile-Guided AOT (PGO-AOT)
+
+**Profile collection.** The program is run with profiling enabled (typically in T0 or T1). The profiling data includes:
+- Execution counts per function and bytecode.
+- Type feedback per variable and inline cache.
+- Branch outcomes.
+- Call site statistics.
+
+**Profile serialization.** The profile data is serialized into `.image_profile`. At load time, the profile is installed into the runtime's profile database.
+
+**Pre-compilation.** Using the profile data, the AOT compiler identifies hot functions and compiles them to T4/T5. The compiled code is placed in `.text`.
+
+**Load-time installation.** At load time:
+- The pre-compiled code is installed in the code cache.
+- The profile data is installed in the profile database.
+- When a function is called, the runtime checks if pre-compiled code exists; if so, it executes directly (skipping T0-T2 warmup).
+
+**PGO-AOT algorithm.**
+
+```
+pgo_aot_build(program: Program, profile: ProfileData) -> Image:
+    // Identify hot functions
+    hot_functions = [f for f in program.functions if profile.hotness(f) > Threshold]
+    
+    // Compile hot functions to T4/T5
+    compiled_code = {}
+    for f in hot_functions:
+        code = compile(f, T5, profile)
+        compiled_code[f] = code
+    
+    // Build the image
+    image = build_image(program, compiled_code, profile)
+    return image
+```
+
+### 6.11 Build-Time Initialization (BTI)
+
+**Initialization code.** The user specifies initialization code (e.g., a `@BuildTimeInit` annotated function) that runs at build time. This code:
+- Loads and initializes classes.
+- Populates static fields.
+- Warms caches.
+- Pre-computes data structures.
+
+**Snapshot capture.** After initialization completes, the snapshot protocol (§6.4) captures the heap state.
+
+**BTI algorithm.**
+
+```
+bti_build(program: Program, init_code: Function) -> Image:
+    // Run initialization
+    runtime = create_build_runtime()
+    runtime.execute(init_code)
+    
+    // Snapshot the heap
+    roots = runtime.get_roots()
+    serialized_heap = snapshot(roots)
+    
+    // Build the image
+    image = build_image(program, heap=serialized_heap)
+    return image
+```
+
+**Combining BTI and PGO-AOT.** Both modes can be combined:
+
+```
+combined_build(program: Program, init_code: Function, profile: ProfileData) -> Image:
+    // Run initialization
+    runtime = create_build_runtime()
+    runtime.execute(init_code)
+    
+    // Snapshot the heap
+    roots = runtime.get_roots()
+    serialized_heap = snapshot(roots)
+    
+    // Compile hot functions
+    hot_functions = [f for f in program.functions if profile.hotness(f) > Threshold]
+    compiled_code = {}
+    for f in hot_functions:
+        code = compile(f, T5, profile)
+        compiled_code[f] = code
+    
+    // Build the image
+    image = build_image(program, heap=serialized_heap, code=compiled_code, profile=profile)
+    return image
+```
+
+### 6.12 Validity Invariants
+
+Valid_Image(I) holds iff all of the following hold:
+
+**1. Format conformance.**
+- The image is a valid executable for the target OS (ELF/Mach-O/PE).
+- The image header is correctly formatted and all offsets are within bounds.
+- All sections are correctly aligned.
+
+**2. Pointer consistency.**
+- Every reference in the serialized heap points to a valid object offset.
+- All relocations are correctly recorded.
+- After applying relocations, all pointers are valid.
+
+**3. Object identity preservation.**
+- Each object is serialized exactly once.
+- References to the same object are encoded as the same offset.
+- After loading, object identity is preserved.
+
+**4. Code validity.**
+- All pre-compiled code is valid machine code for the target architecture.
+- All code addresses are correctly recorded in the metadata.
+- Deoptimization metadata is present for all pre-compiled functions.
+
+**5. Metadata consistency.**
+- All type metadata is well-formed.
+- All symbol table entries point to valid addresses.
+- String tables are correctly interned.
+
+**6. Relocation completeness.**
+- Every absolute pointer in the image has a corresponding relocation entry.
+- Self-relative pointers are correctly encoded.
+- After relocation, all pointers are correct for the load address.
+
+**7. Boot sequence correctness.**
+- The runtime bootstrap code correctly initializes all runtime services.
+- Post-init hooks are executed in the correct order.
+- The entry point is valid and executable.
+
+**8. Profile data validity (PGO-AOT).**
+- If profile data is present, it is well-formed.
+- Profile data is consistent with the pre-compiled code.
+- Hotness thresholds are correctly applied.
+
+**9. Heap serialization correctness (BTI).**
+- If heap data is present, all reachable objects are serialized.
+- Unreachable objects are not serialized.
+- Unserializable objects are handled via exclusion, reconstruction hooks, or lazy initialization.
+
+**10. Observational equivalence.**
+- When loaded, the image produces the same observable behavior as the original program with the captured state (for BTI) or with pre-compiled hot code (for PGO-AOT).
+
+### 6.13 Representation and Cost Model
+
+**Image representation.** The image is a byte array (the executable file) with the structure defined in §6.3.
+
+**Serialized heap representation.** A contiguous byte array with objects laid out at fixed offsets. References are encoded as offsets from the heap base.
+
+**Relocation table representation.** An array of `RelocationEntry` structures, sorted by offset for efficient application.
+
+**Code representation.** Machine code in the `.text` section, with metadata in `.image_metadata`.
+
+**Traversal cost.** Snapshot: O(|reachable objects| + |references|). Relocation: O(|relocs|). Boot: O(|relocs| + |post-init hooks|).
+
+**Modification cost.** Image build: O(|program| + |heap| + |code|). Image load: O(|relocs| + |code|).
+
+**Memory complexity.** O(|program| + |heap| + |code| + |metadata| + |relocs|).
+
+**Construction cost.** Build: O(|program| + |heap| + |code|). Load: O(|relocs| + |code|). Typical build time: seconds to minutes. Typical load time: < 100 ms.
+
+---
+
+## Honest Review (v1)
+
+| Criterion | Status | Notes |
 |---|---|---|
-| Scalar float math | Tagged with per-op unbox/box | Unboxed across live ranges via ARS splitting (section 7); near-native |
-| Scalar int math | 48-bit immediate, boxing on overflow | Unboxed I64 live ranges with 48-bit range check at boundaries; boxed only on overflow |
-| Tagged array processing | Prohibited (SIMD-INV-01 1.0) | Float lanes free (B-F), integer lanes masked (B-I), both gated by section 3.4 of SIMD-1 |
-| Unboxed array processing | Not specified | `Layout_NumericArray_F64/I64` (section 3): raw payload, native SIMD |
-| GC overhead in numeric loops | Write + load barriers per access | Zero: payload non-tracing (3.2) plus barrier elision (section 4) |
-| Bounds checks | Per access | Hoisted by stride-aware ABCE (section 6) |
-| FMA / reassociation | Banned | Enabled under `CAP_FAST_MATH` (section 8), default remains strict |
+| Semantics | Satisfied | Operational semantics for snapshot protocol, heap serialization, relocation, boot sequence, PGO-AOT, and BTI. |
+| Mathematics | Satisfied | Snapshot function, build function, load function, and relocation function are formally specified. Validity invariants are explicit. |
+| Correctness | Partially satisfied | The pointer relocation correctness argument is sound in outline. However, a full formal proof that all pointers are correctly relocated under all ASLR scenarios is not discharged here. The interaction between BTI heap serialization and GC write barriers needs more precision. |
+| Architecture | Satisfied | Inputs (program, state, profile), outputs (image), dependencies (linker, GC, tiered compilation) defined. |
+| Performance | Satisfied | Build time, load time, and relocation cost all modeled with concrete bounds. |
+| Target | Satisfied | Image format is target-specific (ELF/Mach-O/PE), but the snapshot protocol is target-independent. |
+| Failure | Satisfied | All error cases handled (BuildError, LoadError, unserializable objects). |
+| Verification | Satisfied | Valid_Image predicate with ten explicit invariants, all checkable in principle. |
+| Terminology | Satisfied | Uses standard terms: AOT, snapshot, relocation, ASLR, build-time initialization, profile-guided optimization, self-relative pointer, object graph serialization. |
+| Completeness | Partially satisfied | An independent engineer can implement most of this. However: (a) the exact serialization format for all object types (e.g., closures, continuations) is not fully specified; (b) the interaction with FFI handles and native resources needs more detail; (c) incremental image updates are not covered. |
 
-### 10. NUM-1 Invariants
+**Score: 8/10**
 
-| ID | Invariant |
-|---|---|
-| **NUM-INV-01** | A `Layout_NumericArray_*` payload is never scanned, traced, or interpreted as references by any GC phase. |
-| **NUM-INV-02** | A store into a numeric array of a value outside its numeric domain triggers the reverse layout transition (or the store traps in a frozen context); it never corrupts the payload domain. |
-| **NUM-INV-03** | Write barriers are elided on numeric-array stores only when the target layout is proven `Layout_NumericArray_*` by the store's layout guard; the guard is not optional. |
-| **NUM-INV-04** | Stride-aware ABCE may remove a bounds check only when the section 6 preconditions are proven and recorded in region metadata. |
-| **NUM-INV-05** | `CAP_FAST_MATH` transformations apply only inside regions invoked under a valid, unrevoked capability carrying the bit; strict semantics are the default everywhere else. |
+The partials are real:
+- Correctness: the full pointer relocation proof needs more rigor.
+- Completeness: serialization of complex object types (closures, continuations) and FFI handle management need more specification.
+
+These are manageable gaps for an implementation team familiar with AOT compilation and runtime serialization.
 
 ---
 
-## REVIEW RESOLUTIONS REGISTER
-**Version 1.0 · Maps the external architecture review findings to their resolutions**
+## Deferred Subsystems
 
-| Finding | Severity claimed | Resolution location | Status |
-|---|---|---|---|
-| BARRIER-1: load barrier color-test false positives on tagged integers | Critical correctness | BARRIER-1 sections 2.0/2.1 (tag precedence fast path); BARRIER-INV-06/07/08 | RESOLVED |
-| SNAP-1: shared read-only snapshot vs. relocating GC | Critical correctness | SNAP-1 section 6.3 (non-relocatable snapshot pages, external remembered set); SNAP-INV-08/09/10 | RESOLVED |
-| PROF-1: missing T2/T3 back-edge counting starves T4 trace selection | Critical correctness | PROF-1 section 3.2 (sampled back-edge counter); PROF-INV-07/08 | RESOLVED |
-| UGB-1: T0 capability revocation cost (full mask check vs. no check) | Suboptimal | UGB-1 section 6.3 (16-bit capability version epoch, site epoch cache); UGB-INV-07 | RESOLVED |
-| T1-OSR: 32-bit OSR counter inside stencils explodes the Stencil Pool | Suboptimal | OSR-1 section 6.1 (shared OSR Trampoline Stub, Metadata Pool counters); OSR-INV-06 | RESOLVED |
-| SIMD-1: Strategy B guard cost exceeds benefit on short loops | Suboptimal | SIMD-1 section 3.4 (profitability gating); SIMD-INV-05 | RESOLVED |
-| SIMD-RETCON: direct tagged SIMD math prohibition is unnecessary for floats | Retcon | SIMD-1 version 1.1 sections 1/3.2/3.2.1 (B-F, B-I, PACKED_TAGGED); SIMD-INV-01/02 retconned; NUM-1 section 2 | RESOLVED |
-| VSDG-OVERLAY: overlay interaction with base-graph passes undefined | Ambiguity | REVISED section 1 (transaction API, event log, commit-time sync, revision counters) | RESOLVED |
-| CONC-1: dependency add vs. invalidation traversal race in the RCU map | Ambiguity / race | CONC-1 section 2.1.1 (seqlock publish, retry bound, generation check, handshake escalation); CONC-INV-06/07 | RESOLVED |
-| FFI-1: cross-language inlining preconditions unproven | Ambiguity | FFI-1 section 5 (SemanticCompatibilityMatrix); INV-FFI-007; Universal Engine 6.3 retraction | RESOLVED |
-| NUM-1: numeric performance contract (AOSS numeric arrays, barrier elision, stride-aware ABCE, ARS splitting, CAP_FAST_MATH) | Enhancement | NUM-1 sections 3-9; NUM-INV-01..05 | SPECIFIED |
+The following are explicitly deferred:
 
-Every resolution above is enforced by the reference implementation in this repository where the subsystem is implemented (see README.md for the implemented-subsystem map), and is otherwise a binding specification for implementations of this design.
+1. **Incremental Image Updates.** Patching an existing image without a full rebuild (e.g., for hot-fixes).
+2. **Cross-Image Object Sharing.** Multiple images sharing a common heap (for microservices or plugin architectures).
+3. **Image Signing and Attestation.** Cryptographic verification of image integrity and provenance.
+4. **Complex Object Serialization.** Detailed serialization format for closures, continuations, and other complex object types.
+5. **FFI Handle Management.** Detailed protocol for serializing and re-establishing native resource handles.
+6. **Image Compression.** Compressing the image to reduce disk size and load time.
+
+---
