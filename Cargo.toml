@@ -5,6 +5,7 @@ members = [
     "crates/vortex-nv1",
     "crates/vortex-ugb",
     "crates/vortex-runtime",
+    "crates/vortex-ir",
     "tools/cep_lint",
 ]
 

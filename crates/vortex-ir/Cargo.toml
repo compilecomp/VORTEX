@@ -1,0 +1,10 @@
+[package]
+name = "vortex-ir"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "ET-SoN: effect-typed sea of nodes IR with verifier, GVN, deopt metadata."
+
+[lints]
+workspace = true
