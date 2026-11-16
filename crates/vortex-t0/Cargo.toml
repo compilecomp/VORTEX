@@ -1,0 +1,15 @@
+[package]
+name = "vortex-t0"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "T0: speculative register interpreter with inline caches and opcode rewriting."
+
+[lints]
+workspace = true
+
+[dependencies]
+vortex-nv1 = { path = "../vortex-nv1" }
+vortex-ugb = { path = "../vortex-ugb" }
+vortex-runtime = { path = "../vortex-runtime" }

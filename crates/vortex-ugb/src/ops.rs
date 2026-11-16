@@ -657,6 +657,38 @@ impl Op {
     }
 }
 
+impl CapReq {
+    /// The UGB capability-space index used in diagnostics.
+    // CEP:WHAT Maps a capability kind to its diagnostic index.
+    // CEP:WHY Traps and logs name the capability by index.
+    // CEP:STATUS complete
+    // CEP:FAILURE Cannot fail.
+    // CEP:ASSUMES Indices are documentation-stable identifiers.
+    // CEP:COST O(1).
+    // CEP:EVIDENCE cargo test -p vortex-ugb
+    pub fn ordinal(self) -> u16 {
+        match self {
+            CapReq::MemRead => 1,
+            CapReq::MemWrite => 2,
+            CapReq::MemAlloc => 3,
+            CapReq::MemFree => 4,
+            CapReq::Ffi => 5,
+            CapReq::CapAdmin => 6,
+            CapReq::TypeInspect => 7,
+            CapReq::TypeModify => 8,
+            CapReq::IoRead => 9,
+            CapReq::IoWrite => 10,
+            CapReq::IoNetwork => 11,
+            CapReq::IoFile => 12,
+            CapReq::Dynamic => 13,
+            CapReq::Eval => 14,
+            CapReq::Reflect => 15,
+            CapReq::Polyglot => 16,
+            CapReq::Call => 17,
+        }
+    }
+}
+
 impl TryFrom<u8> for Op {
     type Error = ();
 

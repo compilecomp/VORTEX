@@ -357,6 +357,15 @@ name = "vortex-runtime"
 version = "0.1.0"
 
 [[package]]
+name = "vortex-t0"
+version = "0.1.0"
+dependencies = [
+ "vortex-nv1",
+ "vortex-runtime",
+ "vortex-ugb",
+]
+
+[[package]]
 name = "vortex-ugb"
 version = "0.1.0"
 dependencies = [

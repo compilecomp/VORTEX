@@ -74,6 +74,12 @@ pub enum Trap {
         /// The offending 48-bit offset.
         offset: u64,
     },
+    /// An operation has no runtime backing in this engine build (foreign
+    /// calls, eval, reflection, polyglot interop); the trap names it.
+    Unsupported {
+        /// Short name of the missing runtime facility.
+        what: &'static str,
+    },
 }
 
 impl fmt::Display for Trap {
@@ -116,6 +122,9 @@ impl fmt::Display for Trap {
             }
             Trap::BadReference { offset } => {
                 write!(f, "heap reference {offset:#x} outside the arena")
+            }
+            Trap::Unsupported { what } => {
+                write!(f, "operation has no runtime backing: {what}")
             }
         }
     }
