@@ -1,0 +1,12 @@
+[package]
+name = "vortex-runtime"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "VORTEX runtime: traps, capability system, heap, GC, profiling."
+
+[lints]
+workspace = true
+
+[dependencies]

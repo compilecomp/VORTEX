@@ -4,6 +4,7 @@ resolver = "2"
 members = [
     "crates/vortex-nv1",
     "crates/vortex-ugb",
+    "crates/vortex-runtime",
     "tools/cep_lint",
 ]
 
