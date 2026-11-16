@@ -1,0 +1,10 @@
+[package]
+name = "vortex-nv1"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "NV-1 64-bit NaN-boxed value word shared by T0, UGB, and the runtime."
+
+[lints]
+workspace = true

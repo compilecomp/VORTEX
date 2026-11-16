@@ -1,16 +1,8 @@
 [workspace]
 resolver = "2"
+# Members are re-added incrementally as each crate lands on main.
 members = [
     "crates/vortex-nv1",
-    "crates/vortex-ugb",
-    "crates/vortex-runtime",
-    "crates/vortex-t0",
-    "crates/vortex-t1",
-    "crates/vortex-opt",
-    "crates/vortex-t4",
-    "crates/vortex-tier",
-    "crates/vortex-ir",
-    "crates/vortex-cli",
     "tools/cep_lint",
 ]
 
