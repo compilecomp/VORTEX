@@ -1,0 +1,18 @@
+[package]
+name = "vortex-t1"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "T1: copy-and-patch baseline JIT with T0 fallback classification."
+
+[lints]
+workspace = true
+
+[dependencies]
+vortex-nv1 = { path = "../vortex-nv1" }
+vortex-ugb = { path = "../vortex-ugb" }
+vortex-runtime = { path = "../vortex-runtime" }
+
+[dev-dependencies]
+vortex-t0 = { path = "../vortex-t0" }
