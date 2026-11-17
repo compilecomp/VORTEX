@@ -1,3 +1,14 @@
+// CEP:FILE crates/vortex-runtime/src/concurrent_gc.rs
+// CEP:WHAT Concurrent GC driver: worker phases in quanta, global safepoint
+//        arbitration with GC precedence, generational card table.
+// CEP:WHY The synchronous Collector needs a concurrency shell to satisfy
+//        the incremental/concurrent/generational design contract.
+// CEP:CLASS CEP-1
+// CEP:STATUS complete
+// CEP:FAILURE Worker exits on Shutdown; arbitration defers, never fails.
+// CEP:ASSUMES Single worker thread; commands are quanta-bounded.
+// CEP:COST O(|Live|) mark work total; O(1) per mutator operation.
+// CEP:EVIDENCE cargo test -p vortex-runtime --test concurrent_gc
 //! Concurrent GC driver and global safepoint arbitration (design
 //! "Garbage Collection Subsystem" 6.1/6.11 and "GC Interaction Subsystem"
 //! 6.3). The synchronous [`crate::gc::Collector`] implements the barrier
@@ -758,7 +769,9 @@ fn worker_loop(shared: Arc<Shared>) {
             taken
         };
         match cmd {
-            Command::Idle => {}
+            Command::Idle => {
+                // Nothing queued this tick; the wait above already slept.
+            }
             Command::Shutdown => return,
             Command::MarkQuanta(quanta) => {
                 let mut g = shared.graph.lock().expect("graph lock");

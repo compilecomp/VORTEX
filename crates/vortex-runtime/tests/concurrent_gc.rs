@@ -14,6 +14,13 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use vortex_runtime::concurrent_gc::{ConcurrentGc, Phase, SafepointState};
 
+// CEP:WHAT GC safepoints displace pending deopt safepoints and defer them.
+// CEP:WHY Arbitration rule GC > DEOPT must hold under every interleaving.
+// CEP:STATUS complete
+// CEP:FAILURE A failed assert blocks the CI gate.
+// CEP:ASSUMES Deterministic quanta keep schedules stable.
+// CEP:COST O(test).
+// CEP:EVIDENCE cargo test -p vortex-runtime --test concurrent_gc
 #[test]
 fn arbitration_gc_beats_deopt() {
     let coord = vortex_runtime::concurrent_gc::SafepointCoordinator::new();
@@ -44,6 +51,13 @@ fn arbitration_gc_beats_deopt() {
     coord.finish_gc();
 }
 
+// CEP:WHAT Concurrent marking in quanta keeps mutator-written objects alive.
+// CEP:WHY The SATB capture must close the mutator race at remark.
+// CEP:STATUS complete
+// CEP:FAILURE A failed assert blocks the CI gate.
+// CEP:ASSUMES Deterministic quanta keep schedules stable.
+// CEP:COST O(test).
+// CEP:EVIDENCE cargo test -p vortex-runtime --test concurrent_gc
 #[test]
 fn concurrent_mark_survives_mutator_writes() {
     // Objects: 0 = garbage, 1 = root A, 2 = B, 3 = C (white, added by the
@@ -76,6 +90,13 @@ fn concurrent_mark_survives_mutator_writes() {
     gc.shutdown();
 }
 
+// CEP:WHAT Only old-to-young stores dirty cards; the drain cleans them.
+// CEP:WHY The generational invariant rides entirely on card dirtiness.
+// CEP:STATUS complete
+// CEP:FAILURE A failed assert blocks the CI gate.
+// CEP:ASSUMES Deterministic quanta keep schedules stable.
+// CEP:COST O(test).
+// CEP:EVIDENCE cargo test -p vortex-runtime --test concurrent_gc
 #[test]
 fn card_table_tracks_old_to_young() {
     let gc = ConcurrentGc::new(8, 5, 4096);
@@ -100,6 +121,13 @@ fn card_table_tracks_old_to_young() {
     gc.shutdown();
 }
 
+// CEP:WHAT Young evacuation roots through old objects found via cards.
+// CEP:WHY Young collect must find old->young edges without a full scan.
+// CEP:STATUS complete
+// CEP:FAILURE A failed assert blocks the CI gate.
+// CEP:ASSUMES Deterministic quanta keep schedules stable.
+// CEP:COST O(test).
+// CEP:EVIDENCE cargo test -p vortex-runtime --test concurrent_gc
 #[test]
 fn evacuate_young_finds_old_roots_via_cards() {
     // old_base = 4: objects 0..4 young, 4..8 old.
@@ -130,6 +158,13 @@ fn evacuate_young_finds_old_roots_via_cards() {
     gc.shutdown();
 }
 
+// CEP:WHAT Mutators park during GcActive and resume on Running.
+// CEP:WHY STW quiescence must be observable and must not deadlock.
+// CEP:STATUS complete
+// CEP:FAILURE A failed assert blocks the CI gate.
+// CEP:ASSUMES Deterministic quanta keep schedules stable.
+// CEP:COST O(test).
+// CEP:EVIDENCE cargo test -p vortex-runtime --test concurrent_gc
 #[test]
 fn mutators_park_during_gc_and_resume() {
     let gc = ConcurrentGc::new(4, 4, 4096);
