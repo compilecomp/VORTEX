@@ -267,6 +267,7 @@ impl Instr {
     // CEP:ASSUMES Little-endian wire order.
     // CEP:COST O(instruction bytes).
     // CEP:EVIDENCE cargo test -p vortex-ugb
+    // CEP:ID: IR-a09
     pub fn decode(code: &[u8], offset: usize) -> Result<(Instr, usize), CodecError> {
         let mut pos = offset;
         let need = |pos: usize, n: usize, len: usize| -> Result<(), CodecError> {

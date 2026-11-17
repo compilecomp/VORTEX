@@ -398,6 +398,7 @@ fn state_cycle_without_phi(graph: &Graph, r: u32) -> bool {
 //        are small and the verifier runs offline.
 // CEP:COST O(|N| + |E_state|) per class.
 // CEP:EVIDENCE cargo test -p vortex-ir
+// CEP:ID: IR-a02
 fn dfs_state_cycle(
     graph: &Graph,
     node: NodeId,
@@ -453,6 +454,7 @@ fn dfs_state_cycle(
 // CEP:FAILURE NoStart, NoTerminator.
 // CEP:ASSUMES None.
 // CEP:COST O(|N| + |E|).
+// CEP:ID: IR-a03
 // CEP:EVIDENCE cargo test -p vortex-ir
 fn check_reachability_and_terminators(graph: &Graph) -> Result<(), VerifyError> {
     let start = match graph.iter().find(|(_, n)| n.op == Op::Start) {
@@ -549,6 +551,7 @@ fn check_dominance(graph: &Graph) -> Result<(), VerifyError> {
 // CEP:STATUS complete
 // CEP:FAILURE False when v is reachable without u and u is positioned.
 // CEP:ASSUMES None.
+// CEP:ID: IR-a04
 // CEP:COST O(|N| + |E_ctrl|) per distinct blocked node.
 // CEP:EVIDENCE cargo test -p vortex-ir
 fn dominates(

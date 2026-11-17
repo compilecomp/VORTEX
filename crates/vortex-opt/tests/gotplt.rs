@@ -73,6 +73,7 @@ fn caller_object(callee: &str, section: &str) -> Object {
 // CEP:ASSUMES None.
 // CEP:COST O(imports).
 // CEP:EVIDENCE cargo test -p vortex-opt --test gotplt
+// CEP:ID: JIT-a17
 fn stub_layout_and_bytes() {
     let gp = build_got_plt(&["foo".to_string()], PLT_BASE, GOT_BASE);
     assert_eq!(gp.plt.len(), 16, "one 16-byte stub");
@@ -97,6 +98,7 @@ fn stub_layout_and_bytes() {
 // CEP:FAILURE A byte mismatch aborts the test binary.
 // CEP:ASSUMES addend -4 for the standard call form.
 // CEP:COST O(relocs).
+// CEP:ID: JIT-a18
 // CEP:EVIDENCE cargo test -p vortex-opt --test gotplt
 fn import_calls_bind_to_stub() {
     let obj = caller_object("foo", "");
@@ -118,6 +120,7 @@ fn import_calls_bind_to_stub() {
 // CEP:STATUS complete
 // CEP:FAILURE A byte mismatch aborts the test binary.
 // CEP:ASSUMES None.
+// CEP:ID: JIT-a19
 // CEP:COST O(relocs).
 // CEP:EVIDENCE cargo test -p vortex-opt --test gotplt
 fn defined_callee_binds_directly() {
@@ -143,6 +146,7 @@ fn defined_callee_binds_directly() {
 // CEP:WHY External tools parse the type byte; it must be conforming.
 // CEP:STATUS complete
 // CEP:FAILURE A byte mismatch aborts the test binary.
+// CEP:ID: JIT-a20
 // CEP:ASSUMES Rela entries carry info = (sym << 32) | type.
 // CEP:COST O(1).
 // CEP:EVIDENCE cargo test -p vortex-opt --test gotplt

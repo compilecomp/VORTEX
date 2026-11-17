@@ -477,6 +477,7 @@ impl Heap {
     // CEP:ASSUMES None.
     // CEP:COST O(1) amortized.
     // CEP:EVIDENCE cargo test -p vortex-runtime
+    // CEP:ID: MEM-a11
     pub fn take_young_region(&mut self, max_regions: usize) -> RtResult<usize> {
         if let Some(idx) = self.free.pop() {
             self.regions[idx].kind = RegionKind::Young;
@@ -514,6 +515,7 @@ impl Heap {
     // CEP:FAILURE Trap::OutOfMemory when no contiguous run exists.
     // CEP:ASSUMES None.
     // CEP:COST O(free regions).
+    // CEP:ID: MEM-a12
     // CEP:EVIDENCE cargo test -p vortex-runtime
     pub fn allocate_humongous(&mut self, size: usize, max_regions: usize) -> RtResult<usize> {
         let needed = size.div_ceil(self.region_size);

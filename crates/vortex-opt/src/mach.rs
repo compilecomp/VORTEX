@@ -303,6 +303,7 @@ fn live_intervals(func: &MachineFunction) -> BTreeMap<u32, (usize, usize)> {
 // CEP:ASSUMES Intervals are non-empty.
 // CEP:COST O(|vregs| log |vregs|).
 // CEP:EVIDENCE cargo test -p vortex-opt
+// CEP:ID: JIT-a08
 pub fn allocate_registers(func: &mut MachineFunction, pool: &[u32]) -> Result<(), MachError> {
     let intervals = live_intervals(func);
     let mut free: Vec<u32> = pool.to_vec();

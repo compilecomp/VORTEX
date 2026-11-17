@@ -249,6 +249,7 @@ fn layout(code: &[u8]) -> Result<Layout, CodecError> {
 // CEP:ASSUMES None.
 // CEP:COST O(|code| + |caps| log |caps|) with the env as a set.
 // CEP:EVIDENCE cargo test -p vortex-ugb
+// CEP:ID: IR-a10
 fn verify_method(program: &Program, mi: usize) -> Result<(), VerifyError> {
     let method = &program.methods[mi];
     let bounds = &program.bounds;

@@ -266,6 +266,7 @@ pub struct Elf {
 // CEP:ASSUMES x86-64, SYSV ABI, class 64, little-endian.
 // CEP:COST O(total bytes).
 // CEP:EVIDENCE cargo test -p vortex-opt
+// CEP:ID: JIT-a03
 pub fn emit_elf(obj: &Object) -> Elf {
     let mut ordered: Vec<&Section> = obj.sections.iter().collect();
     ordered.sort_by_key(|s| layout_rank(s));

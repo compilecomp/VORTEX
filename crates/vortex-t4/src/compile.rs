@@ -95,6 +95,7 @@ impl fmt::Display for T4Stats {
 // CEP:ASSUMES The graph is verified before compilation.
 // CEP:COST O(|IR|^2) bounded by budget_per_node * |IR|.
 // CEP:EVIDENCE cargo test -p vortex-t4
+// CEP:ID: JIT-a58
 pub fn compile_t4(graph: &mut Graph, config: T4Config) -> T4Stats {
     let n = graph.len().max(1) as u64;
     let budget = config.budget_per_node * n;

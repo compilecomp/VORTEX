@@ -381,6 +381,7 @@ impl VGraph {
     // CEP:ASSUMES None.
     // CEP:COST O(|nodes|).
     // CEP:EVIDENCE cargo test -p vortex-opt
+    // CEP:ID: JIT-a16
     pub fn verify(&self) -> Result<(), VError> {
         for (i, n) in self.nodes.iter().enumerate() {
             match n {

@@ -307,6 +307,7 @@ fn parse_label(t: &str) -> Option<i32> {
 //        branch instruction's own byte offset.
 // CEP:COST O(source + code).
 // CEP:EVIDENCE cargo test -p vortex-ugb
+// CEP:ID: IR-a08
 pub fn assemble(builder: &mut Method, source: &str) -> Result<(), AsmError> {
     let lines: Vec<Line> = source.lines().map(split_line).collect();
     let mut label_offsets: BTreeMap<String, usize> = BTreeMap::new();

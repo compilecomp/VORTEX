@@ -113,6 +113,7 @@ fn reg_at(operands: &[Operand], i: usize) -> Option<u16> {
 // CEP:ASSUMES Plan operands are already resolved.
 // CEP:COST O(1) per instruction.
 // CEP:EVIDENCE cargo test -p vortex-t1 stencil
+// CEP:ID: JIT-a43
 fn emit_instr(e: &mut Encoder, op: Op, operands: &[Operand]) -> bool {
     let a = reg_at(operands, 0);
     let b = reg_at(operands, 1);
@@ -319,6 +320,7 @@ fn is_poll_site(op: Op) -> bool {
 // CEP:FAILURE Unshaped operands return false.
 // CEP:ASSUMES Label operands hold instruction indices (from planning).
 // CEP:COST O(1).
+// CEP:ID: JIT-a44
 // CEP:EVIDENCE cargo test -p vortex-t1 stencil
 fn emit_branch(e: &mut Encoder, op: Op, operands: &[Operand]) -> bool {
     // UGB signature: (cond, label) for conditional jumps.
@@ -361,6 +363,7 @@ fn emit_branch(e: &mut Encoder, op: Op, operands: &[Operand]) -> bool {
 // CEP:STATUS complete
 // CEP:FAILURE Inconsistent relocations return the missing symbol.
 // CEP:ASSUMES None.
+// CEP:ID: JIT-a45
 // CEP:COST O(|code| + |relocs|).
 // CEP:EVIDENCE cargo test -p vortex-t1 stencil
 pub fn emit_machine_code(co: &CodeObject) -> MachineCode {

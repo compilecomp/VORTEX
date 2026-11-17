@@ -140,6 +140,7 @@ impl LineProgram {
     // CEP:ASSUMES The unit length fits u32.
     // CEP:COST O(rows).
     // CEP:EVIDENCE cargo test -p vortex-opt
+    // CEP:ID: JIT-a01
     pub fn emit(&self) -> Vec<u8> {
         let h = self.header;
         // Program body first so the unit length is known.
@@ -251,6 +252,7 @@ pub struct Abbrev {
 // CEP:FAILURE Cannot fail.
 // CEP:ASSUMES Codes are assigned in frequency order by the caller.
 // CEP:COST O(abbrevs).
+// CEP:ID: JIT-a02
 // CEP:EVIDENCE cargo test -p vortex-opt
 pub fn emit_abbrev(abbrevs: &[Abbrev]) -> Vec<u8> {
     let mut out = Vec::new();

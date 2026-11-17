@@ -37,6 +37,7 @@ use vortex_opt::vector::{Alignment, LaneOp, ReduceOp, ScalarTag, VGraph, VNode, 
 // CEP:ASSUMES None.
 // CEP:COST O(nodes).
 // CEP:EVIDENCE cargo test -p vortex-opt
+// CEP:ID: JIT-a21
 fn foldable_graph() -> Builder {
     let mut b = Builder::new(1);
     let start = b.start(vec![]);
@@ -92,6 +93,7 @@ fn pipeline_counts() {
 // CEP:FAILURE A failing assertion aborts the test binary.
 // CEP:ASSUMES None.
 // CEP:COST O(nodes).
+// CEP:ID: JIT-a22
 // CEP:EVIDENCE cargo test -p vortex-opt
 #[test]
 fn vector_verifier() {
@@ -151,6 +153,7 @@ fn vector_verifier() {
 // CEP:STATUS complete
 // CEP:FAILURE A failing assertion aborts the test binary.
 // CEP:ASSUMES None.
+// CEP:ID: JIT-a23
 // CEP:COST O(vregs).
 // CEP:EVIDENCE cargo test -p vortex-opt
 #[test]
@@ -200,6 +203,7 @@ fn register_allocation() {
 // CEP:WHY Invariants 1-3 of Valid_Schedule.
 // CEP:STATUS complete
 // CEP:FAILURE A failing assertion aborts the test binary.
+// CEP:ID: JIT-a24
 // CEP:ASSUMES None.
 // CEP:COST O(instructions squared).
 // CEP:EVIDENCE cargo test -p vortex-opt
@@ -321,6 +325,7 @@ fn elf_structure() {
 // CEP:WHAT The emitted DWARF line program state machine reproduces rows.
 // CEP:WHY 6.4: the program is a decodable state machine.
 // CEP:STATUS complete
+// CEP:ID: JIT-a25
 // CEP:FAILURE A failing assertion aborts the test binary.
 // CEP:ASSUMES None.
 // CEP:COST O(rows).
@@ -465,6 +470,7 @@ fn line_program_round_trips() {
 /// The linker resolves symbols and applies relocations.
 // CEP:WHAT Strong/weak precedence and S+A, S+A-P resolution.
 // CEP:WHY Invariants 1 and 3 of Valid_Exec.
+// CEP:ID: JIT-a26
 // CEP:STATUS complete
 // CEP:FAILURE A failing assertion aborts the test binary.
 // CEP:ASSUMES None.
@@ -513,6 +519,7 @@ fn linker_resolves_and_patches() {
 
 /// PC-relative relocation resolution subtracts the site address.
 // CEP:WHAT S + A - P lands in the patched field.
+// CEP:ID: JIT-a27
 // CEP:WHY 6.6: the PC32 formula.
 // CEP:STATUS complete
 // CEP:FAILURE A failing assertion aborts the test binary.

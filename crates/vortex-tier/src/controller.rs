@@ -236,6 +236,7 @@ impl Controller {
     // CEP:ASSUMES None.
     // CEP:COST O(1).
     // CEP:EVIDENCE cargo test -p vortex-tier
+    // CEP:ID: JIT-a60
     pub fn note_execution(
         &self,
         method: u32,
@@ -409,6 +410,7 @@ impl Controller {
 // CEP:FAILURE Cancelled requests clean up and become Cancelled.
 // CEP:ASSUMES None.
 // CEP:COST Bounded by request work.
+// CEP:ID: JIT-a61
 // CEP:EVIDENCE cargo test -p vortex-tier
 fn worker_loop(
     queue: Arc<Mutex<Vec<QueueEntry>>>,

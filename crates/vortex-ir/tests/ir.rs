@@ -26,6 +26,7 @@ use vortex_ir::{
 // CEP:ASSUMES None.
 // CEP:COST O(nodes).
 // CEP:EVIDENCE cargo test -p vortex-ir
+// CEP:ID: IR-a05
 fn diamond() -> Builder {
     let mut b = Builder::new(1);
     let start = b.start(vec![Type::Int64]);
@@ -186,6 +187,7 @@ fn pure_state_edge_rejects() {
 // CEP:FAILURE A failing assertion aborts the test binary.
 // CEP:ASSUMES None.
 // CEP:COST O(nodes).
+// CEP:ID: IR-a06
 // CEP:EVIDENCE cargo test -p vortex-ir
 #[test]
 fn state_cycle_through_state_phi_is_valid() {
@@ -354,6 +356,7 @@ fn afn_implies_all() {
 // CEP:STATUS complete
 // CEP:FAILURE A failing assertion aborts the test binary.
 // CEP:ASSUMES None.
+// CEP:ID: IR-a07
 // CEP:COST O(nodes).
 // CEP:EVIDENCE cargo test -p vortex-ir
 #[test]

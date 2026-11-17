@@ -47,6 +47,7 @@ fn run(args: &[String]) -> i32 {
 // CEP:ASSUMES None.
 // CEP:COST O(code).
 // CEP:EVIDENCE cargo run -p vortex-cli -- demo
+// CEP:ID: CS-a01
 fn build_demo_program() -> Program {
     let mut p = Program::default();
     let mut main = Method::build("main", 4, 0, 0).method;
@@ -73,6 +74,7 @@ fn build_demo_program() -> Program {
 // CEP:FAILURE Exits 1 when any stage disagrees.
 // CEP:ASSUMES None.
 // CEP:COST O(demo work).
+// CEP:ID: CS-a02
 // CEP:EVIDENCE cargo run -p vortex-cli -- demo
 fn demo() -> i32 {
     let p = build_demo_program();
@@ -195,6 +197,7 @@ fn cmd_run(_args: &[String]) -> i32 {
 // CEP:STATUS complete
 // CEP:FAILURE Exits 1 on verifier failure.
 // CEP:ASSUMES None.
+// CEP:ID: CS-a03
 // CEP:COST O(nodes).
 // CEP:EVIDENCE cargo run -p vortex-cli -- optimize
 fn cmd_optimize(_args: &[String]) -> i32 {

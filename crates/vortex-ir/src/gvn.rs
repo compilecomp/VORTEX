@@ -26,6 +26,7 @@ use std::collections::HashMap;
 //        commutative input order plus constants).
 // CEP:COST O(|N|) expected.
 // CEP:EVIDENCE cargo test -p vortex-ir
+// CEP:ID: IR-a01
 pub fn gvn(graph: &mut Graph) -> usize {
     let mut leaders: HashMap<String, NodeId> = HashMap::new();
     let mut rewrite: HashMap<NodeId, NodeId> = HashMap::new();

@@ -59,6 +59,7 @@ pub fn run_pipeline(graph: &mut Graph) -> PassStats {
 // CEP:ASSUMES Constants are immediate integers.
 // CEP:COST O(|N|).
 // CEP:EVIDENCE cargo test -p vortex-opt
+// CEP:ID: JIT-a09
 pub fn fold_constants(graph: &mut Graph) -> usize {
     let mut folded = 0usize;
     let ids: Vec<NodeId> = graph.iter().map(|(id, _)| id).collect();
@@ -122,6 +123,7 @@ fn const_int(n: &Node) -> Option<i64> {
 // CEP:FAILURE Cannot fail.
 // CEP:ASSUMES None.
 // CEP:COST O(|N|).
+// CEP:ID: JIT-a10
 // CEP:EVIDENCE cargo test -p vortex-opt
 pub fn algebraic_simplify(graph: &mut Graph) -> usize {
     let mut applied = 0usize;
@@ -179,6 +181,7 @@ pub fn algebraic_simplify(graph: &mut Graph) -> usize {
 // CEP:STATUS complete
 // CEP:FAILURE Cannot fail.
 // CEP:ASSUMES None.
+// CEP:ID: JIT-a11
 // CEP:COST O(|N|).
 // CEP:EVIDENCE cargo test -p vortex-opt
 pub fn bitwise_identity(graph: &mut Graph) -> usize {
@@ -231,6 +234,7 @@ pub fn bitwise_identity(graph: &mut Graph) -> usize {
 // CEP:WHY Dead pure nodes waste every downstream phase.
 // CEP:STATUS complete
 // CEP:FAILURE Cannot fail.
+// CEP:ID: JIT-a12
 // CEP:ASSUMES Effectful nodes are never removed.
 // CEP:COST O(|N|^2) worst case over the fixed point.
 // CEP:EVIDENCE cargo test -p vortex-opt

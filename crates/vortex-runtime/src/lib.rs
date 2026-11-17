@@ -14,11 +14,13 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+pub mod barriers;
 pub mod caps;
 pub mod concurrent_gc;
 pub mod gc;
 pub mod heap;
 pub mod profile;
+pub mod safepoint;
 pub mod trap;
 
 pub use caps::{CapError, Environment, Gct, Status, Token, GCT_INVALID, MAX_CAP_SLOTS};

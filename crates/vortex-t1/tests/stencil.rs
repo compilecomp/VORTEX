@@ -96,6 +96,7 @@ fn straight_line_bytes() {
 // CEP:ASSUMES None.
 // CEP:COST O(code).
 // CEP:EVIDENCE cargo test -p vortex-t1 --test stencil
+// CEP:ID: JIT-a46
 fn backward_branch_polls_and_resolves() {
     // A two-instruction loop: body (0), JumpIfFalse r0 -> 0 (1).
     let c = co(
@@ -161,6 +162,7 @@ fn call_arms_poll_and_stores_result() {
 // CEP:FAILURE A byte mismatch aborts the test binary.
 // CEP:ASSUMES UGB signature (dst, lhs, rhs, kind).
 // CEP:COST O(code).
+// CEP:ID: JIT-a47
 // CEP:EVIDENCE cargo test -p vortex-t1 --test stencil
 fn cmp_selector_drives_condition() {
     let c = co(

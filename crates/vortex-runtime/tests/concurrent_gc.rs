@@ -21,6 +21,7 @@ use vortex_runtime::concurrent_gc::{ConcurrentGc, Phase, SafepointState};
 // CEP:ASSUMES Deterministic quanta keep schedules stable.
 // CEP:COST O(test).
 // CEP:EVIDENCE cargo test -p vortex-runtime --test concurrent_gc
+// CEP:ID: MEM-a13
 #[test]
 fn arbitration_gc_beats_deopt() {
     let coord = vortex_runtime::concurrent_gc::SafepointCoordinator::new();
@@ -57,6 +58,7 @@ fn arbitration_gc_beats_deopt() {
 // CEP:FAILURE A failed assert blocks the CI gate.
 // CEP:ASSUMES Deterministic quanta keep schedules stable.
 // CEP:COST O(test).
+// CEP:ID: MEM-a14
 // CEP:EVIDENCE cargo test -p vortex-runtime --test concurrent_gc
 #[test]
 fn concurrent_mark_survives_mutator_writes() {
@@ -95,6 +97,7 @@ fn concurrent_mark_survives_mutator_writes() {
 // CEP:STATUS complete
 // CEP:FAILURE A failed assert blocks the CI gate.
 // CEP:ASSUMES Deterministic quanta keep schedules stable.
+// CEP:ID: MEM-a15
 // CEP:COST O(test).
 // CEP:EVIDENCE cargo test -p vortex-runtime --test concurrent_gc
 #[test]
@@ -125,6 +128,7 @@ fn card_table_tracks_old_to_young() {
 // CEP:WHY Young collect must find old->young edges without a full scan.
 // CEP:STATUS complete
 // CEP:FAILURE A failed assert blocks the CI gate.
+// CEP:ID: MEM-a16
 // CEP:ASSUMES Deterministic quanta keep schedules stable.
 // CEP:COST O(test).
 // CEP:EVIDENCE cargo test -p vortex-runtime --test concurrent_gc
@@ -161,6 +165,7 @@ fn evacuate_young_finds_old_roots_via_cards() {
 // CEP:WHAT Mutators park during GcActive and resume on Running.
 // CEP:WHY STW quiescence must be observable and must not deadlock.
 // CEP:STATUS complete
+// CEP:ID: MEM-a17
 // CEP:FAILURE A failed assert blocks the CI gate.
 // CEP:ASSUMES Deterministic quanta keep schedules stable.
 // CEP:COST O(test).

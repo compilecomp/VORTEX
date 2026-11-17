@@ -146,6 +146,90 @@
       "severity": 0,
       "check": "hunter_manifest",
       "params": {}
+    },
+    "CEP-LINT-ATOMIC-FILE": {
+      "severity": 1,
+      "check": "file_topology_policy",
+      "params": {
+        "line_limits": {
+          "CEP-0": 400,
+          "HPC-0": 400,
+          "RCS-0": 400,
+          "CEP-1": 800,
+          "HPC-1": 800,
+          "RCS-1": 800,
+          "CEP-2": 1200,
+          "HPC-2": 1200,
+          "RCS-2": 1200,
+          "CC": 800,
+          "FFI": 800
+        },
+        "default_limit": 800,
+        "junk_names": [
+          "util",
+          "helper",
+          "misc",
+          "common"
+        ]
+      }
+    },
+    "CEP-LINT-DOC-ID": {
+      "severity": 1,
+      "check": "function_policy",
+      "params": {
+        "max_id_statements": 10,
+        "id_pattern": "[A-Z]+-[a-z0-9]+"
+      }
+    },
+    "CEP-LINT-DOC-FILE": {
+      "severity": 1,
+      "check": "rosetta_policy",
+      "params": {
+        "registry_path": "docs/registry.json",
+        "docs_prefix": "docs/functions/"
+      }
+    },
+    "CEP-LINT-DOC-TIERS": {
+      "severity": 1,
+      "check": "rosetta_policy",
+      "params": {}
+    },
+    "CEP-LINT-DOC-INQUISITION": {
+      "severity": 1,
+      "check": "rosetta_policy",
+      "params": {}
+    },
+    "CEP-LINT-SECRET-SCAN": {
+      "severity": 0,
+      "check": "secret_probe_policy",
+      "params": {
+        "patterns": [
+          "password",
+          "passwd",
+          "secret_key",
+          "api_key",
+          "apikey",
+          "aws_secret_access_key",
+          "begin private key",
+          "akia"
+        ],
+        "exempt_paths": [
+          "tools/cep_lint/src/rules.rs",
+          "tools/cep_lint/tests/engine.rs",
+          "tools/cep_lint/tests/receipts.rs"
+        ]
+      }
+    },
+    "CEP-LINT-UNSAFE-DOC": {
+      "severity": 1,
+      "check": "unsafe_doc_policy",
+      "params": {
+        "exempt_paths": [
+          "tools/cep_lint/src/rules.rs",
+          "tools/cep_lint/tests/engine.rs",
+          "tools/cep_lint/tests/receipts.rs"
+        ]
+      }
     }
   }
 }

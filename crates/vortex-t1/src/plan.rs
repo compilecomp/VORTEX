@@ -119,6 +119,7 @@ fn has_stencil(op: vortex_ugb::Op) -> bool {
 // CEP:ASSUMES Verified bytecode.
 // CEP:COST O(|code|).
 // CEP:EVIDENCE cargo test -p vortex-t1
+// CEP:ID: JIT-a42
 pub fn plan_method(program: &Program, method: u32) -> Result<CodeObject, PlanError> {
     let m = program
         .method(method)

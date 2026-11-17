@@ -109,6 +109,7 @@ impl Executor {
     // CEP:ASSUMES The object was planned from verified bytecode.
     // CEP:COST O(instructions executed).
     // CEP:EVIDENCE cargo test -p vortex-t1
+    // CEP:ID: JIT-a40
     pub fn run(&self, method: u32, args: &[Value], heap: &mut Heap) -> RtResult<Value> {
         let entry = self
             .objects
@@ -222,6 +223,7 @@ impl Executor {
     // CEP:FAILURE Typed Trap per fault class.
     // CEP:ASSUMES None.
     // CEP:COST O(1).
+    // CEP:ID: JIT-a41
     // CEP:EVIDENCE cargo test -p vortex-t1
     fn simple_op(
         &self,

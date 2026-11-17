@@ -123,6 +123,7 @@ fn verifier_accepts_valid_program() {
 // CEP:ASSUMES None.
 // CEP:COST O(code).
 // CEP:EVIDENCE cargo test -p vortex-ugb
+// CEP:ID: IR-a11
 #[test]
 fn verifier_rejects_mid_instruction_branch() {
     let mut program = Program::default();
@@ -180,6 +181,7 @@ fn verifier_rejects_missing_capability() {
 // CEP:FAILURE A failing assertion aborts the test binary.
 // CEP:ASSUMES None.
 // CEP:COST O(code).
+// CEP:ID: IR-a12
 // CEP:EVIDENCE cargo test -p vortex-ugb
 #[test]
 fn verifier_rejects_bounds_violations() {

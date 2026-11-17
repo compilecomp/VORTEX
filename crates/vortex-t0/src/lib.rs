@@ -13,6 +13,7 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+pub mod frames;
 pub mod interp;
 pub mod rewrite;
 

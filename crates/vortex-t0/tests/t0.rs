@@ -137,6 +137,7 @@ fn branches() {
 // CEP:ASSUMES None.
 // CEP:COST O(instructions).
 // CEP:EVIDENCE cargo test -p vortex-t0
+// CEP:ID: JIT-a35
 #[test]
 fn calls_pass_frames() {
     let mut p = Program::default();
@@ -167,6 +168,7 @@ fn calls_pass_frames() {
 // CEP:FAILURE A failing assertion aborts the test binary.
 // CEP:ASSUMES None.
 // CEP:COST O(depth).
+// CEP:ID: JIT-a36
 // CEP:EVIDENCE cargo test -p vortex-t0
 #[test]
 fn recursion_hits_stack_bound() {
@@ -261,6 +263,7 @@ fn capability_check_traps() {
 // CEP:STATUS complete
 // CEP:FAILURE A failing assertion aborts the test binary.
 // CEP:ASSUMES None.
+// CEP:ID: JIT-a37
 // CEP:COST O(code).
 // CEP:EVIDENCE cargo test -p vortex-t0
 #[test]
@@ -303,6 +306,7 @@ fn rewriting_specializes_hot_add() {
 // CEP:WHY T0 6.7 super bytecodes reduce dispatches.
 // CEP:STATUS complete
 // CEP:FAILURE A failing assertion aborts the test binary.
+// CEP:ID: JIT-a38
 // CEP:ASSUMES None.
 // CEP:COST O(code).
 // CEP:EVIDENCE cargo test -p vortex-t0
@@ -337,6 +341,7 @@ fn super_load_add_store_forms_and_runs() {
 // CEP:WHAT Cache states follow the documented state machine.
 // CEP:WHY T0 6.5 cache behavior drives call specialization.
 // CEP:STATUS complete
+// CEP:ID: JIT-a39
 // CEP:FAILURE A failing assertion aborts the test binary.
 // CEP:ASSUMES None.
 // CEP:COST O(entries).

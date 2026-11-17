@@ -75,6 +75,7 @@ impl SafepointGate {
     // CEP:ASSUMES None.
     // CEP:COST O(wait).
     // CEP:EVIDENCE cargo test -p vortex-tier
+    // CEP:ID: JIT-a59
     pub fn park(&self, timeout: Duration) -> bool {
         if !self.at_safepoint() {
             return true;

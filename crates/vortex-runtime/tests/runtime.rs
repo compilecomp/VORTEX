@@ -96,6 +96,7 @@ fn forged_tokens_fail_checks() {
 // CEP:ASSUMES None.
 // CEP:COST O(entries).
 // CEP:EVIDENCE cargo test -p vortex-runtime
+// CEP:ID: MEM-a18
 #[test]
 fn attenuation_and_revocation() {
     let mut gct = Gct::new(16);
@@ -145,6 +146,7 @@ fn attenuation_depth_bounded() {
 // CEP:FAILURE A failing assertion aborts the test binary.
 // CEP:ASSUMES None.
 // CEP:COST O(64).
+// CEP:ID: MEM-a19
 // CEP:EVIDENCE cargo test -p vortex-runtime
 #[test]
 fn environments_pass_and_bound() {
@@ -172,6 +174,7 @@ fn environments_pass_and_bound() {
 // CEP:STATUS complete
 // CEP:FAILURE A failing assertion aborts the test binary.
 // CEP:ASSUMES None.
+// CEP:ID: MEM-a20
 // CEP:COST O(heap).
 // CEP:EVIDENCE cargo test -p vortex-runtime
 #[test]
@@ -202,6 +205,7 @@ fn heap_allocation_and_cards() {
 // CEP:WHY GC invariant 2 and 6.8 phases.
 // CEP:STATUS complete
 // CEP:FAILURE A failing assertion aborts the test binary.
+// CEP:ID: MEM-a21
 // CEP:ASSUMES None.
 // CEP:COST O(live young).
 // CEP:EVIDENCE cargo test -p vortex-runtime
@@ -233,6 +237,7 @@ fn young_collection_evacuates() {
 // CEP:WHAT Full old cycle: mark, weak clear, Lisp-2 compaction.
 // CEP:WHY GC invariants 2, 4, and 7.
 // CEP:STATUS complete
+// CEP:ID: MEM-a22
 // CEP:FAILURE A failing assertion aborts the test binary.
 // CEP:ASSUMES None.
 // CEP:COST O(old heap).
@@ -285,6 +290,7 @@ fn region_start(heap: &Heap) -> usize {
 /// SATB barrier: marked source with unmarked target enqueues.
 // CEP:WHAT The write barrier re-grays marked sources.
 // CEP:WHY SATB invariant 2 under mutation.
+// CEP:ID: MEM-a23
 // CEP:STATUS complete
 // CEP:FAILURE A failing assertion aborts the test binary.
 // CEP:ASSUMES None.
@@ -312,6 +318,7 @@ fn write_barrier_enqueues_satb_sources() {
 
 /// Load barrier: forwarded pointers self-heal through the cache.
 // CEP:WHAT Loads follow forwarding words and rewrite the slot.
+// CEP:ID: MEM-a24
 // CEP:WHY Invariant 4: pointers are corrected before use.
 // CEP:STATUS complete
 // CEP:FAILURE A failing assertion aborts the test binary.
@@ -390,6 +397,7 @@ fn occupancy_trigger() {
 }
 
 /// Profiling model: counts, type sets, branches, ICs, calls, reset.
+// CEP:ID: MEM-a25
 // CEP:WHAT All profile tables record and reset as documented.
 // CEP:WHY T0 6.8 accuracy invariants depend on this shape.
 // CEP:STATUS complete

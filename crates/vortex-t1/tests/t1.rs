@@ -50,6 +50,7 @@ fn build_program() -> Program {
 // CEP:ASSUMES None.
 // CEP:COST O(instructions).
 // CEP:EVIDENCE cargo test -p vortex-t1
+// CEP:ID: JIT-a48
 #[test]
 fn t1_matches_t0() {
     let p = build_program();
@@ -102,6 +103,7 @@ fn unsupported_falls_back() {
 // CEP:FAILURE A failing assertion aborts the test binary.
 // CEP:ASSUMES None.
 // CEP:COST O(iterations).
+// CEP:ID: JIT-a49
 // CEP:EVIDENCE cargo test -p vortex-t1
 #[test]
 fn loop_executes() {

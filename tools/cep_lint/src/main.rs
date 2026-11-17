@@ -31,6 +31,7 @@ fn main() {
 // CEP:ASSUMES Inputs satisfy the module invariants (see file header).
 // CEP:COST Bounded by the file-header budget for this class; no hidden allocation beyond documented growth.
 // CEP:EVIDENCE cargo test -p cep_lint
+// CEP:ID: CS-a04
 fn run(args: &[String]) -> i32 {
     let mut config_path: Option<String> = None;
     let mut self_test = false;
@@ -114,6 +115,23 @@ fn run(args: &[String]) -> i32 {
     // Collect target files.
     let files = collect_files(&root, &targets);
     findings.extend(rules::scan_all(&cfg, &files));
+
+    // Rosetta cross-file checks (68.6.1): registry ↔ docs/functions.
+    if cfg.rules.contains_key("CEP-LINT-DOC-FILE") {
+        let registry_path = root.join("docs/registry.json");
+        let registry_text = match std::fs::read_to_string(&registry_path) {
+            Ok(t) => t,
+            Err(e) => {
+                eprintln!(
+                    "CEP-LINT-BOOT-1: cannot read registry {}: {e}",
+                    registry_path.display()
+                );
+                return 2;
+            }
+        };
+        let docs = collect_markdown(&root.join("docs/functions"));
+        findings.extend(rules::rosetta_findings(&cfg, &registry_text, &docs));
+    }
 
     if findings.is_empty() {
         println!(
@@ -205,6 +223,7 @@ fn doc_sync_findings(root: &Path, cfg: &Config, standard_text: &str) -> Vec<rule
 // CEP:FAILURE Reports failure through the module's typed error path; no silent fallback.
 // CEP:ASSUMES Inputs satisfy the module invariants (see file header).
 // CEP:COST Bounded by the file-header budget for this class; no hidden allocation beyond documented growth.
+// CEP:ID: CS-a05
 // CEP:EVIDENCE cargo test -p cep_lint
 fn run_self_test(root: &Path, cfg: &Config) -> i32 {
     let manifest_path = root.join("tools/cep_lint/tests/manifest.json");
@@ -254,13 +273,15 @@ fn run_self_test(root: &Path, cfg: &Config) -> i32 {
         }
     }
     // Coverage: every configured rule must have a violating and a compliant
-    // scenario. Receipt rules (65.5, 67.5) are mode-triggered manifest checks,
-    // not file-content scans; their suite is tools/cep_lint/tests/receipts.rs.
+    // scenario. Receipt rules (65.5, 67.5) are mode-triggered manifest checks
+    // and the Rosetta rules (68.6.1) are cross-file checks; their suites
+    // are tools/cep_lint/tests/receipts.rs and tests/engine.rs.
     for name in cfg.rules.keys() {
-        let is_manifest_check = cfg
-            .rules
-            .get(name)
-            .is_some_and(|r| r.check == "commit_hunt_manifest" || r.check == "hunter_manifest");
+        let is_manifest_check = cfg.rules.get(name).is_some_and(|r| {
+            r.check == "commit_hunt_manifest"
+                || r.check == "hunter_manifest"
+                || r.check == "rosetta_policy"
+        });
         if is_manifest_check {
             continue;
         }
@@ -298,6 +319,7 @@ fn run_self_test(root: &Path, cfg: &Config) -> i32 {
 // CEP:STATUS complete
 // CEP:FAILURE Exits 1 on any receipt finding; bootstrap failures exit 2.
 // CEP:ASSUMES Runs inside a git repository with HEAD~1 available.
+// CEP:ID: CS-a06
 // CEP:COST O(diff bytes + receipt bytes).
 // CEP:EVIDENCE tools/cep_lint/tests/receipts.rs
 fn run_verify_hunt(root: &Path, cfg: &Config) -> i32 {
@@ -374,6 +396,56 @@ fn find_repo_root() -> Option<PathBuf> {
         }
         if !dir.pop() {
             return None;
+        }
+    }
+}
+
+/// Collects (path, content) pairs for Markdown files under `dir`,
+/// deterministically sorted (Rosetta docs tree).
+// CEP:WHAT Collects Markdown files under a directory for Rosetta checks.
+// CEP:WHY The 68.6.1 rules compare the registry against the docs tree.
+// CEP:STATUS complete
+// CEP:FAILURE Missing directories yield an empty list; unreadable files are
+//        skipped with a bootstrap note on stderr.
+// CEP:ASSUMES UTF-8 Markdown files.
+// CEP:COST O(docs bytes).
+// CEP:EVIDENCE cargo test -p cep_lint
+fn collect_markdown(dir: &Path) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    collect_md_dir(dir, "", &mut out);
+    out.sort();
+    out
+}
+
+// CEP:WHAT Implements collect_markdown recursion.
+// CEP:WHY Required by the module contract stated in the file header.
+// CEP:STATUS complete
+// CEP:FAILURE Skips unreadable entries; never panics.
+// CEP:ASSUMES None.
+// CEP:COST O(docs bytes).
+// CEP:EVIDENCE cargo test -p cep_lint
+fn collect_md_dir(dir: &Path, rel: &str, out: &mut Vec<(String, String)>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let mut paths: Vec<PathBuf> = entries.flatten().map(|e| e.path()).collect();
+    paths.sort();
+    for p in paths {
+        let name = p
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let child_rel = if rel.is_empty() {
+            name.clone()
+        } else {
+            format!("{rel}/{name}")
+        };
+        if p.is_dir() {
+            collect_md_dir(&p, &child_rel, out);
+        } else if name.ends_with(".md") {
+            if let Ok(text) = std::fs::read_to_string(&p) {
+                out.push((format!("docs/functions/{child_rel}"), text));
+            }
         }
     }
 }

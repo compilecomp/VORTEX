@@ -56,6 +56,7 @@ fn base_graph() -> Builder {
 // CEP:ASSUMES Const producers precede consumers.
 // CEP:COST O(graph).
 // CEP:EVIDENCE cargo test -p vortex-t2
+// CEP:ID: JIT-a55
 #[test]
 fn fold_arithmetic_once() {
     let mut b = base_graph();
@@ -89,6 +90,7 @@ fn fold_arithmetic_once() {
 // CEP:FAILURE A failed assert aborts the test binary.
 // CEP:ASSUMES Constants are literal opcodes.
 // CEP:COST O(graph).
+// CEP:ID: JIT-a56
 // CEP:EVIDENCE cargo test -p vortex-t2
 #[test]
 fn peephole_rewires_identity_chains() {
@@ -132,6 +134,7 @@ fn peephole_rewires_identity_chains() {
 // CEP:STATUS complete
 // CEP:FAILURE A failed assert aborts the test binary.
 // CEP:ASSUMES Input types come from the verified lattice.
+// CEP:ID: JIT-a57
 // CEP:COST O(graph).
 // CEP:EVIDENCE cargo test -p vortex-t2
 #[test]

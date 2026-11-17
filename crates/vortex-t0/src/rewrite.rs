@@ -83,6 +83,7 @@ impl Rewriter {
     //        thread executes it; the model interpreter is single-threaded).
     // CEP:COST O(|code|) scan per invocation.
     // CEP:EVIDENCE cargo test -p vortex-t0
+    // CEP:ID: JIT-a30
     pub fn maybe_rewrite(&mut self, interp: &mut Interp, method: u32) {
         if self.done.contains(&(method, 0)) {
             return;
@@ -218,6 +219,7 @@ impl Rewriter {
     // CEP:FAILURE None when the pattern does not match or targets interfere.
     // CEP:ASSUMES None.
     // CEP:COST O(1).
+    // CEP:ID: JIT-a31
     // CEP:EVIDENCE cargo test -p vortex-t0
     fn reuse_rule(&self, code: &[u8], pos: usize, targets: &[usize]) -> Option<Vec<u8>> {
         let (first, size1) = Instr::decode(code, pos).ok()?;
@@ -261,6 +263,7 @@ impl Rewriter {
     // CEP:STATUS complete
     // CEP:FAILURE Unsafe or cold candidates are skipped.
     // CEP:ASSUMES Sequences execute straight-line between their ends.
+    // CEP:ID: JIT-a32
     // CEP:COST O(|code|) per invocation.
     // CEP:EVIDENCE cargo test -p vortex-t0
     fn form_supers(
@@ -322,6 +325,7 @@ impl Rewriter {
     // CEP:WHY 6.7 example one; the triple collapses to one dispatch.
     // CEP:STATUS complete
     // CEP:FAILURE None when the shape or targets do not allow it.
+    // CEP:ID: JIT-a33
     // CEP:ASSUMES None.
     // CEP:COST O(1).
     // CEP:EVIDENCE cargo test -p vortex-t0
@@ -377,6 +381,7 @@ impl Rewriter {
     // CEP:WHAT Matches the compare-branch pair.
     // CEP:WHY 6.7 example three; the pair collapses to one dispatch.
     // CEP:STATUS complete
+    // CEP:ID: JIT-a34
     // CEP:FAILURE None when the shape or targets do not allow it.
     // CEP:ASSUMES None.
     // CEP:COST O(1).

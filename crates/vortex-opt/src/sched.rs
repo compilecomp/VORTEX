@@ -212,6 +212,7 @@ pub struct Scheduled {
 // CEP:ASSUMES None.
 // CEP:COST O(|E| + |I|).
 // CEP:EVIDENCE cargo test -p vortex-opt
+// CEP:ID: JIT-a13
 pub fn validate(
     func: &MachineFunction,
     deps: &[DepEdge],
@@ -263,6 +264,7 @@ pub fn validate(
 // CEP:FAILURE Cannot fail; the fallback order is the original sequence.
 // CEP:ASSUMES None.
 // CEP:COST O(|I|^2 |E|).
+// CEP:ID: JIT-a14
 // CEP:EVIDENCE cargo test -p vortex-opt
 pub fn list_schedule(
     func: &MachineFunction,
@@ -403,6 +405,7 @@ pub fn modulo_schedule(
 // CEP:STATUS complete
 // CEP:FAILURE None when the body does not fit within the cycle limit.
 // CEP:ASSUMES The dependency graph is finite and acyclic per iteration.
+// CEP:ID: JIT-a15
 // CEP:COST O(|I| |E|).
 // CEP:EVIDENCE cargo test -p vortex-opt
 fn modulo_attempt(

@@ -93,6 +93,7 @@ pub struct T2Stats {
 // CEP:ASSUMES The graph satisfies Valid_IR on entry and exit.
 // CEP:COST O(|IR|); modeled budget = B_2 * |IR|.
 // CEP:EVIDENCE cargo test -p vortex-t2
+// CEP:ID: JIT-a50
 pub fn compile_t2(graph: &mut Graph, config: T2Config) -> T2Stats {
     let mut stats = T2Stats {
         nodes: graph.len(),

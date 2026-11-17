@@ -11,8 +11,21 @@
 // CEP:COST O(bytes) per file, O(files log files) for output sorting.
 // CEP:EVIDENCE cep_lint --self-test and repository scans
 use crate::config::Config;
+// Syntax helpers live in `syntax.rs` (atomic-file split); public paths are
+// preserved through re-exports.
+// CEP:WHAT Re-exports the syntax helpers.
+// CEP:WHY lib.rs and tests import them via crate::rules paths.
+// CEP:STATUS complete
+// CEP:FAILURE Cannot fail.
+// CEP:ASSUMES None.
+// CEP:COST O(1).
+// CEP:EVIDENCE cargo test -p cep_lint
+pub(crate) use crate::syntax::{
+    block_start_of, class_of, classify, fn_body_range, numeric_literals, preceding_block,
+    status_of, Source,
+};
+pub use crate::syntax::{documented_rules, glob_match, scan_all};
 use serde_json::Value;
-use std::collections::BTreeSet;
 
 /// The literal probe strings live in constants so the engine's own source
 /// does not self-trigger the rules it implements.
@@ -33,102 +46,6 @@ pub struct Finding {
     pub message: String,
     /// Severity from the configuration.
     pub severity: u8,
-}
-
-/// A parsed source file: lines plus per-line classification.
-struct Source {
-    lines: Vec<String>,
-    /// Per line: is this line inside a comment (line comment or block)?
-    is_comment: Vec<bool>,
-    /// Per line: the string-literal content on that line (concatenated).
-    strings: Vec<String>,
-}
-
-/// Splits source lines into comment/string/code classification.
-// CEP:WHAT Splits source lines into comment/string/code classification.
-// CEP:WHY Required by the module contract stated in the file header.
-// CEP:STATUS complete
-// CEP:FAILURE Reports failure through the module's typed error path; no silent fallback.
-// CEP:ASSUMES Inputs satisfy the module invariants (see file header).
-// CEP:COST Bounded by the file-header budget for this class; no hidden allocation beyond documented growth.
-// CEP:EVIDENCE cargo test -p cep_lint
-fn classify(lines: Vec<String>) -> Source {
-    let n = lines.len();
-    let mut is_comment = vec![false; n];
-    let mut strings = vec![String::new(); n];
-    let mut in_block = false;
-    for (i, raw) in lines.iter().enumerate() {
-        let mut rest = raw.as_str();
-        if in_block {
-            is_comment[i] = true;
-            if let Some(end) = rest.find("*/") {
-                in_block = false;
-                rest = &rest[end + 2..];
-            } else {
-                continue;
-            }
-        }
-        let mut chars = rest.char_indices().peekable();
-        let mut out_string = String::new();
-        let mut comment_start: Option<usize> = None;
-        let mut in_string = false;
-        let mut escaped = false;
-        while let Some((idx, c)) = chars.next() {
-            if in_string {
-                if escaped {
-                    escaped = false;
-                    out_string.push(c);
-                    continue;
-                }
-                match c {
-                    '\\' => {
-                        escaped = true;
-                        out_string.push(c);
-                    }
-                    '"' => in_string = false,
-                    other => out_string.push(other),
-                }
-                continue;
-            }
-            match c {
-                '"' => in_string = true,
-                '/' if rest[idx..].starts_with("//") => {
-                    comment_start = Some(idx);
-                    break;
-                }
-                '/' if rest[idx..].starts_with("/*") => {
-                    // Same-line block close: resume scanning after `*/`.
-                    match rest[idx + 2..].find("*/") {
-                        Some(end) => {
-                            let next = idx + 2 + end + 2;
-                            // Continue after the closed block.
-                            rest = &rest[next..];
-                            chars = rest.char_indices().peekable();
-                            continue;
-                        }
-                        None => {
-                            in_block = true;
-                            comment_start = Some(idx);
-                            break;
-                        }
-                    }
-                }
-                _ => { /* ordinary character */ }
-            }
-        }
-        if comment_start.is_some() || (in_block && is_comment[i]) {
-            is_comment[i] = true;
-        }
-        if in_block && !is_comment[i] {
-            is_comment[i] = true;
-        }
-        strings[i] = out_string;
-    }
-    Source {
-        lines,
-        is_comment,
-        strings,
-    }
 }
 
 /// Required file-header fields (CEP-LINT-FILE-HEADER default).
@@ -167,6 +84,7 @@ const CLASSES: [&str; 10] = [
 // CEP:FAILURE Reports failure through the module's typed error path; no silent fallback.
 // CEP:ASSUMES Inputs satisfy the module invariants (see file header).
 // CEP:COST Bounded by the file-header budget for this class; no hidden allocation beyond documented growth.
+// CEP:ID: CS-a11
 // CEP:EVIDENCE cargo test -p cep_lint
 pub fn scan_file(cfg: &Config, file: &str, text: &str) -> Vec<Finding> {
     let mut out = Vec::new();
@@ -347,6 +265,22 @@ pub fn scan_file(cfg: &Config, file: &str, text: &str) -> Vec<Finding> {
                             sev("CEP-LINT-STUB-BODY", 1),
                         );
                     }
+                }
+            }
+            // CEP-LINT-DOC-ID (68.2/68.6.1): large functions need a Rosetta id.
+            if enabled("CEP-LINT-DOC-ID")
+                && statements > param_usize("CEP-LINT-DOC-ID", "max_id_statements", 10)
+            {
+                let block = preceding_block(&src.lines, i);
+                if !block.contains("CEP:ID:") {
+                    push(
+                        i,
+                        "CEP-LINT-DOC-ID",
+                        format!(
+                            "function `{name}` ({statements} statements) lacks a CEP:ID (Rosetta 68.2)"
+                        ),
+                        sev("CEP-LINT-DOC-ID", 1),
+                    );
                 }
             }
         }
@@ -672,8 +606,232 @@ pub fn scan_file(cfg: &Config, file: &str, text: &str) -> Vec<Finding> {
         }
     }
 
+    // ---- CEP-LINT-ATOMIC-FILE (62.5.3 file_topology_policy).
+    if enabled("CEP-LINT-ATOMIC-FILE") {
+        let n = src.lines.len();
+        let class = class_of(&src).unwrap_or_else(|| "CC".to_string());
+        let limits: std::collections::BTreeMap<String, usize> = rules
+            .get("CEP-LINT-ATOMIC-FILE")
+            .and_then(|r| r.params.get("line_limits"))
+            .and_then(Value::as_object)
+            .map(|m| {
+                m.iter()
+                    .filter_map(|(k, v)| v.as_u64().map(|x| (k.clone(), x as usize)))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let default_limit = param_usize("CEP-LINT-ATOMIC-FILE", "default_limit", 800);
+        let limit = limits.get(&class).copied().unwrap_or(default_limit);
+        if n > limit {
+            push(
+                0,
+                "CEP-LINT-ATOMIC-FILE",
+                format!("file has {n} lines; class {class} limit is {limit} (62.5.1)"),
+                sev("CEP-LINT-ATOMIC-FILE", 1),
+            );
+        }
+        let fname = file.rsplit('/').next().unwrap_or(file).to_lowercase();
+        for junk in ["util", "helper", "misc", "common"] {
+            if fname.contains(junk) {
+                push(
+                    0,
+                    "CEP-LINT-ATOMIC-FILE",
+                    format!("junk-drawer file name contains `{junk}` (62.4)"),
+                    sev("CEP-LINT-ATOMIC-FILE", 1),
+                );
+            }
+        }
+    }
+
+    // ---- CEP-LINT-SECRET-SCAN (10.14/22.13 secret_probe_policy).
+    if enabled("CEP-LINT-SECRET-SCAN") && !exempt("CEP-LINT-SECRET-SCAN") {
+        let patterns: Vec<String> = rules
+            .get("CEP-LINT-SECRET-SCAN")
+            .and_then(|r| r.params.get("patterns"))
+            .and_then(Value::as_array)
+            .map(|a| {
+                a.iter()
+                    .filter_map(Value::as_str)
+                    .map(String::from)
+                    .collect()
+            })
+            .unwrap_or_else(|| {
+                ["password", "passwd", "secret_key", "api_key", "akia"]
+                    .iter()
+                    .map(|s| (*s).to_string())
+                    .collect()
+            });
+        let probe = |text: &str| -> Option<String> {
+            let lower = text.to_lowercase();
+            if lower.contains("begin private key") {
+                return Some("private key header".to_string());
+            }
+            for pat in &patterns {
+                if let Some(pos) = lower.find(pat) {
+                    let rest = text[pos + pat.len()..].trim_start();
+                    // Assignment context only: prose is not a secret.
+                    if rest.starts_with('=') || rest.starts_with(':') {
+                        return Some(pat.clone());
+                    }
+                    // AWS access-key id: AKIA + identifier.
+                    if pat == "akia" {
+                        let tail: String = rest.chars().take(20).collect();
+                        if tail.chars().filter(|c| c.is_ascii_alphanumeric()).count() >= 8 {
+                            return Some("aws access-key id".to_string());
+                        }
+                    }
+                }
+            }
+            None
+        };
+        for (i, line) in src.lines.iter().enumerate() {
+            if src.is_comment[i] {
+                if let Some(what) = probe(line) {
+                    push(
+                        i,
+                        "CEP-LINT-SECRET-SCAN",
+                        format!("secret-shaped content in comment ({what})"),
+                        sev("CEP-LINT-SECRET-SCAN", 0),
+                    );
+                }
+            } else if let Some(what) = probe(&src.strings[i]) {
+                push(
+                    i,
+                    "CEP-LINT-SECRET-SCAN",
+                    format!("secret-shaped content in string literal ({what})"),
+                    sev("CEP-LINT-SECRET-SCAN", 0),
+                );
+            }
+        }
+    }
+
+    // ---- CEP-LINT-UNSAFE-DOC (22.7/25.7 unsafe_doc_policy).
+    if enabled("CEP-LINT-UNSAFE-DOC") && !exempt("CEP-LINT-UNSAFE-DOC") {
+        let header_has_unsafe_field = src.lines.iter().take(24).any(|l| l.contains("CEP:UNSAFE"));
+        for (i, line) in src.lines.iter().enumerate() {
+            if src.is_comment[i] {
+                continue;
+            }
+            let word_unsafe = line
+                .split(|c: char| !c.is_alphanumeric() && c != '_')
+                .any(|w| w == "unsafe");
+            if !word_unsafe || header_has_unsafe_field {
+                continue;
+            }
+            // A CEP:UNSAFE field anywhere in the preceding 40 comment lines
+            // (function block or enclosing item block) documents the usage.
+            let documented = src.lines[..i]
+                .iter()
+                .rev()
+                .take(40)
+                .any(|l| l.contains("CEP:UNSAFE"));
+            if !documented {
+                push(
+                    i,
+                    "CEP-LINT-UNSAFE-DOC",
+                    "unsafe usage without a CEP:UNSAFE field in the enclosing block (22.7/25.7)"
+                        .into(),
+                    sev("CEP-LINT-UNSAFE-DOC", 1),
+                );
+            }
+        }
+    }
+
     out.sort();
     out.dedup();
+    out
+}
+
+/// Cross-file Rosetta checks (68.6.1): the registry and the function
+/// documentation tree must agree in both directions, and every documented
+/// function must carry the tier and inquisition sections.
+// CEP:WHAT Checks registry ↔ docs consistency and per-file doc sections.
+// CEP:WHY Rules CEP-LINT-DOC-FILE, CEP-LINT-DOC-TIERS, and
+//        CEP-LINT-DOC-INQUISITION are cross-file; the per-file scanner
+//        cannot see the registry or the docs tree.
+// CEP:STATUS complete
+// CEP:FAILURE Findings are reported; a missing registry is a bootstrap error
+//        at the caller when the rules are configured.
+// CEP:ASSUMES registry.json is an object mapping ID -> {path, function}.
+// CEP:ID: CS-a12
+// CEP:COST O(|registry| + |docs|).
+// CEP:EVIDENCE cargo test -p cep_lint
+pub fn rosetta_findings(
+    cfg: &Config,
+    registry_text: &str,
+    docs: &[(String, String)],
+) -> Vec<Finding> {
+    let mut out = Vec::new();
+    if !cfg.rules.contains_key("CEP-LINT-DOC-FILE") {
+        return out;
+    }
+    let sev = |name: &str| cfg.rules.get(name).map_or(1u8, |r| r.severity);
+    let find = |file: &str, rule: &str, msg: String, s: u8| Finding {
+        file: file.to_string(),
+        line: 1,
+        rule: rule.to_string(),
+        message: msg,
+        severity: s,
+    };
+    let reg: std::collections::BTreeMap<String, serde_json::Value> =
+        serde_json::from_str(registry_text).unwrap_or_default();
+    let doc_map: std::collections::BTreeMap<&String, &String> =
+        docs.iter().map(|(p, t)| (p, t)).collect();
+    let md_prefix = cfg
+        .rules
+        .get("CEP-LINT-DOC-FILE")
+        .and_then(|r| r.params.get("docs_prefix"))
+        .and_then(Value::as_str)
+        .unwrap_or("docs/functions/");
+    for id in reg.keys() {
+        let domain = id.split('-').next().unwrap_or("");
+        let md_path = format!("{md_prefix}{domain}/{id}.md");
+        match doc_map.get(&md_path) {
+            None => out.push(find(
+                "docs/registry.json",
+                "CEP-LINT-DOC-FILE",
+                format!("registered function {id} has no documentation file {md_path}"),
+                sev("CEP-LINT-DOC-FILE"),
+            )),
+            Some(text) => {
+                if cfg.rules.contains_key("CEP-LINT-DOC-TIERS")
+                    && !(text.contains("## Tier 1: Beginner")
+                        && text.contains("## Tier 2: Silicon Reality"))
+                {
+                    out.push(find(
+                        &md_path,
+                        "CEP-LINT-DOC-TIERS",
+                        "documentation lacks the Tier 1 / Tier 2 section headers (68.3)".into(),
+                        sev("CEP-LINT-DOC-TIERS"),
+                    ));
+                }
+                if cfg.rules.contains_key("CEP-LINT-DOC-INQUISITION")
+                    && !text.contains("## Silent Failure Checklist")
+                {
+                    out.push(find(
+                        &md_path,
+                        "CEP-LINT-DOC-INQUISITION",
+                        "documentation lacks the Silent Failure Checklist (68.4)".into(),
+                        sev("CEP-LINT-DOC-INQUISITION"),
+                    ));
+                }
+            }
+        }
+    }
+    for (p, _) in docs {
+        if p.starts_with(md_prefix) && p.ends_with(".md") {
+            let id = p.rsplit('/').next().unwrap_or("").trim_end_matches(".md");
+            if !reg.contains_key(id) {
+                out.push(find(
+                    p,
+                    "CEP-LINT-DOC-FILE",
+                    format!("documentation file {p} has no registry entry"),
+                    sev("CEP-LINT-DOC-FILE"),
+                ));
+            }
+        }
+    }
+    out.sort();
     out
 }
 
@@ -683,6 +841,7 @@ pub fn scan_file(cfg: &Config, file: &str, text: &str) -> Vec<Finding> {
 // CEP:WHY Required by the module contract stated in the file header.
 // CEP:STATUS complete
 // CEP:FAILURE Reports failure through the module's typed error path; no silent fallback.
+// CEP:ID: CS-a13
 // CEP:ASSUMES Inputs satisfy the module invariants (see file header).
 // CEP:COST Bounded by the file-header budget for this class; no hidden allocation beyond documented growth.
 // CEP:EVIDENCE cargo test -p cep_lint
@@ -738,248 +897,4 @@ fn check_status_and_class(
             }
         }
     }
-}
-
-/// Extracts the CEP:STATUS value from a comment block, tolerating both
-/// `CEP:STATUS: value` and `CEP:STATUS value` spellings.
-// CEP:WHAT Extracts the CEP:STATUS value from a comment block, tolerating both CEP:STATUS: value and CEP:STATUS value spellings.
-// CEP:WHY Required by the module contract stated in the file header.
-// CEP:STATUS complete
-// CEP:FAILURE Reports failure through the module's typed error path; no silent fallback.
-// CEP:ASSUMES Inputs satisfy the module invariants (see file header).
-// CEP:COST Bounded by the file-header budget for this class; no hidden allocation beyond documented growth.
-// CEP:EVIDENCE cargo test -p cep_lint
-fn status_of(block: &str) -> Option<String> {
-    for line in block.lines() {
-        let field_line = line.trim().trim_start_matches('/').trim_start();
-        if let Some(rest) = field_line.strip_prefix("CEP:STATUS") {
-            let v = rest.trim();
-            let v = v.trim_start_matches(':').trim();
-            let value = v.split_whitespace().next().unwrap_or("");
-            if !value.is_empty() {
-                return Some(value.to_string());
-            }
-        }
-    }
-    None
-}
-/// Extracts integer literals from a code line (word-bounded decimal).
-// CEP:WHAT Extracts integer literals from a code line (word-bounded decimal).
-// CEP:WHY Required by the module contract stated in the file header.
-// CEP:STATUS complete
-// CEP:FAILURE Reports failure through the module's typed error path; no silent fallback.
-// CEP:ASSUMES Inputs satisfy the module invariants (see file header).
-// CEP:COST Bounded by the file-header budget for this class; no hidden allocation beyond documented growth.
-// CEP:EVIDENCE cargo test -p cep_lint
-fn numeric_literals(line: &str) -> Vec<u64> {
-    let bytes = line.as_bytes();
-    let mut out = Vec::new();
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i].is_ascii_digit()
-            && (i == 0 || !(bytes[i - 1].is_ascii_alphanumeric() || bytes[i - 1] == b'_'))
-        {
-            let start = i;
-            while i < bytes.len() && (bytes[i].is_ascii_digit() || bytes[i] == b'_') {
-                i += 1;
-            }
-            // Skip hex/float/identifier tails: only clean decimals count.
-            if i < bytes.len()
-                && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_' || bytes[i] == b'.')
-            {
-                continue;
-            }
-            let text: String = line[start..i].chars().filter(|c| *c != '_').collect();
-            if let Ok(v) = text.parse::<u64>() {
-                out.push(v);
-            }
-        } else {
-            i += 1;
-        }
-    }
-    out
-}
-
-/// The CEP:CLASS declared in the file header, if any.
-fn class_of(src: &Source) -> Option<String> {
-    for line in src.lines.iter().take(24) {
-        let field_line = line.trim().trim_start_matches('/').trim_start();
-        if let Some(rest) = field_line.strip_prefix("CEP:CLASS") {
-            let v = rest.trim();
-            let v = v.trim_start_matches(':').trim();
-            return Some(v.split_whitespace().next().unwrap_or("").to_string());
-        }
-    }
-    None
-}
-
-/// Returns the line range of a function body starting at the `fn` line.
-/// Comment lines are skipped; a `}` without a preceding `{` ends the scan
-/// (the match was a reference, not a definition).
-// CEP:WHAT Returns the line range of a function body starting at the fn line.
-// CEP:WHY Required by the module contract stated in the file header.
-// CEP:STATUS complete
-// CEP:FAILURE Reports failure through the module's typed error path; no silent fallback.
-// CEP:ASSUMES Inputs satisfy the module invariants (see file header).
-// CEP:COST Bounded by the file-header budget for this class; no hidden allocation beyond documented growth.
-// CEP:EVIDENCE cargo test -p cep_lint
-fn fn_body_range(lines: &[String], start: usize) -> Option<(usize, usize)> {
-    let mut depth = 0_usize;
-    let mut opened = false;
-    for (offset, line) in lines[start..].iter().enumerate() {
-        if line.trim_start().starts_with("//") {
-            continue;
-        }
-        for c in line.chars() {
-            match c {
-                '{' => {
-                    depth += 1;
-                    opened = true;
-                }
-                '}' => {
-                    if depth == 0 {
-                        return None;
-                    }
-                    depth -= 1;
-                    if opened && depth == 0 {
-                        return Some((start, start + offset));
-                    }
-                }
-                ';' if !opened && offset > 0 => return None, // declaration only
-                _ => { /* ordinary character */ }
-            }
-        }
-    }
-    None
-}
-
-/// The contiguous `//` comment block immediately above line `i` (skipping
-/// attribute lines), as a single string.
-// CEP:WHAT The contiguous // comment block immediately above line i (skipping attribute lines), as a single string.
-// CEP:WHY Required by the module contract stated in the file header.
-// CEP:STATUS complete
-// CEP:FAILURE Reports failure through the module's typed error path; no silent fallback.
-// CEP:ASSUMES Inputs satisfy the module invariants (see file header).
-// CEP:COST Bounded by the file-header budget for this class; no hidden allocation beyond documented growth.
-// CEP:EVIDENCE cargo test -p cep_lint
-fn preceding_block(lines: &[String], i: usize) -> String {
-    let mut block = Vec::new();
-    let mut j = i;
-    while j > 0 {
-        j -= 1;
-        let t = lines[j].trim_start();
-        if t.starts_with("#[") || t.starts_with("#![") {
-            continue;
-        }
-        if t.starts_with("//") {
-            block.push(lines[j].as_str());
-        } else {
-            break;
-        }
-    }
-    block.reverse();
-    block.join("\n")
-}
-
-/// Start line of the preceding comment block (for status checks).
-// CEP:WHAT Start line of the preceding comment block (for status checks).
-// CEP:WHY Required by the module contract stated in the file header.
-// CEP:STATUS complete
-// CEP:FAILURE Reports failure through the module's typed error path; no silent fallback.
-// CEP:ASSUMES Inputs satisfy the module invariants (see file header).
-// CEP:COST Bounded by the file-header budget for this class; no hidden allocation beyond documented growth.
-// CEP:EVIDENCE cargo test -p cep_lint
-fn block_start_of(lines: &[String], i: usize) -> usize {
-    let mut j = i;
-    while j > 0 {
-        j -= 1;
-        let t = lines[j].trim_start();
-        if t.starts_with("//") || t.starts_with("#[") {
-            continue;
-        }
-        return j + 1;
-    }
-    0
-}
-
-/// Collects findings over a whole file set, sorted deterministically.
-pub fn scan_all(cfg: &Config, files: &[(String, String)]) -> Vec<Finding> {
-    let mut all = Vec::new();
-    for (path, text) in files {
-        if !cfg.file_globs.iter().any(|g| glob_match(g, path)) {
-            continue;
-        }
-        all.extend(scan_file(cfg, path, text));
-    }
-    all.sort();
-    all
-}
-
-/// Minimal glob: `**` matches any path components, `*` within one, `?` one char.
-#[must_use]
-pub fn glob_match(pattern: &str, path: &str) -> bool {
-    let p: Vec<&str> = pattern.split('/').collect();
-    let t: Vec<&str> = path.split('/').collect();
-    glob_segments(&p, &t)
-}
-
-fn glob_segments(p: &[&str], t: &[&str]) -> bool {
-    match (p.first(), t.first()) {
-        (None, None) => true,
-        (None, Some(_)) => false,
-        (Some(&"**"), _) => {
-            if glob_segments(&p[1..], t) {
-                return true;
-            }
-            !t.is_empty() && glob_segments(p, &t[1..])
-        }
-        (Some(seg), Some(first)) => seg_match(seg, first) && glob_segments(&p[1..], &t[1..]),
-        (Some(_), None) => false,
-    }
-}
-
-/// Single-segment wildcard match: `*` matches any character sequence within
-/// the segment (e.g. `*.rs`, `vortex-*`).
-// CEP:WHAT Single-segment wildcard match: * matches any character sequence within the segment (e.g.
-// CEP:WHY Required by the module contract stated in the file header.
-// CEP:STATUS complete
-// CEP:FAILURE Reports failure through the module's typed error path; no silent fallback.
-// CEP:ASSUMES Inputs satisfy the module invariants (see file header).
-// CEP:COST Bounded by the file-header budget for this class; no hidden allocation beyond documented growth.
-// CEP:EVIDENCE cargo test -p cep_lint
-fn seg_match(seg: &str, s: &str) -> bool {
-    if seg == "*" {
-        return true;
-    }
-    if !seg.contains('*') {
-        return seg == s;
-    }
-    let parts: Vec<&str> = seg.split('*').collect();
-    let (first, last) = (parts[0], parts[parts.len() - 1]);
-    if s.len() < first.len() + last.len() {
-        return false;
-    }
-    if !s.starts_with(first) || !s.ends_with(last) {
-        return false;
-    }
-    // Middle parts must appear in order within the remainder.
-    let mut rest = &s[first.len()..s.len() - last.len()];
-    for mid in &parts[1..parts.len() - 1] {
-        match rest.find(mid) {
-            Some(p) => rest = &rest[p + mid.len()..],
-            None => return false,
-        }
-    }
-    true
-}
-
-/// The set of rule names documented in the standard chapter (for DOC-SYNC).
-#[must_use]
-pub fn documented_rules(standard_text: &str) -> BTreeSet<String> {
-    standard_text
-        .lines()
-        .filter_map(|l| l.strip_prefix("### Rule "))
-        .map(str::trim)
-        .map(String::from)
-        .collect()
 }

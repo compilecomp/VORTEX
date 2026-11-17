@@ -60,6 +60,7 @@ fn is_int_ty(t: &Type) -> bool {
 // CEP:ASSUMES Const producers precede their consumers.
 // CEP:COST O(|IR|).
 // CEP:EVIDENCE cargo test -p vortex-t2
+// CEP:ID: JIT-a51
 pub fn fold_constants(graph: &mut vortex_ir::Graph) -> usize {
     let mut folded = 0;
     for idx in 0..graph.len() {
@@ -131,6 +132,7 @@ pub fn fold_constants(graph: &mut vortex_ir::Graph) -> usize {
 // CEP:FAILURE Cannot fail.
 // CEP:ASSUMES Input types come from a verified lattice.
 // CEP:COST O(|IR|).
+// CEP:ID: JIT-a52
 // CEP:EVIDENCE cargo test -p vortex-t2
 pub fn specialize(graph: &mut vortex_ir::Graph) -> usize {
     let mut specialized = 0;
@@ -166,6 +168,7 @@ pub fn specialize(graph: &mut vortex_ir::Graph) -> usize {
 // CEP:STATUS complete
 // CEP:FAILURE Cannot fail.
 // CEP:ASSUMES Constants are literal opcodes, not folded placeholders.
+// CEP:ID: JIT-a53
 // CEP:COST O(|IR|).
 // CEP:EVIDENCE cargo test -p vortex-t2
 pub fn peephole(graph: &mut vortex_ir::Graph) -> usize {
@@ -280,6 +283,7 @@ fn is_const_one(graph: &vortex_ir::Graph, id: NodeId) -> bool {
 // CEP:WHY 6.4: single-pass DCE is a Class-0 pass; no fixed point.
 // CEP:STATUS complete
 // CEP:FAILURE Cannot fail.
+// CEP:ID: JIT-a54
 // CEP:ASSUMES Consumers are computed from data edges only.
 // CEP:COST O(|IR|).
 // CEP:EVIDENCE cargo test -p vortex-t2

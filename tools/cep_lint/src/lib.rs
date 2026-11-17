@@ -17,6 +17,7 @@ pub mod config;
 pub mod receipts;
 /// Rule engine and checkers.
 pub mod rules;
+pub mod syntax;
 
 pub use config::Config;
 pub use rules::{glob_match, scan_file, Finding};

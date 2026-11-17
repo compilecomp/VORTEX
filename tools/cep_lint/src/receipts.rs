@@ -103,6 +103,7 @@ fn canonical_bytes(value: &Value) -> Vec<u8> {
 //        signature field holds 128 hex characters (64 bytes).
 // CEP:COST O(1) verification.
 // CEP:EVIDENCE tools/cep_lint/tests/receipts.rs signature cases.
+// CEP:ID: CS-a07
 pub fn verify_signature(value: &Value, root: &std::path::Path) -> Result<(), ReceiptError> {
     let key_text = std::fs::read_to_string(root.join(CI_PUBLIC_KEY_PATH))
         .map_err(|_| ReceiptError::Missing)?;
@@ -228,6 +229,7 @@ fn file_class_is_hot(content: &str) -> bool {
 // CEP:ASSUMES Function extents come from brace matching over the current file.
 // CEP:COST O(file bytes) per call.
 // CEP:EVIDENCE tools/cep_lint/tests/receipts.rs
+// CEP:ID: CS-a08
 /// Finds the enclosing function name for a 1-based line range.
 fn enclosing_function(content: &str, start: usize, end: usize) -> String {
     let lines: Vec<&str> = content.lines().collect();
@@ -301,6 +303,7 @@ fn function_extent_end(lines: &[&str], start: usize) -> usize {
 //        missing receipt is one finding, not a crash.
 // CEP:ASSUMES `diff_text` is the unified diff of the commit under review;
 //        `file_contents` holds current working-tree contents.
+// CEP:ID: CS-a09
 // CEP:COST O(diff bytes + receipt bytes).
 // CEP:EVIDENCE tools/cep_lint/tests/receipts.rs hunt cases.
 pub fn verify_hunt_receipt(

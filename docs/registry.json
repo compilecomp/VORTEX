@@ -1,0 +1,577 @@
+{
+  "CS-a01": {
+    "domain": "CS",
+    "function": "build_demo_program",
+    "path": "crates/vortex-cli/src/main.rs"
+  },
+  "CS-a02": {
+    "domain": "CS",
+    "function": "demo",
+    "path": "crates/vortex-cli/src/main.rs"
+  },
+  "CS-a03": {
+    "domain": "CS",
+    "function": "cmd_optimize",
+    "path": "crates/vortex-cli/src/main.rs"
+  },
+  "CS-a04": {
+    "domain": "CS",
+    "function": "run",
+    "path": "tools/cep_lint/src/main.rs"
+  },
+  "CS-a05": {
+    "domain": "CS",
+    "function": "run_self_test",
+    "path": "tools/cep_lint/src/main.rs"
+  },
+  "CS-a06": {
+    "domain": "CS",
+    "function": "run_verify_hunt",
+    "path": "tools/cep_lint/src/main.rs"
+  },
+  "CS-a07": {
+    "domain": "CS",
+    "function": "verify_signature",
+    "path": "tools/cep_lint/src/receipts.rs"
+  },
+  "CS-a08": {
+    "domain": "CS",
+    "function": "enclosing_function",
+    "path": "tools/cep_lint/src/receipts.rs"
+  },
+  "CS-a09": {
+    "domain": "CS",
+    "function": "verify_hunt_receipt",
+    "path": "tools/cep_lint/src/receipts.rs"
+  },
+  "CS-a10": {
+    "domain": "CS",
+    "function": "classify",
+    "path": "tools/cep_lint/src/rules.rs"
+  },
+  "CS-a11": {
+    "domain": "CS",
+    "function": "scan_file",
+    "path": "tools/cep_lint/src/rules.rs"
+  },
+  "CS-a12": {
+    "domain": "CS",
+    "function": "rosetta_findings",
+    "path": "tools/cep_lint/src/rules.rs"
+  },
+  "CS-a13": {
+    "domain": "CS",
+    "function": "check_status_and_class",
+    "path": "tools/cep_lint/src/rules.rs"
+  },
+  "CS-a14": {
+    "domain": "CS",
+    "function": "func_block_fires_on_undocumented_body",
+    "path": "tools/cep_lint/tests/engine.rs"
+  },
+  "CS-a15": {
+    "domain": "CS",
+    "function": "rosetta_registry_and_docs_must_agree",
+    "path": "tools/cep_lint/tests/engine.rs"
+  },
+  "CS-a16": {
+    "domain": "CS",
+    "function": "tampered_receipt_fails_signature",
+    "path": "tools/cep_lint/tests/receipts.rs"
+  },
+  "IR-a01": {
+    "domain": "IR",
+    "function": "gvn",
+    "path": "crates/vortex-ir/src/gvn.rs"
+  },
+  "IR-a02": {
+    "domain": "IR",
+    "function": "dfs_state_cycle",
+    "path": "crates/vortex-ir/src/verify.rs"
+  },
+  "IR-a03": {
+    "domain": "IR",
+    "function": "check_reachability_and_terminators",
+    "path": "crates/vortex-ir/src/verify.rs"
+  },
+  "IR-a04": {
+    "domain": "IR",
+    "function": "dominates",
+    "path": "crates/vortex-ir/src/verify.rs"
+  },
+  "IR-a05": {
+    "domain": "IR",
+    "function": "diamond",
+    "path": "crates/vortex-ir/tests/ir.rs"
+  },
+  "IR-a06": {
+    "domain": "IR",
+    "function": "state_cycle_through_state_phi_is_valid",
+    "path": "crates/vortex-ir/tests/ir.rs"
+  },
+  "IR-a07": {
+    "domain": "IR",
+    "function": "gvn_deduplicates",
+    "path": "crates/vortex-ir/tests/ir.rs"
+  },
+  "IR-a08": {
+    "domain": "IR",
+    "function": "assemble",
+    "path": "crates/vortex-ugb/src/asm.rs"
+  },
+  "IR-a09": {
+    "domain": "IR",
+    "function": "decode",
+    "path": "crates/vortex-ugb/src/instr.rs"
+  },
+  "IR-a10": {
+    "domain": "IR",
+    "function": "verify_method",
+    "path": "crates/vortex-ugb/src/verify.rs"
+  },
+  "IR-a11": {
+    "domain": "IR",
+    "function": "verifier_rejects_mid_instruction_branch",
+    "path": "crates/vortex-ugb/tests/ugb.rs"
+  },
+  "IR-a12": {
+    "domain": "IR",
+    "function": "verifier_rejects_bounds_violations",
+    "path": "crates/vortex-ugb/tests/ugb.rs"
+  },
+  "JIT-a01": {
+    "domain": "JIT",
+    "function": "emit",
+    "path": "crates/vortex-opt/src/dwarf.rs"
+  },
+  "JIT-a02": {
+    "domain": "JIT",
+    "function": "emit_abbrev",
+    "path": "crates/vortex-opt/src/dwarf.rs"
+  },
+  "JIT-a03": {
+    "domain": "JIT",
+    "function": "emit_elf",
+    "path": "crates/vortex-opt/src/emit.rs"
+  },
+  "JIT-a04": {
+    "domain": "JIT",
+    "function": "assign_addresses",
+    "path": "crates/vortex-opt/src/link.rs"
+  },
+  "JIT-a05": {
+    "domain": "JIT",
+    "function": "build_got_plt",
+    "path": "crates/vortex-opt/src/link.rs"
+  },
+  "JIT-a06": {
+    "domain": "JIT",
+    "function": "apply_relocations",
+    "path": "crates/vortex-opt/src/link.rs"
+  },
+  "JIT-a07": {
+    "domain": "JIT",
+    "function": "apply_relocations_with_plt",
+    "path": "crates/vortex-opt/src/link.rs"
+  },
+  "JIT-a08": {
+    "domain": "JIT",
+    "function": "allocate_registers",
+    "path": "crates/vortex-opt/src/mach.rs"
+  },
+  "JIT-a09": {
+    "domain": "JIT",
+    "function": "fold_constants",
+    "path": "crates/vortex-opt/src/passes.rs"
+  },
+  "JIT-a10": {
+    "domain": "JIT",
+    "function": "algebraic_simplify",
+    "path": "crates/vortex-opt/src/passes.rs"
+  },
+  "JIT-a11": {
+    "domain": "JIT",
+    "function": "bitwise_identity",
+    "path": "crates/vortex-opt/src/passes.rs"
+  },
+  "JIT-a12": {
+    "domain": "JIT",
+    "function": "dead_code_elim",
+    "path": "crates/vortex-opt/src/passes.rs"
+  },
+  "JIT-a13": {
+    "domain": "JIT",
+    "function": "validate",
+    "path": "crates/vortex-opt/src/sched.rs"
+  },
+  "JIT-a14": {
+    "domain": "JIT",
+    "function": "list_schedule",
+    "path": "crates/vortex-opt/src/sched.rs"
+  },
+  "JIT-a15": {
+    "domain": "JIT",
+    "function": "modulo_attempt",
+    "path": "crates/vortex-opt/src/sched.rs"
+  },
+  "JIT-a16": {
+    "domain": "JIT",
+    "function": "verify",
+    "path": "crates/vortex-opt/src/vector.rs"
+  },
+  "JIT-a17": {
+    "domain": "JIT",
+    "function": "stub_layout_and_bytes",
+    "path": "crates/vortex-opt/tests/gotplt.rs"
+  },
+  "JIT-a18": {
+    "domain": "JIT",
+    "function": "import_calls_bind_to_stub",
+    "path": "crates/vortex-opt/tests/gotplt.rs"
+  },
+  "JIT-a19": {
+    "domain": "JIT",
+    "function": "defined_callee_binds_directly",
+    "path": "crates/vortex-opt/tests/gotplt.rs"
+  },
+  "JIT-a20": {
+    "domain": "JIT",
+    "function": "elf_maps_plt32_to_type4",
+    "path": "crates/vortex-opt/tests/gotplt.rs"
+  },
+  "JIT-a21": {
+    "domain": "JIT",
+    "function": "foldable_graph",
+    "path": "crates/vortex-opt/tests/opt.rs"
+  },
+  "JIT-a22": {
+    "domain": "JIT",
+    "function": "vector_verifier",
+    "path": "crates/vortex-opt/tests/opt.rs"
+  },
+  "JIT-a23": {
+    "domain": "JIT",
+    "function": "register_allocation",
+    "path": "crates/vortex-opt/tests/opt.rs"
+  },
+  "JIT-a24": {
+    "domain": "JIT",
+    "function": "list_schedule_validates",
+    "path": "crates/vortex-opt/tests/opt.rs"
+  },
+  "JIT-a25": {
+    "domain": "JIT",
+    "function": "line_program_round_trips",
+    "path": "crates/vortex-opt/tests/opt.rs"
+  },
+  "JIT-a26": {
+    "domain": "JIT",
+    "function": "linker_resolves_and_patches",
+    "path": "crates/vortex-opt/tests/opt.rs"
+  },
+  "JIT-a27": {
+    "domain": "JIT",
+    "function": "pc32_resolves_relative",
+    "path": "crates/vortex-opt/tests/opt.rs"
+  },
+  "JIT-a28": {
+    "domain": "JIT",
+    "function": "run",
+    "path": "crates/vortex-t0/src/interp.rs"
+  },
+  "JIT-a29": {
+    "domain": "JIT",
+    "function": "step",
+    "path": "crates/vortex-t0/src/interp.rs"
+  },
+  "JIT-a30": {
+    "domain": "JIT",
+    "function": "maybe_rewrite",
+    "path": "crates/vortex-t0/src/rewrite.rs"
+  },
+  "JIT-a31": {
+    "domain": "JIT",
+    "function": "reuse_rule",
+    "path": "crates/vortex-t0/src/rewrite.rs"
+  },
+  "JIT-a32": {
+    "domain": "JIT",
+    "function": "form_supers",
+    "path": "crates/vortex-t0/src/rewrite.rs"
+  },
+  "JIT-a33": {
+    "domain": "JIT",
+    "function": "try_load_add_store",
+    "path": "crates/vortex-t0/src/rewrite.rs"
+  },
+  "JIT-a34": {
+    "domain": "JIT",
+    "function": "try_cmp_branch",
+    "path": "crates/vortex-t0/src/rewrite.rs"
+  },
+  "JIT-a35": {
+    "domain": "JIT",
+    "function": "calls_pass_frames",
+    "path": "crates/vortex-t0/tests/t0.rs"
+  },
+  "JIT-a36": {
+    "domain": "JIT",
+    "function": "recursion_hits_stack_bound",
+    "path": "crates/vortex-t0/tests/t0.rs"
+  },
+  "JIT-a37": {
+    "domain": "JIT",
+    "function": "rewriting_specializes_hot_add",
+    "path": "crates/vortex-t0/tests/t0.rs"
+  },
+  "JIT-a38": {
+    "domain": "JIT",
+    "function": "super_load_add_store_forms_and_runs",
+    "path": "crates/vortex-t0/tests/t0.rs"
+  },
+  "JIT-a39": {
+    "domain": "JIT",
+    "function": "inline_cache_states",
+    "path": "crates/vortex-t0/tests/t0.rs"
+  },
+  "JIT-a40": {
+    "domain": "JIT",
+    "function": "run",
+    "path": "crates/vortex-t1/src/exec.rs"
+  },
+  "JIT-a41": {
+    "domain": "JIT",
+    "function": "simple_op",
+    "path": "crates/vortex-t1/src/exec.rs"
+  },
+  "JIT-a42": {
+    "domain": "JIT",
+    "function": "plan_method",
+    "path": "crates/vortex-t1/src/plan.rs"
+  },
+  "JIT-a43": {
+    "domain": "JIT",
+    "function": "emit_instr",
+    "path": "crates/vortex-t1/src/stencil.rs"
+  },
+  "JIT-a44": {
+    "domain": "JIT",
+    "function": "emit_branch",
+    "path": "crates/vortex-t1/src/stencil.rs"
+  },
+  "JIT-a45": {
+    "domain": "JIT",
+    "function": "emit_machine_code",
+    "path": "crates/vortex-t1/src/stencil.rs"
+  },
+  "JIT-a46": {
+    "domain": "JIT",
+    "function": "backward_branch_polls_and_resolves",
+    "path": "crates/vortex-t1/tests/stencil.rs"
+  },
+  "JIT-a47": {
+    "domain": "JIT",
+    "function": "cmp_selector_drives_condition",
+    "path": "crates/vortex-t1/tests/stencil.rs"
+  },
+  "JIT-a48": {
+    "domain": "JIT",
+    "function": "t1_matches_t0",
+    "path": "crates/vortex-t1/tests/t1.rs"
+  },
+  "JIT-a49": {
+    "domain": "JIT",
+    "function": "loop_executes",
+    "path": "crates/vortex-t1/tests/t1.rs"
+  },
+  "JIT-a50": {
+    "domain": "JIT",
+    "function": "compile_t2",
+    "path": "crates/vortex-t2/src/lib.rs"
+  },
+  "JIT-a51": {
+    "domain": "JIT",
+    "function": "fold_constants",
+    "path": "crates/vortex-t2/src/passes.rs"
+  },
+  "JIT-a52": {
+    "domain": "JIT",
+    "function": "specialize",
+    "path": "crates/vortex-t2/src/passes.rs"
+  },
+  "JIT-a53": {
+    "domain": "JIT",
+    "function": "peephole",
+    "path": "crates/vortex-t2/src/passes.rs"
+  },
+  "JIT-a54": {
+    "domain": "JIT",
+    "function": "dead_code",
+    "path": "crates/vortex-t2/src/passes.rs"
+  },
+  "JIT-a55": {
+    "domain": "JIT",
+    "function": "fold_arithmetic_once",
+    "path": "crates/vortex-t2/tests/t2.rs"
+  },
+  "JIT-a56": {
+    "domain": "JIT",
+    "function": "peephole_rewires_identity_chains",
+    "path": "crates/vortex-t2/tests/t2.rs"
+  },
+  "JIT-a57": {
+    "domain": "JIT",
+    "function": "specialize_removes_redundant_cast",
+    "path": "crates/vortex-t2/tests/t2.rs"
+  },
+  "JIT-a58": {
+    "domain": "JIT",
+    "function": "compile_t4",
+    "path": "crates/vortex-t4/src/compile.rs"
+  },
+  "JIT-a59": {
+    "domain": "JIT",
+    "function": "park",
+    "path": "crates/vortex-tier/src/concurrent.rs"
+  },
+  "JIT-a60": {
+    "domain": "JIT",
+    "function": "note_execution",
+    "path": "crates/vortex-tier/src/controller.rs"
+  },
+  "JIT-a61": {
+    "domain": "JIT",
+    "function": "worker_loop",
+    "path": "crates/vortex-tier/src/controller.rs"
+  },
+  "JIT-a62": {
+    "domain": "JIT",
+    "function": "safepoint_parks_and_releases",
+    "path": "crates/vortex-tier/tests/tier.rs"
+  },
+  "MEM-a01": {
+    "domain": "MEM",
+    "function": "free_entry",
+    "path": "crates/vortex-runtime/src/caps.rs"
+  },
+  "MEM-a02": {
+    "domain": "MEM",
+    "function": "attenuate",
+    "path": "crates/vortex-runtime/src/caps.rs"
+  },
+  "MEM-a03": {
+    "domain": "MEM",
+    "function": "revoke",
+    "path": "crates/vortex-runtime/src/caps.rs"
+  },
+  "MEM-a04": {
+    "domain": "MEM",
+    "function": "audit_invariants",
+    "path": "crates/vortex-runtime/src/caps.rs"
+  },
+  "MEM-a05": {
+    "domain": "MEM",
+    "function": "worker_loop",
+    "path": "crates/vortex-runtime/src/concurrent_gc.rs"
+  },
+  "MEM-a06": {
+    "domain": "MEM",
+    "function": "young_collect",
+    "path": "crates/vortex-runtime/src/gc.rs"
+  },
+  "MEM-a07": {
+    "domain": "MEM",
+    "function": "evacuate",
+    "path": "crates/vortex-runtime/src/gc.rs"
+  },
+  "MEM-a08": {
+    "domain": "MEM",
+    "function": "take_old_space",
+    "path": "crates/vortex-runtime/src/gc.rs"
+  },
+  "MEM-a09": {
+    "domain": "MEM",
+    "function": "old_collect",
+    "path": "crates/vortex-runtime/src/gc.rs"
+  },
+  "MEM-a10": {
+    "domain": "MEM",
+    "function": "compact_old",
+    "path": "crates/vortex-runtime/src/gc.rs"
+  },
+  "MEM-a11": {
+    "domain": "MEM",
+    "function": "take_young_region",
+    "path": "crates/vortex-runtime/src/heap.rs"
+  },
+  "MEM-a12": {
+    "domain": "MEM",
+    "function": "allocate_humongous",
+    "path": "crates/vortex-runtime/src/heap.rs"
+  },
+  "MEM-a13": {
+    "domain": "MEM",
+    "function": "arbitration_gc_beats_deopt",
+    "path": "crates/vortex-runtime/tests/concurrent_gc.rs"
+  },
+  "MEM-a14": {
+    "domain": "MEM",
+    "function": "concurrent_mark_survives_mutator_writes",
+    "path": "crates/vortex-runtime/tests/concurrent_gc.rs"
+  },
+  "MEM-a15": {
+    "domain": "MEM",
+    "function": "card_table_tracks_old_to_young",
+    "path": "crates/vortex-runtime/tests/concurrent_gc.rs"
+  },
+  "MEM-a16": {
+    "domain": "MEM",
+    "function": "evacuate_young_finds_old_roots_via_cards",
+    "path": "crates/vortex-runtime/tests/concurrent_gc.rs"
+  },
+  "MEM-a17": {
+    "domain": "MEM",
+    "function": "mutators_park_during_gc_and_resume",
+    "path": "crates/vortex-runtime/tests/concurrent_gc.rs"
+  },
+  "MEM-a18": {
+    "domain": "MEM",
+    "function": "attenuation_and_revocation",
+    "path": "crates/vortex-runtime/tests/runtime.rs"
+  },
+  "MEM-a19": {
+    "domain": "MEM",
+    "function": "environments_pass_and_bound",
+    "path": "crates/vortex-runtime/tests/runtime.rs"
+  },
+  "MEM-a20": {
+    "domain": "MEM",
+    "function": "heap_allocation_and_cards",
+    "path": "crates/vortex-runtime/tests/runtime.rs"
+  },
+  "MEM-a21": {
+    "domain": "MEM",
+    "function": "young_collection_evacuates",
+    "path": "crates/vortex-runtime/tests/runtime.rs"
+  },
+  "MEM-a22": {
+    "domain": "MEM",
+    "function": "old_collection_compacts",
+    "path": "crates/vortex-runtime/tests/runtime.rs"
+  },
+  "MEM-a23": {
+    "domain": "MEM",
+    "function": "write_barrier_enqueues_satb_sources",
+    "path": "crates/vortex-runtime/tests/runtime.rs"
+  },
+  "MEM-a24": {
+    "domain": "MEM",
+    "function": "load_barrier_self_heals",
+    "path": "crates/vortex-runtime/tests/runtime.rs"
+  },
+  "MEM-a25": {
+    "domain": "MEM",
+    "function": "profile_tables",
+    "path": "crates/vortex-runtime/tests/runtime.rs"
+  }
+}

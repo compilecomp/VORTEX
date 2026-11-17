@@ -12203,6 +12203,74 @@ Parameters: `doc_path`, `heading_pattern`, `version_pattern`.
 
 ---
 
+### Rule CEP-LINT-ATOMIC-FILE
+
+**Severity 1. Sections: 62.1, 62.4, 62.5. Check: `file_topology_policy`.**
+
+First-party files must satisfy the atomic-file mandate: the line count does not exceed the limit for the file's declared `CEP:CLASS` (62.5.1: 400 lines for CEP-0/HPC-0/RCS-0, 800 for CEP-1/HPC-1/RCS-1/CC/FFI, 1200 for CEP-2/HPC-2/RCS-2), and the file name is not a junk drawer (62.4: names containing `util`, `helper`, `misc`, or `common` are rejected).
+
+Parameters: `line_limits`, `default_limit`, `junk_names`.
+
+Limits: the class limit uses the file header's `CEP:CLASS`; a missing class falls back to `default_limit`. Generated-code exemption (62.5.1) is not detected mechanically and relies on directory policy.
+
+### Rule CEP-LINT-DOC-ID
+
+**Severity 1. Sections: 68.2, 68.6.1. Check: `function_policy` (id mode).**
+
+Every function whose body contains more than `max_id_statements` statements (default 10, the mechanical form of 68.6.1's ">10 LOC") must declare `CEP:ID: <DOMAIN>-<id>` in its comment block, with a domain from 68.2.1 and a lowercase alphanumeric identifier.
+
+Parameters: `max_id_statements`, `id_pattern`.
+
+Limits: same extractor limits as `CEP-LINT-FUNC-BLOCK`. Registry existence is checked by `CEP-LINT-DOC-FILE`.
+
+### Rule CEP-LINT-DOC-FILE
+
+**Severity 1. Sections: 68.3, 68.6.1. Check: `rosetta_policy`.**
+
+Every identifier registered in `docs/registry.json` must have a Markdown file at `docs/functions/<DOMAIN>/<ID>.md`, and every such file must correspond to a registry entry. Registry and documentation tree must agree in both directions.
+
+Parameters: `registry_path`, `docs_prefix`.
+
+Limits: cross-file check performed after the per-file scan; a missing registry is a bootstrap failure when the rule is configured.
+
+### Rule CEP-LINT-DOC-TIERS
+
+**Severity 1. Sections: 68.3.1, 68.3.2, 68.6.1. Check: `rosetta_policy`.**
+
+Every function documentation file must contain the two mandated tier headings: `## Tier 1: Beginner` and `## Tier 2: Silicon Reality`. Tier 2 content that relies on vague phrases ("fast", "optimized") is a review-level violation of 68.3.2.
+
+Parameters: none.
+
+### Rule CEP-LINT-DOC-INQUISITION
+
+**Severity 1. Sections: 68.4, 68.6.1. Check: `rosetta_policy`.**
+
+Every function documentation file must contain the `## Silent Failure Checklist` section addressing fallbacks, truncation, wrapping, and error codes for that function (66.10).
+
+Parameters: none.
+
+### Rule CEP-LINT-SECRET-SCAN
+
+**Severity 0. Sections: 10.14, 22.13, 34.3. Check: `secret_probe_policy`.**
+
+Comments and string literals must not contain secret-shaped content: assignment-style occurrences of `password`, `passwd`, `secret_key`, `api_key`, `apikey`, or `aws_secret_access_key`, PEM private-key headers, or AWS access-key id prefixes (`AKIA`). Prose that merely mentions the words without an assignment context is not a violation.
+
+Parameters: `patterns`, `exempt_paths`, `suppression_pattern`.
+
+Limits: lexical probing only; a determined obfuscated secret requires review and the 34.3 security stage.
+
+### Rule CEP-LINT-UNSAFE-DOC
+
+**Severity 1. Sections: 22.7, 25.7. Check: `unsafe_doc_policy`.**
+
+Every code occurrence of `unsafe` (Rust analog of the C++ unsafe constructs) must be documented by a `CEP:UNSAFE` field in the enclosing comment block or the file header. Undocumented unsafe usage is a Severity 1 defect (25.7 requires the field on every unsafe block).
+
+Parameters: `exempt_paths`.
+
+Limits: word-bounded match on code lines after comment removal; string-literal occurrences of the word are not code usage unless the dialect treats them as such.
+
+---
+
 ## 50.4 Bootstrap error codes
 
 Failures that occur before message templates are loaded print `CEP-LINT-BOOT-<n>` with a detail string:

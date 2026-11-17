@@ -147,6 +147,7 @@ fn demotion_preserves_hotness() {
 // CEP:ASSUMES None.
 // CEP:COST O(ms).
 // CEP:EVIDENCE cargo test -p vortex-tier
+// CEP:ID: JIT-a62
 #[test]
 fn safepoint_parks_and_releases() {
     let gate = Arc::new(SafepointGate::new());

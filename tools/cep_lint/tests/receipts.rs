@@ -182,6 +182,7 @@ fn verified_receipts_pass_all_gates() {
 // CEP:ASSUMES The fixtures in this file; the test keypair is written to a temp root.
 // CEP:COST O(receipt bytes) per case.
 // CEP:EVIDENCE cargo test -p cep_lint
+// CEP:ID: CS-a16
 #[test]
 fn tampered_receipt_fails_signature() {
     let dir = std::env::temp_dir().join("cep-receipt-test-tamper");

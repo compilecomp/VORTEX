@@ -136,6 +136,7 @@ pub struct Layout {
 // CEP:ASSUMES Little-endian targets.
 // CEP:COST O(|sections| + |symbols|).
 // CEP:EVIDENCE cargo test -p vortex-opt
+// CEP:ID: JIT-a04
 pub fn assign_addresses(objects: &[Object]) -> Result<Layout, LinkError> {
     const TEXT_BASE: u64 = 0x400000;
     const PAGE: u64 = 4096;
@@ -204,6 +205,7 @@ pub struct GotPlt {
 // CEP:FAILURE Cannot fail.
 // CEP:ASSUMES got_base is 8-aligned and distinct from plt_base.
 // CEP:COST O(|imports|).
+// CEP:ID: JIT-a05
 // CEP:EVIDENCE cargo test -p vortex-opt gotplt
 pub fn build_got_plt(imports: &[String], plt_base: u64, got_base: u64) -> GotPlt {
     let mut got = Vec::new();
@@ -239,6 +241,7 @@ pub fn build_got_plt(imports: &[String], plt_base: u64, got_base: u64) -> GotPlt
 // CEP:STATUS complete
 // CEP:FAILURE LinkError for unresolved symbols or overflow.
 // CEP:ASSUMES .text is the only relocated section in this model.
+// CEP:ID: JIT-a06
 // CEP:COST O(|relocs| + |text|).
 // CEP:EVIDENCE cargo test -p vortex-opt
 pub fn apply_relocations(
@@ -331,6 +334,7 @@ pub fn apply_relocations(
 // CEP:STATUS complete
 // CEP:FAILURE LinkError::Unresolved for a Plt32 name with neither a
 //        definition nor a stub.
+// CEP:ID: JIT-a07
 // CEP:ASSUMES .text is the only relocated section in this model.
 // CEP:COST O(|relocs| + |text|).
 // CEP:EVIDENCE cargo test -p vortex-opt gotplt

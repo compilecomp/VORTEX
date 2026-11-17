@@ -353,6 +353,7 @@ impl Gct {
     // CEP:ASSUMES The entry has ref_count 0.
     // CEP:COST O(1).
     // CEP:EVIDENCE cargo test -p vortex-runtime
+    // CEP:ID: MEM-a01
     fn free_entry(&mut self, idx: u32) {
         let e = &mut self.entries[idx as usize];
         e.status = Status::Free;
@@ -426,6 +427,7 @@ impl Gct {
     //        and table exhaustion.
     // CEP:ASSUMES None.
     // CEP:COST O(depth) for the depth walk, bounded by 256.
+    // CEP:ID: MEM-a02
     // CEP:EVIDENCE cargo test -p vortex-runtime
     pub fn attenuate(&mut self, parent: Token, new_permissions: u16) -> Result<Token, CapError> {
         let pidx = parent.index() as usize;
@@ -495,6 +497,7 @@ impl Gct {
     // CEP:FAILURE InvalidToken for out-of-range indices; already-revoked
     //        tokens report Revoked without double-counting.
     // CEP:ASSUMES None.
+    // CEP:ID: MEM-a03
     // CEP:COST O(|descendants|).
     // CEP:EVIDENCE cargo test -p vortex-runtime
     pub fn revoke(&mut self, token: Token) -> Result<usize, CapError> {
@@ -631,6 +634,7 @@ impl Gct {
     //        tests call this after every mutation sequence.
     // CEP:STATUS complete
     // CEP:FAILURE Names the violated invariant in the error string.
+    // CEP:ID: MEM-a04
     // CEP:ASSUMES None.
     // CEP:COST O(entries + sibling lists).
     // CEP:EVIDENCE cargo test -p vortex-runtime
