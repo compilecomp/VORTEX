@@ -8,12 +8,12 @@
 
 **Role:** Central target-independent representation of the program. Domain for global optimizations including GVN, LICM, DCE, and effect-preserving transformations.
 
-**Design Status:** Complete specification, pending alias-analysis subsystem.
+**Design Status:** Complete specification. The alias-analysis dependency is specified in the Alias Analysis Subsystem document in this file.
 
 **Scope:** This document defines the graph structure, type system, effect lattice, node semantics, and validity invariants of the IR. It does not define:
 - The source language (which maps into this IR via front-end lowering)
 - The target machine (which this IR maps into via backend lowering)
-- The alias analysis that determines region classes (separate subsystem)
+- The alias analysis that determines region classes (specified in the Alias Analysis Subsystem document)
 
 **Normative References:**
 - Click, C. "A Simple, Fast Dominance Algorithm" (for scheduling conditions)
@@ -21,7 +21,7 @@
 - IEEE 754-2019 (for floating-point semantics)
 
 **Known Limitations:**
-- Region-class resolution depends on an alias-analysis subsystem not specified here
+- Region-class resolution depends on the alias-analysis subsystem (specified in the Alias Analysis Subsystem document)
 - Observational-equivalence proofs for effect-preserving transformations are not discharged in this document (belong to optimizer subsystem)
 
 ---
@@ -40,7 +40,7 @@
 
 1. Target-specific instruction selection (handled in lowering/codegen).
 2. Source-level debugging information mapping (handled via orthogonal metadata).
-3. Alias analysis (separate subsystem; ET-SoN consumes its results).
+3. Alias analysis (specified in the Alias Analysis Subsystem document; ET-SoN consumes its results).
 
 ### Constraints
 
@@ -124,14 +124,13 @@ If E = ∅, n has no state-token edges. If E ≠ ∅, n has one state-in_r and s
 **Conflict relation.** The lattice order does not determine ordering requirements. Ordering is determined by a separate relation Conflict(n₁, n₂) ∈ {true, false}, defined as:
 
     Conflict(n₁, n₂) =
-        MayAlias(region(n₁), region(n₂)) ∧
-        (MemWrite ∈ E(n₁) ∨ MemWrite ∈ E(n₂)) ∧
-        (MemRead ∈ E(n₁) ∨ MemRead ∈ E(n₂))
+        (MayAlias(region(n₁), region(n₂)) ∧
+         (MemWrite ∈ E(n₁) ∨ MemWrite ∈ E(n₂)))
         ∨ (Barrier ∈ E(n₁) ∨ Barrier ∈ E(n₂))
         ∨ AtomicConflict(n₁, n₂)
 
 where:
-- MayAlias(r₁, r₂) is provided by the alias-analysis subsystem.
+- MayAlias(r₁, r₂) is provided by the alias-analysis subsystem (Alias Analysis Subsystem document).
 - AtomicConflict(n₁, n₂) encodes the C11/Java memory-ordering constraints for atomic operations:
   - If either is atomic with ordering ∈ {acquire, release, seq_cst}, they conflict.
   - If both are relaxed atomics touching the same location, they conflict.
@@ -244,7 +243,7 @@ This is the generalized dominance condition from Click's IR. It replaces the han
 
 ### 6.7 Representation and Cost Model
 
-**Node layout.** Nodes are allocated in a generational arena. Each node has a fixed header (ID, opcode, E, F, region-class footprint bitmask) followed by a variable-length edge array. Inline capacity: 4 edges; overflow spills to a secondary heap array.
+**Node layout.** Nodes are allocated in a generational arena. Each node has a fixed header (ID, opcode, E, F, region-class footprint bitmask; the bitmask is a u32, which bounds the region-class count at 32 per function, enforced by the alias-analysis subsystem's merge rule) followed by a variable-length edge array. Inline capacity: 4 edges; overflow spills to a secondary heap array.
 
 **Edge representation.** Integer indices into a global node table. No separate edge objects.
 
@@ -273,7 +272,7 @@ This is the generalized dominance condition from Click's IR. It replaces the han
 **Design Status:** Complete specification.
 
 **Scope:** This document defines the graph structure, type system, node semantics, and validity invariants of the Vector IR. It does not define:
-- The vectorization analysis that transforms ET-SoN into Vector IR (separate subsystem)
+- The vectorization analysis that transforms ET-SoN into Vector IR (Vectorization Analysis Subsystem document)
 - The target machine (which Vector IR maps into via backend lowering)
 - The scalar ET-SoN (which is the input to vectorization)
 
@@ -284,7 +283,7 @@ This is the generalized dominance condition from Click's IR. It replaces the han
 - Click, C. "A Simple, Fast Dominance Algorithm" (for scheduling conditions)
 
 **Known Limitations:**
-- Vectorization legality proofs (dependence analysis, alias analysis) are not discharged in this document — they belong to the vectorization-analysis subsystem
+- Vectorization legality proofs (dependence analysis, alias analysis) are not discharged in this document. They belong to the vectorization-analysis subsystem (Vectorization Analysis Subsystem document; alias facts from the Alias Analysis Subsystem document)
 - Target-specific vector width selection is deferred to Machine IR lowering
 
 ---
@@ -302,7 +301,7 @@ This is the generalized dominance condition from Click's IR. It replaces the han
 
 ### Non-Goals
 
-1. Perform vectorization analysis (separate subsystem; Vector IR is the output).
+1. Perform vectorization analysis (Vectorization Analysis Subsystem document; Vector IR is the output).
 2. Target-specific instruction selection (handled in Machine IR).
 3. Scalar optimization (handled in ET-SoN before vectorization).
 
@@ -619,7 +618,7 @@ Valid_VecIR(G) holds iff all of the following hold:
 **Scope:** This document defines the graph structure, register model, instruction semantics, register allocation algorithm, instruction selection algorithm, and validity invariants of the Machine IR. It does not define:
 - The instruction scheduling algorithm (separate subsystem operating on Machine IR)
 - The code emitter that encodes Machine IR to bytes (separate subsystem)
-- The target machine description (consumed by Machine IR, specified elsewhere)
+- The target machine description (consumed by Machine IR; specified in the Target Machine Description Subsystem document)
 
 **Normative References:**
 - LLVM Machine IR representation (for CFG-based machine-level IR design)
@@ -630,7 +629,7 @@ Valid_VecIR(G) holds iff all of the following hold:
 - Target architecture manuals (x86-64, ARM64, RISC-V) for register class and instruction semantics
 
 **Known Limitations:**
-- Target machine description is not specified here; Machine IR consumes it as an external dependency
+- Target machine description is specified in the Target Machine Description Subsystem document; Machine IR consumes it as an external dependency
 - Instruction scheduling algorithm is deferred to a separate subsystem
 
 ---
@@ -1020,7 +1019,7 @@ Valid_MachIR(G) holds iff all of the following hold:
 **Scope:** This document defines the scheduling problem, dependency model, scheduling algorithms (list scheduling for local scheduling, modulo scheduling for loops), validity invariants, and cost model. It does not define:
 - The register allocation algorithm (already completed; scheduling operates on its output)
 - The code emitter that encodes Machine IR to bytes (separate subsystem)
-- The target machine description (consumed by the scheduler, specified elsewhere)
+- The target machine description (consumed by the scheduler; specified in the Target Machine Description Subsystem document)
 
 **Normative References:**
 - Gibbons, G. and Muchnick, V. "Optimizing Instruction Scheduling for the Itanium Architecture" (for list scheduling)
@@ -1029,7 +1028,7 @@ Valid_MachIR(G) holds iff all of the following hold:
 - Target architecture manuals for execution unit models, latency tables, and resource constraints
 
 **Known Limitations:**
-- Target machine description (execution units, latencies, resource constraints) is not specified here; the scheduler consumes it as an external dependency
+- Target machine description (execution units, latencies, resource constraints) is specified in the Target Machine Description Subsystem document; the scheduler consumes it as an external dependency
 - Trace scheduling for hyperblocks is not covered (deferred to future work)
 
 ---
@@ -1286,7 +1285,7 @@ Valid_Schedule(G_MachIR', S) holds iff all of the following hold:
 
 **Scope:** This document defines the encoding model, relocation model, symbol table model, section layout model, object file format, validity invariants, and cost model. It does not define:
 - The instruction scheduling algorithm (already completed; emission operates on its output)
-- The target machine description (consumed by the emitter, specified elsewhere)
+- The target machine description (consumed by the emitter; specified in the Target Machine Description Subsystem document)
 - The linker that combines object files into an executable (separate subsystem)
 - The runtime loader that loads the executable into memory (separate subsystem)
 
@@ -1297,7 +1296,7 @@ Valid_Schedule(G_MachIR', S) holds iff all of the following hold:
 - Target architecture manuals (x86-64, ARM64, RISC-V) for instruction encoding
 
 **Known Limitations:**
-- Target machine description (instruction encoding tables, relocation types) is not specified here; the emitter consumes it as an external dependency
+- Target machine description (instruction encoding tables, relocation types) is specified in the Target Machine Description Subsystem document; the emitter consumes it as an external dependency
 - Linker script processing is not covered (deferred to linker subsystem)
 - Debug information emission (DWARF, PDB) is not covered (deferred to separate subsystem)
 
@@ -1391,6 +1390,8 @@ For each instruction i with opcode op and operands [o₁, o₂, …, oₙ]:
 If an immediate value is outside the valid range, the emitter must either:
 - Reject the instruction with a compilation error.
 - Synthesize a sequence of instructions to materialize the value (e.g., load into a register, then use the register).
+
+The emitter also produces offline stencil banks for the T1 tier from the same encoding tables: each stencil is a pre-encoded byte sequence with typed patch sites (see the T1: Baseline Copy-and-Patch JIT document).
 
 ### 6.4 Relocation Model
 
@@ -1937,7 +1938,7 @@ DW_LLE_end_of_list
      - After the frame pointer is set up: `DW_CFA_def_cfa` to switch to RBP + 16 (or equivalent).
      - At each safepoint, the CFA rule and register rules must correctly describe how to unwind to the caller.
 
-3. **Handle exceptions.** If the function has exception handlers, the FDE includes an LSDA (language-specific data area) pointer in the augmentation data. The LSDA describes the exception handling table (not specified here; belongs to the exception handling subsystem).
+3. **Handle exceptions.** If the function has exception handlers, the FDE includes an LSDA (language-specific data area) pointer in the augmentation data. The LSDA describes the exception handling table (specified in the Exception Handling and Stack Unwinding Subsystem document).
 
 ### 6.8 Deopt Metadata Integration
 
@@ -2535,7 +2536,7 @@ Valid_Exec(O_exec, F) holds iff all of the following hold:
 **Scope:** This document defines the register-based interpreter architecture, speculative optimization mechanisms, opcode rewriting rules, super byte code format, profiling infrastructure, deoptimization mechanism, and tier transition triggers. It does not define:
 - The source language's bytecode format (consumed by T0)
 - Higher tiers (T1, T2, etc.) that T0 transitions to
-- The runtime system that manages tier transitions (separate subsystem)
+- The runtime system that manages tier transitions (specified in the Tiered Compilation System document for T2 through T5)
 
 **Normative References:**
 - Hölzle, U., Ungar, D., and Wolfer, L. "The Design and Evaluation of a Self-Optimizing Compiler" (for speculative optimization)
@@ -2544,9 +2545,9 @@ Valid_Exec(O_exec, F) holds iff all of the following hold:
 - Standard JIT compiler literature for deoptimization and tier transitions
 
 **Known Limitations:**
-- Garbage collection integration is not fully specified (deferred to runtime subsystem)
+- Garbage collection integration beyond safepoints and barriers is specified in the Garbage Collection and GC Interaction Subsystem documents; generation-policy interaction is deferred to the runtime
 - Thread safety for concurrent execution is partially specified (deferred)
-- Exact profiling data format is not specified (only the interface)
+- The profiling data format is specified in §6.8; the cross-tier flow of that data is specified in the Tiered Compilation System document
 
 ---
 
@@ -2615,7 +2616,16 @@ The interpreter maintains:
 - **Virtual registers** (v0, v1, v2, …): used for local variables and temporary values.
 - **Argument registers** (a0, a1, a2, …): used for function arguments.
 - **Return value register** (r0): used for function return values.
-- **Special registers**: PC (program counter), SP (stack pointer), FP (frame pointer), HP (heap pointer).
+- **Special registers**: PC (program counter), SP (stack pointer), FP (frame pointer), HP (heap pointer), X (exception register; holds the exception object reference during handler dispatch, used by the interpreted-frame pads of the Exception Handling and Stack Unwinding Subsystem document).
+
+**Frame header and frame chain.** Every T0 activation frame begins with a frame header of fixed layout:
+
+- **frame_kind** (u8): the frame's kind tag (T0 here; the tag set spans all VORTEX frame kinds).
+- **function_id** (u32): the executing function, for table lookups.
+- **caller_fp**: the frame pointer of the calling frame. The chain of caller_fp links is the frame chain; it is the stack-walking substrate for frames without CFI.
+- **safepoint_base**: base address of the frame's scannable state.
+
+The header is written at frame entry and maintained across tier transitions: a T0-to-T1 OSR entry rewrites frame_kind and preserves caller_fp; deoptimization rebuilds the frame with the same caller_fp. The layout is shared by every VORTEX frame kind; the Exception Handling and Stack Unwinding Subsystem document specifies its use for stack walking.
 
 **Bytecode format.** The bytecode is register-based, not stack-based. Each instruction specifies its operands as register indices. Example bytecodes:
 
@@ -2735,7 +2745,7 @@ When a cache is invalidated, its state is reset to UNINITIALIZED.
 
 ### 6.6 Opcode Rewriting
 
-**Opcode rewriting model.** The interpreter dynamically rewrites bytecodes to eliminate redundant checks and optimize common patterns. Opcode rewriting is a form of just-in-time optimization that modifies the bytecode in place.
+**Opcode rewriting model.** The interpreter dynamically rewrites bytecodes to eliminate redundant checks and optimize common patterns. Opcode rewriting is a form of just-in-time optimization that modifies the interpreter's working copy of the bytecode in place; the canonical (pre-rewriting) array is preserved as the compilation input, and profiling counters reference canonical bytecode indices (see the T1: Baseline Copy-and-Patch JIT document, §6.3).
 
 **Rewriting rules.** Common rewriting rules include:
 
@@ -3010,7 +3020,7 @@ Valid_T0(B, S) holds iff all of the following hold:
 
 **Traversal cost.** Interpreting a bytecode is O(1) (constant time per bytecode, including dispatch and execution). Inline cache lookup is O(1) for monomorphic caches, O(k) for polymorphic caches (where k is the number of entries). Profiling updates are O(1).
 
-**Modification cost.** Opcode rewriting modifies the bytecode array in place. The cost is O(1) per rewrite. Super byte code generation modifies the bytecode array and may require updating jump targets. The cost is O(|bytecodes|) in the worst case.
+**Modification cost.** Opcode rewriting modifies the interpreter's working copy of the bytecode array in place (the canonical array is preserved as the compilation input). The cost is O(1) per rewrite. Super byte code generation modifies the bytecode array and may require updating jump targets. The cost is O(|bytecodes|) in the worst case.
 
 **Memory complexity.** O(|bytecodes| + |frames| · |registers| + |inline caches| · cache_size + |profiling data| · profile_size).
 
@@ -3032,7 +3042,7 @@ Valid_T0(B, S) holds iff all of the following hold:
 
 **Scope:** This document defines the bytecode format, capability system, type system, FFI mechanism, memory model, and validity invariants. It does not define:
 - Language-specific front-ends that produce UGB (separate subsystems)
-- The T1 JIT compiler (already specified; consumes UGB)
+- The T1 JIT compiler (specified in the T1: Baseline Copy-and-Patch JIT document; consumes UGB)
 - The runtime system (separate subsystem)
 - The FFI runtime for specific foreign languages (separate subsystems)
 
@@ -3056,7 +3066,7 @@ Valid_T0(B, S) holds iff all of the following hold:
 
 1. Provide a universal bytecode format that can represent programs from multiple source languages (C, Python, Java, JavaScript, Rust, etc.).
 2. Enforce security and isolation through a capability-based permission system.
-3. Support polyglot execution: code from different languages can interoperate seamlessly.
+3. Support polyglot execution: code from different languages can interoperate with each other.
 4. Provide near-zero overhead FFI: calling foreign functions should be as fast as native calls.
 5. Maintain a well-defined memory model that accommodates different language semantics (GC vs. manual memory management, value vs. reference semantics).
 6. Be efficiently compilable by T1 (copy-and-patch JIT).
@@ -6350,13 +6360,13 @@ Valid_GC_Deopt_Interaction(E) holds iff all of the following hold:
 
 **Version:** 1.0
 
-**Role:** Progressive optimization pipeline. Defines the tier structure, pass allocation per tier, compilation budget model, tier transition policy, profile-guided tier selection, and integration with the deoptimization subsystem. T0 and T1 are already specified elsewhere.
+**Role:** Progressive optimization pipeline. Defines the tier structure, pass allocation per tier, compilation budget model, tier transition policy, profile-guided tier selection, and integration with the deoptimization subsystem. T0 is specified in the T0 document in this file; T1 is specified in the T1: Baseline Copy-and-Patch JIT document.
 
 **Design Status:** Complete specification.
 
 **Scope:** This document defines the tier taxonomy, pass complexity classification, per-tier compilation budgets, tier transition triggers, profile data flow, compilation queue scheduling, cost-benefit model, validity invariants, and cost model. It does not define:
 - The specific optimization passes (already specified in the optimizer subsystem document)
-- The T0 interpreter or T1 baseline JIT (already specified)
+- The T0 interpreter or T1 baseline JIT (specified in their respective subsystem documents in this file)
 - The deoptimization subsystem (already specified; consumes tier transitions)
 - The GC (interacts via safepoints during compilation)
 
@@ -6370,6 +6380,7 @@ Valid_GC_Deopt_Interaction(E) holds iff all of the following hold:
 - The exact pass-to-tier assignment is a policy decision; the document specifies the classification rules, not the specific assignments.
 - Cross-tier profile data merging is partially specified.
 - The compilation queue's interaction with OS scheduling is abstracted.
+- On-stack replacement (OSR) entry into T2+ code mid-loop (catalogue optimizations 230-231) is not covered; promotion to higher tiers takes effect at call boundaries or via deoptimization-based frame replacement.
 
 ---
 
@@ -7596,3 +7607,1137 @@ The following are explicitly deferred:
 6. **Image Compression.** Compressing the image to reduce disk size and load time.
 
 ---
+
+# Target Machine Description Subsystem — Complete Design Document (v1)
+
+## 0. Document Control and Design Scope
+
+**Component:** Target Machine Description (TMD)
+
+**Version:** 1.0
+
+**Role:** Declarative, machine-readable description of a target instruction set. Provides the register file, instruction signatures and selection patterns, scheduling resources, encoding tables, relocation kinds, ABI rules, and ISA feature sets consumed by Machine IR, instruction selection, the Instruction Scheduling Subsystem, and the Code Emission Subsystem.
+
+**Design Status:** Complete specification.
+
+**Scope:** This document defines the structure and semantics of the target description model. It does not define:
+- The Machine IR that instantiates opcodes and registers from the description (specified elsewhere in this document set)
+- The scheduling algorithm that consumes the resource model (Instruction Scheduling Subsystem document)
+- The emission algorithm that consumes the encoding and relocation tables (Code Emission Subsystem document)
+- Per-target data files (each target ships one description instance; this document defines their schema and validity)
+
+**Normative References:**
+- LLVM TargetDescription files (for register and instruction description structure)
+- System V ABI: AMD64 Architecture Processor Supplement (for calling convention modeling)
+- ARM Architecture Procedure Call Standard (AAPCS64)
+- RISC-V ABIs (integer, floating-point, and vector calling conventions)
+
+**Known Limitations:**
+- The resource model captures unit occupancy and latency, not microarchitectural pipeline structure (decode width, reorder buffer size, port sharing) beyond unit-level contention
+- Memory hierarchy geometry (cache sizes, TLB reach) is not modeled; prefetch and layout heuristics in the optimizer use their own constants
+- One ISA per process instance; heterogeneous multi-ISA targets are not modeled
+- CPU feature detection at runtime is delegated to the runtime; the description enumerates feature sets and variant tables but does not detect hardware
+
+---
+
+## 1. Goals, Non-Goals, and Constraints
+
+### Goals
+
+1. Provide a single source of truth for all target-specific facts, so that Machine IR, instruction selection, scheduling, and emission never hard-code target details.
+2. Define register classes, subregister relations, aliases, and calling-convention roles with enough precision to validate every Machine IR program statically.
+3. Define instruction selection patterns with costs so the DP-on-DAG selector produces a provably minimal-cost cover for tree-structured expressions.
+4. Define a scheduling resource model (execution units, latencies, occupancy) sufficient for list scheduling and modulo scheduling without target-specific code paths.
+5. Define encoding templates and relocation kinds sufficient for the emitter to produce object files without target-specific emission logic.
+6. Define ABI rules (argument classification, register assignment, stack layout, callee-saved sets) sufficient for calls between compiled code, foreign code, and runtime stubs.
+7. Define ISA feature sets and per-opcode variant tables to support multi-versioning without recompilation.
+
+### Non-Goals
+
+1. Specify scheduling, selection, or emission algorithms (each is owned by its subsystem document).
+2. Model dynamic voltage/frequency effects on latency ratios (ratios only, calibrated offline).
+3. Provide runtime feature detection (runtime responsibility).
+4. Describe assembler or disassembler user interfaces.
+
+### Constraints
+
+- Every query against the description (register lookup, opcode signature, latency, encoding template, relocation kind) must be O(1) after tables are built.
+- Description table construction from the declarative source must be O(|O| · |P| + |R| · |C|), where |O| is opcode count, |P| average pattern count per opcode, |R| register count, |C| register class count.
+- Every instruction selection pattern must reference only defined opcodes and register classes.
+- Register aliases and subregisters must form a consistent, closed relation (no dangling references).
+- The description must be serializable to a compact binary form loadable by the JIT at startup in O(table size).
+
+---
+
+## 6. Target Machine Description Subsystem
+
+### 6.1 Purpose and Domain
+
+The Target Machine Description is a set of static tables describing one instruction set architecture instance. Its purpose is to make every target-specific decision data-driven: Machine IR validates against it, instruction selection searches its pattern tables, the scheduler consults its resource model, and the emitter reads its encoding templates. A target is added by writing one description instance; no backend subsystem is modified.
+
+### 6.2 Mathematical Specification
+
+| Requirement | Specification |
+|---|---|
+| **Domain** | Declarative target files T_src for one ISA instance. |
+| **Codomain** | M = (P, RC, O, PT, RES, ENC, REL, ABI, FEAT): the validated description tables. |
+| **Definitions** | P: physical registers. RC: register classes. O: opcodes with signatures. PT: selection patterns. RES: scheduling resources. ENC: encoding templates. REL: relocation kinds. ABI: calling conventions. FEAT: feature sets. |
+| **Preconditions** | T_src parses under the schema of §6.3-§6.8. All references (opcodes, classes, units, relocations) resolve within T_src. |
+| **Postconditions** | M satisfies Valid_TMD (defined in §6.10). All table queries are total functions on their domains. |
+| **Invariants** | Reference closure, alias consistency, subregister consistency, pattern validity, resource coverage, encoding uniqueness, ABI partition, feature monotonicity. |
+| **Relations** | Class membership (∈), subregister relation (⊑), alias relation (⋈), pattern cover (→_sel), resource occupancy (→_res). |
+| **Failure behavior** | A description that violates Valid_TMD is rejected at build time with a diagnostic naming the violated invariant. A runtime query outside a table's domain returns the conservative default defined per table (e.g., unknown opcode: serialized, latency 1). |
+| **Complexity** | Table build: O(|O| · |P| + |R| · |C|). Query: O(1) per lookup. |
+| **Correctness** | For every instruction i valid in Machine IR under M, the tables answer every query emitted by selection, scheduling, and emission; the emitted object file assembles and links under the ABI defined by ABI. |
+
+### 6.3 Register File Model
+
+**Register definition.** Each physical register p ∈ P is defined by:
+
+```
+struct RegisterDef {
+    id:         u16,     // Stable numeric ID used by Machine IR
+    name:       &str,    // Assembler name (e.g., "rax")
+    size_bits:  u16,     // Full register width (e.g., 64)
+    class:      ClassId, // Home register class
+    subregs:    Vec<(SubregIndex, RegId)>,  // Overlapping narrower views
+    aliases:    Vec<RegId>,                 // Overlapping registers (symmetric closure)
+    cc_role:    CCRole,  // CallerSaved | CalleeSaved | Arg(i) | Ret(i) | Reserved
+}
+```
+
+**Subregister indexing.** A subregister index names a contiguous bit range [lo, lo + w) of the parent register. The set of subregister indexes per register is fixed by the description (e.g., x86-64 defines indexes for the 64-bit, 32-bit, 16-bit, and 8-bit low views, plus the 8-bit high view where present). Machine IR's subregister consistency rules (Machine IR document, invariant 11) are evaluated against these definitions.
+
+**Register classes.** Each class C ∈ RC is defined by:
+
+```
+struct RegisterClass {
+    id:           ClassId,
+    regs:         Vec<RegId>,   // All registers allocatable in this class
+    size_bits:    u16,          // Bits per value held
+    align_bits:   u16,          // Required alignment of spill slots
+    subclasses:   Vec<ClassId>, // Strict subclasses (transitive closure computed)
+    spill_cost:   u32,          // Base cost used by the spill cost model
+}
+```
+
+**Consistency rules.**
+1. The alias relation ⋈ is symmetric and irreflexive; if p ⊑ q by subregister, then p ⋈ q.
+2. Subregister bit ranges of distinct children of one register are either disjoint or one contains the other.
+3. Every class C has size_bits(C) equal to the size of every register in C (classes are size-homogeneous).
+4. The cc_role partition is respected: registers with role Reserved never appear in any allocatable class; Arg(i) and Ret(i) roles index the ABI assignment of §6.7.
+
+### 6.4 Instruction and Selection Pattern Model
+
+**Opcode definition.** Each opcode o ∈ O is defined by:
+
+```
+struct OpcodeDef {
+    name:          &str,          // Assembler mnemonic (e.g., "ADD64rr")
+    sig:           SigId,         // Operand type sequence (τ_in, τ_out)
+    imp_uses:      Vec<RegId>,    // Implicit physical reads (e.g., EFLAGS)
+    imp_defs:      Vec<RegId>,    // Implicit physical writes
+    flags:         OpFlags,       // may_load | may_store | is_terminator |
+                                  // is_barrier | is_call | is_return | is_branch
+    variants:      Vec<Variant>,  // Feature-gated encodings (see §6.8)
+}
+```
+
+The signature Σ(o) = (τ⃗_in, τ⃗_out, imp_uses, imp_defs, flags) is exactly the signature consumed by Machine IR's instruction well-formedness rules (Machine IR document, invariant 4).
+
+**Selection pattern definition.** Each pattern t ∈ PT is a tree of operation tests that matches one machine instruction (or a fixed short sequence) against a Vector IR DAG fragment:
+
+```
+struct PatternDef {
+    root:        OpTest,        // Opcode or lowering class at the root
+    children:    Vec<PatternId>,
+    result_class: ClassId,      // Register class of the produced value
+    cost:        u32,           // In cycles (latency model) or bytes (size model)
+    emits:       OpcodeId,      // Instruction emitted when selected
+    emits_seq:   Vec<OpcodeId>, // If the pattern covers a short sequence
+}
+```
+
+The DP-on-DAG up-down selector (Machine IR document, §6.5) uses PT as its pattern set and cost as its cost function. The selector's optimality guarantee for trees holds because cost(pattern) + Σ cost(child labels) is computed bottom-up over each pattern's children; patterns whose children are matched by other patterns compose without hidden costs.
+
+**Pattern constraints.**
+1. Every pattern references only defined opcodes and classes.
+2. For every lowering class required by the Vector IR node set (arithmetic, conversion, memory with addressing mode, shuffle, reduction, mask operation), at least one pattern exists that produces a correct cover, possibly by decomposing into emits_seq.
+3. cost is non-negative. cost = 0 is reserved for pure register moves used in coalescing.
+
+### 6.5 Scheduling Resource Model
+
+**Execution units.** The model defines a set of execution units U and, for each opcode o, a resource footprint:
+
+```
+struct ExecUnit { id: u8, ops_per_cycle: u8 }        // e.g., 4 ALU, 2 Load, 1 Div
+struct ResourceUse { unit: UnitId, cycles: u8 }       // Occupancy duration
+```
+
+- **Latency table.** latency(o): cycles from issue to result availability. Default 1 for unknown opcodes (conservative serialization).
+- **Occupancy.** res_use(o): list of (unit, cycles) pairs. An instruction occupies each listed unit for the stated cycles from its issue cycle.
+- **Issue group.** An optional per-opcode issue_class used by the scheduler to enforce retire-group ordering on in-order targets.
+- **Hazard model.** Two instructions i₁, i₂ conflict on resources if their occupancy windows overlap on any shared unit and the unit cannot accept ops_per_cycle instructions per cycle. The scheduler's dependence construction (Instruction Scheduling Subsystem document, §6.3) adds anti/output dependences for register reuse; resource conflicts are not graph edges and are enforced by the scheduler at issue time through per-cycle limit checks (§6.3 and §6.4 of that document). This model supplies the occupancy and latency tables those checks consult.
+
+**Coverage rule.** Every opcode used by a scheduled function must have a res_use entry or the description must declare a default (single shared unit, cycles = 1). Scheduling under the default is conservative and correct: it serializes unknown opcodes.
+
+### 6.6 Encoding and Relocation Model
+
+**Encoding templates.** Each opcode o has one or more encoding templates, one per variant (§6.8):
+
+```
+struct EncTemplate {
+    fixed:    Vec<(u32, u8)>,        // (byte_offset, byte_value) fixed bytes
+    fields:   Vec<FieldSpec>,        // Operand encodings, see below
+    size:     u16,                   // Encoded length in bytes
+    align:    u8,                    // Required instruction alignment
+}
+struct FieldSpec {
+    operand:  u8,                    // Operand index in Σ(o)
+    kind:     FieldKind,             // Reg | RegBase | Imm8 | Imm32 | Imm64 |
+                                     // BranchRel32 | CallRel32 | FlagsCC | ...
+    offset:   u32, bits: u8, shift: u8,
+    encode:   RegEncodeId,           // Register-to-field mapping table
+}
+```
+
+- Fixed bytes, field positions, sizes, and register encodings are declared per template; the emitter fills fields from operands and applies byte-order and immediate encodings from the table. The emitter's encoding model (Code Emission Subsystem document, §6.3) is the consumer.
+- Templates are unique per (opcode, variant): no two templates for the same variant encode the same operand signature ambiguously.
+
+**Relocation kinds.** The description enumerates the relocation vocabulary shared with the linker:
+
+```
+enum RelocKind { Abs4, Abs8, Rel4, RelGot4, RelPlt4, RelGotPCREL4, TargetSpecific(u16) }
+```
+
+- Each kind defines its fixup expression: the value written at the site as a function of symbol address S, place P, and addend A, where P is the address of the relocation field (matching the Linker document's §6.6 convention; templates declare each field's offset relative to the instruction start). Examples: Rel4: S + A − P; RelGotPCREL4: GOT(S) + A − P.
+- The set of kinds must be a subset of the kinds the Linker Subsystem resolves (Linker document, §6.6). The emitter rejects a program that produces an unresolved kind.
+
+### 6.7 ABI and Calling Convention Model
+
+**Conventions.** The description defines one or more named conventions (default, varargs, vector-extended). For each convention:
+
+```
+struct CallConv {
+    arg_order_int:   Vec<RegId>,   // Integer argument registers in order
+    arg_order_fp:    Vec<RegId>,   // Floating-point argument registers in order
+    arg_order_vec:   Vec<RegId>,   // Vector argument registers in order
+    ret_regs:        Vec<RegId>,   // Return value registers by class
+    callee_saved:    Vec<RegId>,
+    stack_align:     u16,          // Stack alignment at call boundary (bytes)
+    struct_rule:     StructRule,   // RegisterPair | Memory | Classify
+    shadow_space:    u32,          // Reserved stack bytes above return address
+    cfa_rule:        CfaRule,      // Initial CFA definition (matches DWARF CIE)
+}
+```
+
+**Argument classification.** Scalars are assigned to the class-ordered register lists; exhaustion spills to the stack in order with stack_align alignment. Aggregates follow struct_rule: register pairs for aggregates fitting two registers, memory otherwise, or the platform's classification procedure for targets that require it.
+
+**DWARF consistency.** The cfa_rule initial state must match the CIE emitted by the DWARF subsystem for the same target (code alignment factor 1 for x86-64, 4 for ARM64; data alignment factor −8 for 64-bit targets). A mismatch is a Valid_TMD violation: unwinding through compiled frames depends on it.
+
+### 6.8 Feature Sets and Variant Tables
+
+**Feature sets.** A feature set F ⊆ FEAT is a named set of ISA features (e.g., {BASE}, {BASE, AVX2}, {BASE, SVE2}). Features are partially ordered by implication (declared edges; transitive closure computed at build). Every opcode variant is gated by a predicate over features:
+
+```
+struct Variant { requires: FeatureSet, enc: EncTemplateId, res: Vec<ResourceUse>,
+                 latency: u8, priority: u32 }
+```
+
+**Multi-versioning.** An opcode may carry several variants with disjoint requires sets. At code generation, the active feature set F_active selects, for each opcode, the highest-priority variant whose requires ⊆ F_active. Multi-versioned functions emit per-variant bodies with a runtime dispatch stub (catalogue optimization 218); the description supplies the variant table and dispatch predicate order (checked in descending priority, first satisfied wins).
+
+**Monotonicity.** If variant v₁ has priority over v₂, then requires(v₁) ⊄ requires(v₂) must hold unless a tie-break rule is declared. This prevents selecting a weaker variant when a stronger feature set is active.
+
+### 6.9 Table Build and Loading
+
+**Build.** The description is compiled from declarative source at backend build time. Build performs: reference resolution, transitive closures (subclasses, aliases, features), uniqueness checks (§6.6), coverage checks (§6.4, §6.5), and ABI/DWARF consistency checks (§6.7). Output is a versioned binary table.
+
+**Load.** The JIT loads the binary table at startup: register tables into read-only memory, pattern tables into the selector's arena, encoding templates into the emitter's arena. Load is O(table size) with no incremental parsing during compilation.
+
+### 6.10 Validity Invariants
+
+Valid_TMD(M) holds iff all of the following hold:
+
+**1. Reference closure.** Every class, register, unit, template, relocation kind, and feature referenced anywhere in M is defined in M. No dangling identifiers.
+
+**2. Alias and subregister consistency.** ⋈ is symmetric and irreflexive; subregister containment is closed under bit-range arithmetic; p ⊑ q implies p ⋈ q.
+
+**3. Class homogeneity.** Every register class is size-homogeneous; every register appears in at least one allocatable class or carries role Reserved.
+
+**4. Pattern validity.** Patterns reference defined opcodes/classes; costs are non-negative; every Vector IR lowering class has a covering pattern (possibly via emits_seq).
+
+**5. Resource coverage.** Every opcode has a res_use entry or the default serialization entry exists; latency is defined for every opcode.
+
+**6. Encoding uniqueness.** Per (opcode, variant), exactly one template exists; template sizes are consistent with field layouts; register encoding tables are total over the registers appearing in each class used by the opcode.
+
+**7. Relocation vocabulary.** REL ⊆ relocation kinds resolvable by the linker; fixup expressions are defined for every kind.
+
+**8. ABI partition.** For each convention, argument register lists are disjoint from callee_saved and from each other; stack_align ≥ pointer size; cfa_rule matches the DWARF CIE for the target. Return registers may overlap argument registers (AAPCS64 returns in x0-x1); only callee-saved preservation is excluded.
+
+**9. Feature monotonicity.** Variant priority order is consistent with the requires sets as specified in §6.8; feature implication closure is acyclic.
+
+**10. Serializability.** M round-trips through the binary form with no information loss; load produces tables byte-identical to build output for the same source.
+
+### 6.11 Representation and Cost Model
+
+**Table layout.** Registers: array of RegisterDef indexed by RegId. Classes: array with sorted register lists for binary-search membership where needed. Opcodes: array of OpcodeDef; signature lookup by index. Patterns: arena-allocated trees with an index by root lowering class. Resource model: per-opcode arrays. Encoding templates: byte-array arena with FieldSpec lists. All arrays are position-stable; JIT compilation holds read-only references.
+
+**Query cost.** Register/class/opcode/latency/template lookups: O(1) indexed access. Class membership: O(1) via bitset per register. Variant selection per opcode: O(|variants|) scan with early exit by priority; |variants| ≤ 8 in practice.
+
+**Memory complexity.** O(|O| · (Σ + |PT| + |V|) + |R| · D + |PT| · T + |ENC| · E) where Σ is signature size, D register definition size, T pattern tree size, E template size, |V| average variant count.
+
+**Build cost.** O(|O| · |PT| + |R| · |C| + closures), dominated by pattern validation and transitive closures.
+
+---
+
+
+# Alias Analysis Subsystem — Complete Design Document (v1)
+
+## 0. Document Control and Design Scope
+
+**Component:** Alias Analysis Subsystem (Region-Class Resolver)
+
+**Version:** 1.0
+
+**Role:** Computes the region classes R, the MayAlias relation over R, per-node region footprints, and call-site mod/ref summaries consumed by ET-SoN construction, the optimizer's memory passes, and the vectorization analysis. Provides three service levels with distinct cost budgets mapped to the tier structure.
+
+**Design Status:** Complete specification.
+
+**Scope:** This document defines the region-class model, the points-to constraint system, the three service levels and their tier mapping, the MayAlias and footprint interfaces, and mod/ref summary computation. It does not define:
+- The ET-SoN graph structure that consumes the region classes (specified in the ET-SoN document)
+- The Conflict relation and state-edge construction (defined by ET-SoN from MayAlias; see ET-SoN §6.4)
+- Escape analysis as an optimization pass (catalogue optimization 128 in the optimizer subsystem document); this document defines the region mechanism its results feed (stack allocation, catalogue optimization 151, consumes them downstream), not the pass itself
+- The vectorization legality tests that consume MayAlias (Vectorization Analysis Subsystem document)
+
+**Normative References:**
+- Steensgaard, B. "Points-to Analysis in Almost Linear Time" (equality-based unification)
+- Andersen, L. O. "Program Analysis and Specialization for the C Programming Language" (inclusion-based analysis)
+- Hardekopf, B. and Lin, C. "The Ant and the Grasshopper" (field-sensitive inclusion analysis techniques)
+- C11 §5.1.2.4, §7.17 (memory location and atomic access semantics)
+
+**Known Limitations:**
+- MayAlias is an over-approximation: false positives are permitted, false negatives are forbidden. Completeness is not a goal.
+- Context sensitivity at service level L2 is bounded to call-string depth 1; deeper contexts fall back to the caller-insensitive summary.
+- Memory accessed outside the type system (raw pointer casts to untyped bytes) falls into the universal region and may-aliases with everything.
+- The analysis is sequential per function; interprocedural summaries are computed once per call graph in bottom-up order.
+- The bounded-round default (R = 2) sends cyclic points-to systems to universal regions: a precision cliff, not a soundness cliff.
+
+---
+
+## 1. Goals, Non-Goals, and Constraints
+
+### Goals
+
+1. Partition the memory touched by a function into region classes r ∈ R such that independent regions never serialize each other through state tokens.
+2. Provide MayAlias(r₁, r₂) as a total, sound over-approximation: if two accesses to region classes r₁ and r₂ can touch the same byte, MayAlias(r₁, r₂) = true.
+3. Provide per-node footprints (the set of region classes a node may touch) so state-edge construction is a local computation per node.
+4. Provide mod/ref summaries per call site so callers, the optimizer's memory passes, and write-barrier elimination can reason about calls without re-analysis.
+5. Offer three service levels with explicit cost budgets: an almost-linear construction level (L0), a type-based refinement level (L1, tier T3), and a pointer-based refinement level (L2, tier T4).
+6. Guarantee that the region-class count per function stays within the representation limit of ET-SoN footprint bitmasks.
+
+### Non-Goals
+
+1. Alias-directed transformation decisions (reordering, forwarding): the optimizer applies them; this subsystem supplies facts.
+2. Exact alias answers (must-alias sets beyond the unification result at L0).
+3. Analysis of memory whose provenance escapes the type system (universal region fallback).
+4. Concurrent or incremental re-analysis during IR mutation (passes request a fresh level snapshot after structural changes).
+
+### Constraints
+
+- L0 must run in O(n · α(n)) time and O(n) space, where n is the number of pointer-relevant program points in the function.
+- L1 must run in O(n log n) time (tier T3 class 1 budget).
+- L2 must run in O(n² / w) time and O(n² / w) bits, where w is the machine word width (tier T4 class 2 budget).
+- |R| per function must satisfy |R| ≤ 32 (footprint bitmask width in ET-SoN node headers).
+- Region assignment must be deterministic for a given input graph and service level: two runs produce identical R, region(·), and MayAlias.
+- Soundness: every pair of memory accesses that may touch the same byte must lie in region classes related by MayAlias, or in the same region class.
+
+---
+
+## 6. Alias Analysis Subsystem
+
+### 6.1 Purpose and Domain
+
+ET-SoN partitions state tokens by region class to avoid serializing independent memory operations (ET-SoN document, §6.3). The correctness of that partition depends entirely on the alias facts used to build it: under-approximating MayAlias merges chains that can conflict, producing unschedulable or incorrect IR; over-approximating costs optimization opportunity. This subsystem is the single authority for those facts.
+
+The subsystem answers three queries for a function graph G:
+1. Assign(G, level) → (R, region: N_eff → 2^R, MayAlias: R × R → bool): the region partition, per-node footprints, and the relation.
+2. ModRef(c, level) → (Mod(c) ⊆ R, Ref(c) ⊆ R): per-call-site memory effects, region-granular.
+3. FreshRegion(alloc_site, level) → region class handling for Allocate nodes, coordinated with escape facts.
+
+### 6.2 Mathematical Specification
+
+| Requirement | Specification |
+|---|---|
+| **Domain** | Valid ET-SoN graphs G (or pre-IR program representations at L0, see §6.5). |
+| **Codomain** | Triples (R, region, MayAlias) and mod/ref maps; R finite with |R| ≤ 32. |
+| **Definitions** | Region class r: a set of abstract memory locations treated as one conflict unit. Points-to constraint system C: inclusion/equality constraints over abstract locations. MayAlias: reflexive, symmetric relation over R. |
+| **Preconditions** | G satisfies Valid_IR at L1/L2 (region facts refine an existing assignment). At L0, the input is the pre-IR memory operation set with types and pointer expressions. |
+| **Postconditions** | The returned facts satisfy Soundness (invariant 1) and Representation (invariant 2) below. |
+| **Invariants** | Soundness over-approximation, representation bound, determinism, refinement integrity (refinement never removes an alias edge; truncation and freezing may only add). |
+| **Relations** | Points-to (→_pt), unification (≡), footprint (→_fp), mod/ref (→_mr). |
+| **Failure behavior** | If the input contains an operation whose address expression cannot be classified under the type system, its region is the universal region U and MayAlias(U, r) = true for all r. The analysis never fails; it degrades. |
+| **Complexity** | L0: O(n · α(n)). L1: O(n log n). L2: O(n² / w) time (bounded-round; unbounded worst case O(n³ / w)), O(n² / w) words of bitsets. |
+| **Correctness** | Every state edge required by the ET-SoN Conflict relation exists in the constructed IR; no unschedulable chain cycles are introduced beyond loop-carried state through StatePhi nodes. |
+
+### 6.3 Region-Class Model
+
+**Abstract memory.** The heap and stack of one function invocation are abstracted as a finite set of abstract locations L, partitioned into region classes R. Each abstract location belongs to exactly one region class.
+
+**Base regions.** Every function's partition contains at least:
+- The universal region U: all memory whose provenance is unknown at the service level. MayAlias(U, r) = true for all r ∈ R.
+- The global region G_mem: static and extern storage.
+- One stack region S_f per address-taken local aggregate f (non-address-taken locals are not memory at this level).
+- One argument region A_i per pointer-typed incoming argument i.
+
+**Fresh regions.** Each Allocate node receives a distinct fresh region class a_i at L0. Fresh regions are merged into their escape target by escape facts: if the allocation escapes into region r, the fresh region is unified with r (the allocation's storage is reachable through r's pointer set). A non-escaping allocation keeps its distinct region, which is what enables stack promotion (catalogue optimization 151) and store-to-load forwarding within the allocation (catalogue optimization 179) downstream. Escape facts at L0 come from a conservative front-end summary computed over the pre-IR representation: an allocation is non-escaping only if the front-end proves that no reference to it is stored to memory, passed to a call, returned, or captured by a closure; every other allocation escapes. Escape facts over-approximate true escape at every level (invariant 7): an under-approximate escape fact would split one object's accesses across two non-aliasing region classes and miscompile the state chains.
+
+**Representation cap.** The cap |R| ≤ 32 is enforced by a fixed, deterministic merge sequence, evaluated in O(1) per merge step and O(n log n) worst case for the whole sequence: (1) fresh regions are first projected onto their escape targets (escape projection, above); (2) if |R| > 32 remains, all stack regions merge into one; (3) then all argument regions merge into one; (4) then remaining refinement classes merge in ascending layout-key hash order, adjacent pairs first, until |R| = 32. U and G_mem are never merged away. The sequence is identical at every level, so determinism (invariant 3) holds without any cost-weighted selection, which would be infeasible within the per-level budgets.
+
+**Lattice over levels.** Region classes refine as levels increase: L1 may split a class by type/layout key; L2 may split further by field and context. Refinement is monotone: every L2 class is a subset (in abstract-location terms) of exactly one L1 class, which is a subset of one L0 class. Downstream consumers receive the level they request plus the parent map, so facts can be projected down.
+
+### 6.4 Points-To Constraint System
+
+**Locations and variables.** Let V be the set of address-taken variables, allocation sites, and formal parameters; each v ∈ V is an abstract location. Pointer-typed expressions get abstract location sets via constraints.
+
+**Constraint kinds** (over abstract locations, following Andersen):
+- Base(v, l): v may point to location l (from initialization).
+- Incl(v, w): the points-to set of v is a subset of the points-to set of w (copy/assignment).
+- Load(v, w, off): v obtains the points-to set stored at (*w + off).
+- Store(w, v, off): the points-to set at (*w + off) receives the points-to set of v.
+
+**L0 solver: equality-based unification (Steensgaard).** Constraints are normalized to unification: Incl, Load, and Store collapse to unify the relevant location representatives (with offset collapsing: field-insensitive). Union-find with path compression solves the system in O(n · α(n)). The resulting equivalence classes are the base partition of L.
+
+**L2 solver: inclusion-based (Andersen).** Constraints are solved to fixed point with per-location points-to bitsets over location representatives, worklist driven:
+- Propagation: when the points-to set of a representative changes, dependent Load/Store constraints are re-applied.
+- Field sensitivity: locations are cloned per field offset for aggregate types with known layout (offset-indexed representatives); unknown offsets fall back to the base representative.
+- Context sensitivity: call-string depth 1. Callee summaries are computed bottom-up in the call graph; at a call site from context c, summary effects are instantiated with the caller's actuals. Recursion cycles use the bottom-of-cycle summary (fixed-point over strongly connected components computed by Tarjan's algorithm).
+- Complexity: unbounded inclusion solving is O(n³ / w) time in the worst case: constraint firings are bounded by the total points-to set growth Σ|pt(v)| = O(n²), each costing O(n / w) word operations on n-bit bitsets. The T4 service therefore runs a bounded-round variant: the worklist is processed in at most R rounds (constant, default 2, deterministic FIFO discipline seeded in constraint order; within a round, each constraint fires at most once, sweep semantics rather than drain-until-empty); representatives whose constraints remain unsatisfied after round R, and sets exceeding the element cap K = ⌈n / w⌉, project onto the universal region U. Total time is O(R · n² / w) = O(n² / w), which is class 2, and space is O(n² / w) words for the bitsets. Both guards only enlarge MayAlias (a sound over-approximation); the round budget and the FIFO discipline make the result deterministic (invariant 3).
+
+**Type-based filter (L1).** L1 skips the points-to system entirely: region classes are derived by hashing a layout key per access site (pointee type identity, allocation-site identity for Allocate, argument identity for parameters, global identity for globals). Two sites share a region class iff their layout keys unify under nominal type identity. This reproduces type-based aliasing rules (distinct nominal types do not alias unless a common underlier is declared) in O(n log n) for hashing and sorting. L1 is the tier T3 "simple alias analysis" pass; L2 is the tier T4 "full alias analysis" pass (Tiered Compilation System document, §6.4).
+
+### 6.5 Service Levels and Tier Mapping
+
+| Level | Input | Algorithm | Cost | Runs at |
+|---|---|---|---|---|
+| L0 | Pre-IR operation set (front-end lowering) | Steensgaard unification | O(n · α(n)) | IR construction (before state chains exist) |
+| L1 | Valid ET-SoN graph | Type/layout-key partition | O(n log n) | Tier T3 (class 1) |
+| L2 | Valid ET-SoN graph | Andersen, field-sensitive, context k=1 | O(n² / w) | Tier T4 (class 2) |
+
+- L0 exists because ET-SoN construction must emit state edges while building the graph (construction cost O(|AST| · |R|) per the ET-SoN document); the base partition must therefore exist before the graph does.
+- L1 and L2 run as optimization passes over an existing graph and may re-issue Assign. Footprints only shrink under refinement; because Valid_IR invariant 2 requires each state edge's region class to lie in both endpoints' footprints, re-assignment must re-derive the per-region state chains for the refined classes (re-threading) in the same pass that consumes the new facts. With re-threading, invariant 2 is restored by construction; invariant 5 (schedulability) is preserved because the refined chains are subchains of the original ones.
+- A pass requesting L2 on a function that will not be compiled past T3 is rejected by the tier policy (Tiered Compilation System document, §6.4); the request falls back to L1 facts.
+- Budget compliance at T4 is provided by the bounded-round and set-cap mechanisms of §6.4, not by trusting the worst case of unbounded Andersen (O(n³ / w)); a measured overrun against the class-2 budget still triggers the fallback of invariant 6.
+
+### 6.6 MayAlias Computation and Footprints
+
+**MayAlias.** Given the solved system:
+
+    MayAlias(r₁, r₂) = true  ⟺  r₁ = r₂  ∨  ∃ l₁ ∈ r₁, l₂ ∈ r₂: l₁ →_pt* l₂ ∨ l₂ →_pt* l₁
+
+where →_pt* is reachability in the abstract points-to graph at the served level. At L1 the relation degenerates to type-key equality plus declared underlier sharing. The relation is stored as a |R| × |R| bit matrix (32 × 32 bits), computed once per Assign, with O(1) lookup.
+
+**Footprints.** For each effectful node n with address operand(s) or call semantics:
+
+    footprint(n) = ⋃ { region(addr_expr) : addr_expr of n }  ∪  call_footprint(n)
+
+where call_footprint(c) = Mod(c) ∪ Ref(c) from §6.7. footprint(n) is stored as the u32 bitmask in the node header (ET-SoN document, §6.7). Loads and stores to a fresh non-escaping region have singleton footprints; the StatePhi machinery then keeps that region's chain local, which is the mechanism the conflict relation exploits.
+
+**Consistency with the Conflict relation.** ET-SoN §6.4 defines Conflict via MayAlias over the regions of the two nodes. This document guarantees the relation's input properties: reflexivity (region(n) ⋈ footprint), symmetry, and soundness. ET-SoN owns the rest (write-write, read-write, barrier, and atomic ordering logic).
+
+### 6.7 Mod/Ref Summaries
+
+**Summary computation.** For each function f in bottom-up call graph order (SCC-condensed for recursion):
+
+    Mod(f) = regions of direct stores/atomics in f  ∪  ⋃_{c ∈ calls(f)} Mod(c) ∩ indirect-escape(c)
+    Ref(f) = regions of direct loads in f           ∪  ⋃_{c ∈ calls(f)} Ref(c) ∩ indirect-escape(c)
+
+The escape filter projects callee effects onto caller regions through the actuals: a callee store into parameter p contributes to the caller only if p's points-to set (at the served level) intersects the caller's regions. At L1 the projection is type-key based; at L2 it uses the points-to sets.
+
+**Call-site summaries.** ModRef(c) at a call site c is ModRef(callee) specialized by the actuals: constant-folded when the actual is a known allocation (its fresh region absorbs the callee's effects on that parameter). Summaries are memoized per (callee, context) at L2 and per callee at L0/L1.
+
+**Consumers.**
+- Catalogue optimization 174 (Mod/Ref analysis) consumes these summaries directly.
+- Write-barrier elimination (catalogue optimizations 160, 161) consumes Mod together with GC generation facts.
+- The GC Interaction Subsystem and deopt machinery consume Mod to decide which safepoint maps must be complete at call boundaries.
+
+### 6.8 Interface Contract
+
+```
+trait AliasFacts {
+    fn assign(&mut self, g: &Graph, level: Level) -> AliasResult;
+    // AliasResult { regions: Vec<RegionId>, region_of: NodeMap<RegionSet>,
+    //               may_alias: BitMatrix, parent_map: LevelProjection }
+
+    fn modref(&self, call_site: NodeId) -> (RegionSet, RegionSet);
+
+    fn fresh_region(&self, alloc_site: NodeId) -> RegionId;   // Pre-escape-merge class
+
+    fn universal(&self) -> RegionId;                          // U, always present
+}
+```
+
+Contracts with consumers:
+- **ET-SoN construction (L0):** consumes region_of to thread per-region state chains and StatePhi_r nodes; consumes MayAlias only implicitly via the Conflict relation.
+- **Optimizer memory passes (L1/L2):** consume MayAlias, footprints, and ModRef; must not mutate the graph between Assign and consumption without requesting re-assignment (no incremental mode; snapshots are cheap relative to pass budgets).
+- **Vectorization analysis:** consumes MayAlias restricted to the loop body's memory ops (Vectorization Analysis Subsystem document, §6.5); must receive L2 facts for legality proofs at T4, or emit runtime disambiguation checks when only L1 is available.
+
+### 6.9 Validity Invariants
+
+Valid_Alias(F) holds iff all of the following hold:
+
+**1. Soundness.** For every pair of memory accesses (m₁, m₂) in the function: if the semantics of the source language permit m₁ and m₂ to touch the same byte, then MayAlias(region(m₁), region(m₂)) = true. False positives are permitted; false negatives are violations.
+
+**2. Representation.** |R| ≤ 32; every region class is reachable in the class list; footprint bitmasks fit u32.
+
+**3. Determinism.** For fixed input graph, level, and service configuration, two runs produce identical (R, region, MayAlias, ModRef) output.
+
+**4. Refinement integrity.** On the same input, refinement never removes an alias edge present at the lower level; bounded-round truncation and set-cap freezing may only add edges (a sound over-approximation). The parent map projects each refined class onto its lower-level parent, with truncated or frozen classes projected as universal.
+
+**5. Totality.** Assign, MayAlias, footprint, and ModRef are total functions on their domains; unknown provenance maps to U, never to an error.
+
+**6. Cost compliance.** Each level's measured cost is within its budget of §6.2 (O(n · α(n)), O(n log n), O(n² / w) respectively); exceeding the budget is a violation of the tier contract and the pass must fall back to the lower level.
+
+**7. Fresh-region discipline.** Every Allocate node's region is a fresh class at L0; after escape projection, every non-escaping allocation retains a distinct class; every escaping allocation's class is unified with exactly one escape target. Escape facts over-approximate true escape at every level; any under-approximation is a violation of this invariant.
+
+**8. Universal region completeness.** U exists in every partition; MayAlias(U, r) = true for all r; no node with unclassifiable provenance has a footprint excluding U.
+
+### 6.10 Representation and Cost Model
+
+**Storage.** Union-find (L0): O(n) cells. Layout-key table (L1): hash map of key → class id, O(n) entries. Points-to bitsets (L2): per representative, n/w words, O(n² / w) words total. MayAlias matrix: 32 × 32 bits. Footprints: u32 per effectful node (already in node headers). ModRef summaries: per callee and per call site, two u32 bitmasks each.
+
+**Cost accounting.**
+- L0: O(n · α(n)) time, O(n) space.
+- L1: O(n log n) time (key hashing and sort), O(n) space.
+- L2: O(n² / w) time and space in the worst case; SCC condensation adds O(n + e) once per call graph.
+- ModRef: O(|call graph| · n / w) with memoization; per-call-site lookup O(1) (two bitmask loads).
+
+**Re-analysis policy.** Passes that mutate memory structure (allocation elimination, sinking) invalidate footprints of touched nodes only; a full Assign is required if allocation sites are added or removed (fresh-region discipline). The invalidation is conservative: footprints may only widen after mutation, and widened footprints preserve soundness at the cost of state-chain locality.
+
+---
+
+
+# Vectorization Analysis Subsystem — Complete Design Document (v1)
+
+## 0. Document Control and Design Scope
+
+**Component:** Vectorization Analysis Subsystem
+
+**Version:** 1.0
+
+**Role:** Transforms optimized scalar ET-SoN into Vector IR. Owns vectorization legality (dependence analysis over alias facts), profitability (cost model over target resources), SLP packing, loop vectorization with masking and epilogues, and runtime disambiguation via multi-versioning. Vector IR is its output format; all vectorization decisions are encoded in the emitted graph.
+
+**Design Status:** Complete specification.
+
+**Scope:** This document defines the analysis pipeline, legality tests, profitability model, SLP algorithm, the ET-SoN-to-Vector-IR transform, and the multi-versioning protocol. It does not define:
+- The Vector IR node set and validity rules it emits (Vector IR document)
+- The alias facts it consumes (Alias Analysis Subsystem document)
+- The target cost tables it consults (Target Machine Description Subsystem document)
+- Concrete vector width selection (deferred to Machine IR lowering per the Vector IR document)
+
+**Normative References:**
+- Allen, R. and Kennedy, K. "Optimizing Compilers for Modern Architectures" (dependence analysis, distance and direction vectors)
+- Banerjee, U. "Dependence Analysis for Supercomputing" (dependence testing inequalities)
+- Larsen, S. and Amarasinghe, S. "Exploiting Superword Level Parallelism with Multimedia Instruction Sets" (SLP)
+- Vector IR document, §6.5 (node semantics the transform must produce)
+
+**Known Limitations:**
+- Dependence testing is restricted to affine subscript expressions; non-affine access patterns reject the loop rather than speculate.
+- Innermost-loop vectorization only; outer-loop and loop-nest (multidimensional) vectorization are not implemented.
+- Polyhedral transformations (catalogue optimization 215) are not part of this subsystem; affine tests serve only as dependence pre-filters.
+- Floating-point reductions require relaxed FP flags on the source operations (REASSOC), per the Vector IR reduction well-formedness invariant.
+
+---
+
+## 1. Goals, Non-Goals, and Constraints
+
+### Goals
+
+1. Vectorize every loop and basic block whose vectorization is legal and profitable, and reject the remainder without degrading them.
+2. Encode every vectorization decision explicitly in Vector IR: loop structure, masks, reductions, shuffles, gather/scatter, alignment, and strides (Vector IR constraint: no implicit vectorization).
+3. Guarantee legality by static proof when dependence and alias facts permit, and by runtime disambiguation checks (multi-versioning) otherwise.
+4. Preserve observable behavior: masked lanes must not access memory, per-lane exceptions must match scalar semantics, and FP flag sets must be carried onto vector nodes.
+5. Produce width-polymorphic Vector IR with a satisfiable width constraint set, deferring concrete width to the backend.
+6. Fit the tier complexity budget: SLP is a class-1 pass (T3); loop vectorization is a class-2 pass (T4).
+
+### Non-Goals
+
+1. Selecting concrete vector widths (Machine IR lowering).
+2. Parallelizing across threads (catalogue optimization 211/212; not this subsystem).
+3. Polyhedral loop transformation (catalogue optimization 215).
+4. Interprocedural vectorization decisions (decisions are per function, using summaries from the alias subsystem).
+
+### Constraints
+
+- Recognition over the whole function: O(|N|). Per-loop dependence testing: O(p²) where p is the number of candidate access pairs in the loop body after region-class pre-filtering, p ≤ |body|. SLP: O(|block| · VL) with VL the candidate pack width bound.
+- The transform must run within the Vector IR construction budget: O(|N_ETSoN| · |L|), |L| vectorized loops (Vector IR document, §6.2).
+- Every emitted graph must satisfy Valid_VecIR; the transform must not emit graphs requiring post-hoc repair.
+- Rejection must leave the ET-SoN graph unmodified (the transform is functional on the input graph; outputs are new graphs or explicit rejections per loop).
+
+---
+
+## 6. Vectorization Analysis Subsystem
+
+### 6.1 Purpose and Domain
+
+The vectorization pipeline consumes an optimized ET-SoN graph and produces a Vector IR graph in which selected loops and straight-line blocks are expressed with vector operations, explicit loop structure, and masks. Its purpose is to concentrate all SIMD decisions in one place, so that downstream stages (instruction selection, register allocation, emission) consume decisions rather than re-derive them.
+
+The pipeline has five stages: recognition, legality, profitability, transform, and verification. Each loop and each block is an independent candidate; a rejected candidate is emitted unchanged (scalar), and a mixed function (some vectorized loops, some scalar) is a normal output.
+
+### 6.2 Mathematical Specification
+
+| Requirement | Specification |
+|---|---|
+| **Domain** | G_ETSoN: valid ET-SoN graphs post-optimization, with alias facts A (L1 or L2) and target description M. |
+| **Codomain** | G_VecIR: valid Vector IR graphs, or per-candidate rejections. |
+| **Definitions** | Candidate: a strongly connected control region (loop) or a basic block (for SLP). Dependence: a pair of memory accesses ordered by possible byte intersection. Distance vector d⃗: per-induction offsets of a dependence. |
+| **Preconditions** | Valid_IR(G_ETSoN). Alias facts at level ≥ L1 for legality; L2 recommended for T4 execution. Target tables M available (latencies, unit occupancies, VL bounds). |
+| **Postconditions** | Output satisfies Valid_VecIR; scalar subgraphs not vectorized are carried over unchanged; ⟦G_VecIR⟧ = ⟦G_ETSoN⟧. |
+| **Invariants** | Legality (no dependence violation within vector width), mask correctness, reduction well-formedness, width constraint satisfiability, observational equivalence. |
+| **Relations** | Loop-carried dependence (→_lc), intra-iteration dependence (→_intra), region-class filter (→_rf), runtime disambiguation (→_mv). |
+| **Failure behavior** | Per-candidate rejection emits the scalar candidate unchanged; the pipeline never fails globally. If the width constraint set is unsatisfiable after transform (width variables are constrained per §6.7 and §6.9), the candidate is rejected and the scalar path is emitted. |
+| **Complexity** | Recognition O(|N|); dependence O(Σ_ℓ p_ℓ²); SLP O(|N| · VL); transform O(|N_ETSoN| · |L|); verification O(|N_VecIR|). |
+| **Correctness** | ⟦G_ETSoN⟧ = ⟦G_VecIR⟧ under the masking and exception semantics of the Vector IR document. |
+
+### 6.3 Pipeline Overview
+
+    Candidates → Recognition → Legality → Profitability → Transform → Verify
+
+1. **Recognition.** Identify loop candidates (ET-SoN Region cycles with a back edge to a single header Region) and block candidates (maximal single-entry, single-exit pure regions) for SLP.
+2. **Legality.** For loops: dependence analysis over memory accesses (§6.5). For blocks: packability analysis (§6.8). Candidates failing legality are rejected unless runtime disambiguation applies (§6.6).
+3. **Profitability.** Cost model over target tables and profile data (§6.7). Negative-benefit candidates are rejected.
+4. **Transform.** Emit Vector IR per §6.9: explicit loop structure, vector ops, masks, reductions, epilogues, multi-versioning dispatch.
+5. **Verify.** Run the Vector IR verifier (Valid_VecIR). A verification failure is an InternalCompilerError: the transform's contract is to emit only valid graphs.
+
+### 6.4 Loop and SLP Candidate Recognition
+
+**Loop recognition.** An ET-SoN loop is a set of Regions forming a cycle through a unique header Region. Recognition computes: header, latch, exits, body (nodes dominated by header, post-dominated by latch), induction variables (Phi nodes with loop-invariant constant stride), and trip count (statically known, symbolic, or profile-estimated from execution counters in ProfileData).
+
+Recognition output is the input shape required by the Vector IR loop structure nodes: LoopHeader, LoopLatch, LoopExit, InductionVar with constant strides. Loops whose induction structure does not match (non-constant stride, multiple headers, irreducible cycles) are rejected. Recognition cost: O(|N|) total via a single dominator-tree pass.
+
+**SLP recognition.** For each basic block, adjacent pure operations of identical opcode and width-compatible operands are grouped into packs of size ≤ VL_max(target). Pack formation follows the SLP algorithm: seed on adjacent same-opcode pairs, extend through isomorphic use chains, stop at shuffles whose cost exceeds the benefit (measured in §6.7). Recognition cost: O(|block| · VL).
+
+### 6.5 Dependence Analysis and Legality
+
+**Access enumeration.** For a loop ℓ, the candidate set C_ℓ is the loop body's memory operations (Load, Store, Atomic*, VecLoad/Store in the pre-transform graph: scalar only). Two accesses (a, b) are candidate pairs iff MayAlias(region(a), region(b)) = true under the served alias level (Alias Analysis Subsystem document, §6.6). The region-class filter eliminates pairs whose regions provably do not intersect; the remaining pairs undergo symbolic testing.
+
+**Dependence test.** For each candidate pair with subscript expressions affine in the loop's induction variables, compute the distance vector d⃗ by solving the subscript equality system:
+
+    index_a(iv⃗) = index_b(iv⃗ + d⃗)
+
+The solution set determines:
+- No integer solution: the accesses are independent; the pair is legal.
+- A unique solution d⃗: legal iff |d⃗_k| ≥ VL for at least one induction k along which the accesses are packed (the dependence distance exceeds the vector width; the Vector IR loop-carried invariant 11 requires exactly this). For the innermost-loop scope of this subsystem, this is the standard |d| ≥ VL test; outer-carried dependences are rejected by the innermost-only restriction.
+- Multiple solutions: direction-vector analysis (Banerjee inequalities); legal iff no solution admits |d⃗_k| < VL on all packed dimensions.
+
+**Exception legality.** The vectorized body must not introduce, remove, or reorder observable traps. Masking alone does not provide this: a masked load tolerates inactive lanes, but the active lanes' fault identity and order, and the store effects that would not have executed in scalar code, can still diverge from scalar semantics. A loop is therefore exception-legal iff every operation in the body is proven trap-free for the lanes it activates. Memory operations are proven by bounds analysis over the affine access function against the underlying allocation, or by a statically trap-free opcode class; arithmetic operations are covered by the source language's trap-mode facts (a body containing a checked-mode trapping operation, such as integer division in checked mode, is rejected); for gather/scatter, the bounds proof covers the full index range of the affine index expression for all lanes. Masked loads and stores then serve only lane overshoot past the trip count (epilogues) and value predication under if-conversion (§6.9 step 5), never speculative trap tolerance. A body containing any operation whose trapping behavior is not so proven is rejected.
+
+**Effect legality.** Loops containing operations with Call, Barrier, or Alloc effects (the Invoke, Safepoint, AtomicRMW, CompareExchange, AtomicLoad, AtomicStore, and Allocate nodes) are rejected: these effects are not lane-parallelizable and the Vector IR node set does not express per-lane effects for them.
+
+**Tier mapping.** Dependence analysis cost is O(p²) in candidate pairs: class 2 (T4). SLP is class 1 (T3): its packs contain only pure operations (E = ∅), which need no dependence test, and the memory-coalescing path of §6.8 proves disjointness syntactically (equal stride, adjacent offsets), not through the region filter.
+
+### 6.6 Runtime Disambiguation and Multi-Versioning
+
+When a candidate pair's dependence is unproven statically (unknown offsets, symbolic bases) but the pair's regions are address-range estimable, the transform may emit a **multi-versioned** region (catalogue optimization 218):
+
+1. Compute address ranges [lo_i, hi_i) per region class involved, as affine functions of the trip count.
+2. Emit the disambiguation check: for each unproven region pair (r₁, r₂), the ranges are disjoint.
+3. Emit two loop versions: the vectorized body, executed when the check holds; the scalar body, executed otherwise.
+4. The check is a guard: its failure must not be deoptimized (it is not speculation; it is a runtime fact). The check executes once per loop entry, cost O(1) per version dispatch.
+
+Multi-versioning is emitted only when the profitability model (§6.7) prices the check below its benefit, and at most one check per region pair per loop (pairs are grouped by region class to bound check count).
+
+### 6.7 Profitability Model
+
+**Cost terms.** Using the Target Machine Description tables (latencies, unit occupancies, VL bounds) and profile estimates (trip counts, branch probabilities from ProfileData):
+
+    Benefit(ℓ) = trip(ℓ) · (Σ_scalar(body) − Σ_vector(body)) − overhead(ℓ)
+
+where:
+- Σ_scalar(body): sum of per-iteration scalar costs from the TMD latency model.
+- Σ_vector(body): vector op costs plus shuffle, mask computation, gather/scatter premiums (gather/scatter priced at their TMD resource occupancy), reduction costs, and induction overhead.
+- overhead(ℓ): epilogue cost (masked tail or scalar remainder), multi-versioning check cost, and any spill pressure delta estimated from the register-class pressure of the packed body.
+
+**Decision rule.** A candidate is vectorized iff Benefit(ℓ) > 0 and the packed width satisfies VL ≤ VL_max(F_active) for the active feature set. Width variables in the emitted IR are constrained: w ≤ VL_max for every feature set that may execute the code, and w divides the trip count where static trip knowledge exists (else masked epilogue).
+
+**Rejection stability.** The profitability computation is deterministic given the same inputs (TMD tables, profile data, alias level). A candidate rejected at T3 under L1 facts may be re-evaluated at T4 under L2 facts; the re-evaluation replaces the scalar body of that loop only.
+
+### 6.8 SLP Transformation
+
+**Packing.** For each pack of adjacent isomorphic operations: emit the corresponding Vec* node (VecAdd, VecMul, ...), attach the FP flag set union of the packed operations (flags are per-node in ET-SoN; packing under differing flags splits the pack), and route operands through shuffles when the operand order requires permutation.
+
+**Memory coalescing.** Adjacent scalar loads/stores with unit-stride addressing merge into VecLoad/VecStore (catalogue optimizations 181, 182) when two conditions hold: the addresses are provably disjoint (equal stride with adjacent offsets and element size ≤ gap, proven syntactically over the affine address expressions), and the alignment of the base pointer satisfies the alignment metadata rule of the Vector IR (power of 2, dividing the address). Alignment inference consumes catalogue optimization 176 results when present on the graph; otherwise alignment metadata is the proven minimum.
+
+**Cross-pack shuffles.** When two packs feed each other with permuted operands, the transform emits explicit VecShuffle/VecBlend nodes with compile-time index vectors; runtime permutations are rejected (dynamic shuffles are representable in Vector IR but the transform does not generate them from scalar code).
+
+### 6.9 Loop Transformation to Vector IR
+
+For a legal, profitable loop ℓ with width w (symbolic or concrete):
+
+1. **Loop structure.** Emit LoopHeader (with trip_count), LoopLatch, LoopExit, and InductionVar nodes per the Vector IR loop-structure semantics; the emitted control graph must satisfy loop-structure well-formedness (Vector IR invariant 4).
+2. **Body mapping.** Pure scalar operations in the body map to Vec* equivalents at width w; operations that cannot map (unsupported opcode) reject the loop.
+3. **Memory mapping.** Unit-stride accesses: VecLoad/VecStore with stride = 1 and inferred alignment. Constant stride k: strided VecLoad/VecStore. Indirect accesses (a[i] = b[idx[i]]): VecGather/VecScatter with the index vector and a mask limited to valid lanes.
+4. **Reduction recognition.** A recurrence whose only loop-carried data edge flows into an associative-commutative reduction over the body maps to VecReduce* with masking; the FP flag set must include REASSOC for floating-point reductions (Vector IR invariant 7), else the loop is rejected.
+5. **Control-flow mapping.** Single-block bodies with internal conditionals are converted by if-conversion: conditions compute masks (VecCompare, MaskAnd/Or/Not), operations become masked (MaskedVecLoad/Store, VecSelect/VecBlend). Bodies whose conditionals contain side effects reject the loop.
+6. **Epilogue.** With static trip count n and w | n: no epilogue. Otherwise: masked tail (mask = iv < n mod w) when masked stores are legal; a scalar remainder loop otherwise.
+7. **Multi-versioning.** When §6.6 applies, emit the version dispatch with both bodies.
+
+**State-token correctness.** Vector memory nodes join the same per-region state chains as scalar operations (Vector IR §6.3); the transform reuses the ET-SoN state edges of the replaced scalar operations, so the Conflict relation and region facts carry over unchanged.
+
+### 6.10 Validity Invariants
+
+Valid_VecAnalysis(T) holds iff all of the following hold for transform T:
+
+**1. Legality.** Every emitted vectorized loop satisfies the dependence conditions of §6.5 statically or via the runtime checks of §6.6; no emitted graph contains a vector width violating a proven dependence distance.
+
+**2. Equivalence.** ⟦G_ETSoN⟧ = ⟦G_VecIR⟧: masked lanes perform no memory access; every operation in a vectorized body is proven trap-free for its active lanes, so per-lane exception behavior matches the scalar program; FP flag sets are preserved (union within a pack only when the union is sound for all packed lanes; otherwise the pack splits).
+
+**3. Rejection safety.** Every rejected candidate appears in the output graph unmodified; the transform never drops or reorders scalar code outside vectorized regions.
+
+**4. Width constraint satisfiability.** The emitted width constraint set is satisfiable for at least one feature set the program may run under; else the candidate is rejected, not emitted unsatisfiable.
+
+**5. Structural completeness.** Every vectorized loop emits the full loop structure (header, latch, exits, induction variables) with the shapes Vector IR invariant 4 requires; no implicit loops.
+
+**6. Determinism.** Given identical inputs (graph, alias level, TMD tables, profile data), the transform output is identical.
+
+**7. Budget compliance.** Measured cost per stage is within §6.2 bounds; exceeding the dependence-analysis budget at T3 (when SLP-promoted pairs exceed the class-1 filter) downgrades the candidate to rejection rather than exceeding the tier budget.
+
+**8. State-chain preservation.** Vector memory nodes inherit the state-chain positions of the scalar operations they replace; no state edge is dropped or added that changes the Conflict-derived ordering of the region.
+
+### 6.11 Representation and Cost Model
+
+**Analysis storage.** Dependence sets: per loop, candidate pairs as (node, node) index pairs with test results, O(p²) entries worst case, pruned by the region filter. Distance/direction vectors: small vectors per proven pair. Pack lists (SLP): per block, arrays of node indices. Profitability working set: per candidate, O(|body|) cost terms.
+
+**Output size.** Vector IR nodes are emitted at O(|body| / w + structure) per vectorized loop; gathers/scatters and shuffles add constant factors per access group. Total graph growth bounded by the Vector IR construction budget O(|N_ETSoN| · |L|).
+
+**Cost accounting.** Recognition: O(|N|). Dependence: O(Σ p_ℓ²) with the region filter reducing typical p_ℓ to the body's same-region accesses. SLP: O(|N| · VL). Transform: O(|N_ETSoN| · |L|). Verify: O(|N_VecIR| + |E_VecIR|) (delegated to the Vector IR verifier).
+
+**Re-analysis policy.** The transform is functional on its input; a changed input graph re-runs the pipeline for the changed candidates. Profile-driven re-evaluation (hotness growth) re-runs profitability only; legality results are cached per (loop, alias level) until the graph mutates inside the loop body.
+
+---
+
+
+# Exception Handling and Stack Unwinding Subsystem — Complete Design Document (v1)
+
+## 0. Document Control and Design Scope
+
+**Component:** Exception Handling and Stack Unwinding Subsystem
+
+**Version:** 1.0
+
+**Role:** Owns the exception table format (EHT), the throw path, the two-phase unwinding protocol, landing pads, and the boundary rules for guest/foreign transitions. Provides the mechanism by which ET-SoN exception edges, capability violations, and guest language exceptions are implemented at runtime, and the table format referenced by the DWARF subsystem's FDE augmentation.
+
+**Design Status:** Complete specification.
+
+**Scope:** This document defines the EH table model, the throw and unwind algorithms, landing pad obligations, and integration contracts with the GC, the deoptimization subsystem, and the FFI boundary. It does not define:
+- The CFI itself (Call Frame Information; specified in the DWARF Debug Information Subsystem document, §6.7)
+- The front-end's exception type hierarchy and matching policy (the mechanism here is type-agnostic; matching compares guest class identifiers supplied by the front-end)
+- Capability semantics (UGB document, §6.4); this subsystem implements the raise path for CapabilityViolation
+- Cleanup and finally-block policy (front-end lowering decides what cleanup code exists; this subsystem executes it)
+
+**Normative References:**
+- Itanium C++ ABI, Exception Handling sections (two-phase unwind model and LSDA structure)
+- DWARF 5, §6.4 (Call Frame Information; the unwinder's frame-recovery substrate)
+- C11 §7.13 (setjmp/jmp_buf semantics for the foreign boundary fallback)
+
+**Known Limitations:**
+- No asynchronous exceptions: exceptions are raised only at defined points (Throw nodes, capability checks, runtime raise stubs); signal-driven interruption is out of scope (consistent with the deoptimization subsystem's limitation on asynchronous deopt).
+- Exception specifications and forced unwinding are not modeled; matching is catch-or-unwind.
+- Cross-image exception sharing (an exception raised in one AOT image caught in another) follows the FFI boundary rules, not a shared table protocol.
+
+---
+
+## 1. Goals, Non-Goals, and Constraints
+
+### Goals
+
+1. Provide a per-function exception table (EHT) mapping each call-site PC to its handler actions and landing pad offsets, referenced from the FDE augmentation data per the DWARF document.
+2. Implement the two-phase unwinding protocol: a search phase with no observable side effects, followed by a cleanup phase that runs landing pads exactly once per frame.
+3. Keep the common no-exception path free of EH overhead and keep the throw path cost proportional to the number of frames unwound, with O(log |call sites|) table lookup per frame.
+4. Guarantee stack scannability at every point of the unwind: the GC may run during unwinding without special support.
+5. Define the guest/foreign boundary rules: guest exceptions do not propagate through foreign frames; foreign exceptions entering guest frames are wrapped.
+6. Cooperate with deoptimization: pending deopt requests are processed at landing pad safepoints; requests targeting already-unwound frames are discarded.
+
+### Non-Goals
+
+1. Define exception types, hierarchies, or matching policies (front-end responsibility).
+2. Zero-cost propagation into interpreted frames beyond the defined frame-chain hooks (T0 walking is via the interpreter frame chain, §6.5).
+3. Asynchronous or signal-driven exception delivery.
+4. Provide the capability model itself; only the raise path for CapabilityViolation is specified here.
+
+### Constraints
+
+- Throw path: O(F · (log |cs| + |act|)) for F unwound frames, cs call-site entries, act action-chain length; CFI evaluation per frame is O(|callee-saved|).
+- Unwinder operations after the throw allocation must not allocate: the unwind context is preallocated, and cleanup and handler bodies run as ordinary guest code with full safepoint support.
+- Every landing pad begins with a safepoint poll; the poll cost is a single flag check per GC Interaction arbitration (≤ 1 cycle fast path).
+- EHT lookup must be total: every PC within a function's ranges maps to (handler, action) or to the explicit no-entry result.
+- Table format must support the compaction obligations of catalogue optimization 146 (shared type tables, delta-encoded call-site ranges).
+
+---
+
+## 6. Exception Handling and Stack Unwinding Subsystem
+
+### 6.1 Purpose and Domain
+
+Exceptions are the fourth edge kind of the IR (E_except: Invoke and Throw to handler Regions; ET-SoN document, §6.5). Lowered code implements those edges through this subsystem: a throw searches the call stack for a handler; the two-phase protocol unwinds intermediate frames, running their cleanups; the landing pad binds the exception object and resumes guest execution.
+
+The subsystem serves three raise sources: guest Throw nodes, runtime raise stubs (capability violations per UGB §6.4, TypeViolation, FFIViolation), and foreign exceptions converted at the FFI boundary.
+
+### 6.2 Mathematical Specification
+
+| Requirement | Specification |
+|---|---|
+| **Domain** | A call stack of frames (T0 interpreted frames, T1 baseline frames, T2+ compiled frames), an exception object, and per-function EHTs. |
+| **Codomain** | Control transferred to a landing pad with the exception object bound; or thread termination if no handler exists. |
+| **Definitions** | EHT(f): exception table of function f. cs(f): call-site table of EHT(f). Action chain: linked filter records per call site. Unwind context: the preallocated state of one unwind operation. |
+| **Preconditions** | Every compiled function with handlers has an EHT; every frame kind has a recovery method (CFI or interpreter frame chain); the exception object is allocated before phase 1. |
+| **Postconditions** | The handler frame's landing pad executes with callee-saved registers recovered, the exception bound to the handler's Phi inputs, and all frames between the throw point and the handler popped exactly once with their cleanups run. |
+| **Invariants** | Lookup totality, phase-1 side-effect freedom, single cleanup execution, unwinder purity (no unwinder allocation), safepoint poll at every landing pad, exception object rootedness, discard-on-unwind for stale deopt requests. |
+| **Relations** | Frame chain (→_frame), call-site containment (pc ∈ [start, end)), action matching (→_match), cleanup continuation (→_resume). |
+| **Failure behavior** | No handler in the stack: the runtime terminates the thread with the uncaught-exception report. CFI missing for a compiled frame: InternalRuntimeError (a Valid_DWARF violation, not an unwind path). |
+| **Complexity** | Throw: O(F · (log |cs| + |act| + |callee-saved|)). Table emit: O(|cs| + |act|) per function with shared action chains. Lookup: O(log |cs|). |
+| **Correctness** | The guest-observable behavior of a throw matches the ET-SoN exception-edge semantics: control reaches the nearest enclosing handler Region; state Phis at the handler receive the exceptional predecessor's state. |
+
+### 6.3 EH Table Model
+
+Per-function table referenced from the FDE augmentation data (DWARF document, §6.7 step 3; the FDE augmentation carries the EHT pointer with the PIC pointer encoding). The EHT serves as the language-specific data area (LSDA) of the Itanium model: the augmentation pointer's target is the EHT. The format:
+
+```
+struct EHT {
+    has_handlers: bool,          // Fast-path bit: functions without handlers skip tables
+    cs_table:     [CallSite],    // Sorted, delta-encoded PC ranges
+    action_tab:   [ActionRec],   // Shared action chain records
+    type_tab:     [ClassId],     // Guest exception class identifiers (shared per unit)
+}
+
+struct CallSite {
+    pc_lo:   u32,                // Range start, relative to function start (delta-encoded)
+    pc_len:  u32,                // Range length
+    action:  u32,                // Index into action_tab; NONE if no handler
+    landing: u32,                // Landing pad offset; NONE if action == NONE
+}
+
+struct ActionRec {
+    filter:  u32,                // Index into type_tab; matches by class identity
+    next:    i32,                // Chain link; -1 terminates
+}
+```
+
+- **Call-site coverage.** The call-site table contains one entry per region of the function that can throw: [start of Invoke/Throw/call sequence, end of the exceptional region). Regions with no throwing operations need no entry; lookup returns the no-entry result.
+- **Type matching.** An action record matches the exception iff the exception's class identity equals type_tab[filter]. Class identity comparison is exact identity, not subtype search; subtype closure is pre-expanded by the front-end lowering into the filter list (the table stores a flat list per handler).
+- **Compaction (catalogue optimization 146).** type_tab is shared across functions in a compilation unit; action chains deduplicate through sharing; pc ranges are delta-encoded. The emitter performs the compaction; this document defines the format constraints the compaction must preserve (sortedness, chain termination, shared-table reference integrity).
+
+### 6.4 Throw Path
+
+1. **Allocate the exception object** (at the throw point, before phase 1; the object is rooted in the unwind context).
+2. **Initialize the unwind context**: current frame pointer, PC, exception object reference, phase marker.
+3. **Search loop (phase 1).** For the current frame f with return PC p:
+   a. Recover the caller frame's registers via the frame-kind recovery method (§6.5).
+   b. If f has no EHT (has_handlers = false): pop, continue.
+   c. Binary-search cs(f) for the entry with p ∈ [pc_lo, pc_lo + pc_len). None: pop, continue.
+   d. Walk the action chain: any filter matching the exception class selects this frame as the handler frame. Record (f, landing) and go to phase 2.
+4. **Cleanup loop (phase 2).** Re-walk from the throw frame to the handler frame:
+   a. For each intermediate frame with an entry: execute its cleanup landing pad (§6.6) with a continue-unwind token.
+   b. At the handler frame: execute the handler landing pad; the pad binds the exception and resumes guest execution.
+
+**CapabilityViolation raise.** A failed capability check in compiled code calls the runtime raise stub with the CapabilityViolation class and the failing capability id; the stub enters the throw path at step 2. The UGB check semantics (UGB §6.4) are preserved: the exception is a guest-visible object.
+
+### 6.5 Frame Recovery Methods
+
+Every frame kind defines how the unwinder recovers its caller's registers and computes the frame's cleanup/handler state:
+
+- **T2+ compiled frames:** recovered via CFI (.debug_frame/.eh_frame FDEs; DWARF document §6.7). CFI must cover every safepoint (DWARF document, invariant 5). Recovery evaluates the frame instructions up to the current PC.
+- **T1 baseline frames:** recovered via CFI as well; the fixed frame layout (T1 document, §6.5) makes the FDE frame instructions static per stencil prologue.
+- **T0 interpreted frames:** recovered via the interpreter's own frame chain (T0 document, §6.3, Frame header and frame chain); no CFI is emitted for interpreter frames. The chain links each interpreted frame to its caller, which may be any frame kind; the frame_kind tag in each frame's header (defined in the T0 document, §6.3, and carried by every frame kind) selects the recovery method.
+- **Foreign frames:** recovered via the foreign ABI's own unwinding data when present. A foreign frame without unwinding data terminates guest unwinding (the boundary rules of §6.9 apply before foreign frames are entered).
+
+**Mixed-stack rule.** A single unwind may traverse T2+, T1, T0, and foreign frames in any order. The frame_kind tag is total: every frame carries one (the header layout is defined in the T0 document, §6.3, instantiated by every tier's frame layout; the T1 document's frame header in §6.5 is that layout instantiated, and compiled T2+ frame prologues emit the same header before the callee-saved saves). A frame whose kind is neither of the four is an InternalRuntimeError.
+
+### 6.6 Landing Pads
+
+A landing pad is machine code reached only by the unwinder. It has a mechanical prefix and, for handler pads, a guest body. The prefix obligations, in order:
+
+1. **Record progress (cleanup pads).** The pad's progress token is recorded at pad entry, before any cleanup body runs; a rethrow from within the body therefore cannot re-run this pad.
+2. **Safepoint poll.** Check the global safepoint state (GC_PENDING per the GC Interaction document, §6.3; the deopt park flag per the Concurrent Deoptimization document, §6.3). GC has strict priority: if a GC safepoint is pending, the pad parks until the GC completes. The pad's PC is registered in the function's safepoint table, so a thread parked at the poll is scannable by the frame's map (T2+ safepoint maps, T1 frame slots, T0 register files).
+3. **Recover callee-saved registers** from the frame's CFI (already computed by the unwinder; the pad restores the ones the guest code will use).
+4. **Process pending deopt requests** per §6.8.
+5. **Bind the exception (handler pads).** The pad materializes the exception reference into the handler Region's expected input (the exception Phi) and its state Phis from the exceptional predecessor's state (ET-SoN exceptional control flow: handler StatePhis receive the exceptional predecessor's state-out).
+6. **Resume.** Jump to the handler Region's code (handler landing pad) or, for cleanups, enter the cleanup body as ordinary guest code, which on completion calls continue-unwind.
+
+**Cleanup bodies.** A cleanup body is front-end-lowered guest code (finally blocks and their equivalents). It runs with full safepoint support and may allocate, call, and throw like any guest code. The unwinder's own operations (context, table walk, CFI evaluation, pad prefix) remain allocation-free (§6.7, §6.10 invariant 4).
+
+**Interpreted frames.** A T0 frame has no machine-code landing pad. Its cleanup or handler executes via the interpreter: the unwinder re-enters the dispatch loop at the cleanup or handler bytecode address taken from the front-end's EH metadata for interpreted code, with the pad obligations (progress token, safepoint poll, deopt processing, exception binding into the frame's exception register (T0 document, §6.3)) performed by the interpreter's dispatch path. The invariants of §6.10 are unchanged.
+
+**Single-execution invariant.** Because the progress token is recorded at pad entry, each cleanup runs at most once per unwind. A rethrow from within a cleanup enters a fresh unwind whose phase 2 consults the token chain and skips pads already entered in ancestor frames.
+
+### 6.7 Interaction with the Garbage Collector
+
+- **No unwinder allocation.** After the exception object is allocated at the throw point, the unwinder's own operations (unwind context, table and CFI walk, pad mechanical prefix) allocate nothing. Guest cleanup and handler bodies are ordinary code and are not covered by this rule.
+- **Rootedness.** The exception object reference lives in the unwind context, which is a rooted location for the GC's stack scanner. The object cannot be collected mid-unwind.
+- **Stack scannability.** Every frame kind exposes a scannable state at every poll point (§6.6 step 2). The GC may start a safepoint while any thread is inside phase 1 or phase 2. A thread in phase 1 runs no guest code, so it reaches phase 2 or thread exit promptly; a thread in phase 2 parks at its next landing-pad poll. Both paths keep the stack scannable: frames above the poll point are mid-unwind but structurally valid.
+- **Barrier compliance.** The unwinder stores only the exception reference and frame metadata; it writes no heap pointers, so no write barriers are required inside the unwinder.
+
+### 6.8 Interaction with Deoptimization
+
+- **Landing pads are safepoints.** The pad poll processes pending deopt requests (park flag) after the GC arbitration step.
+- **Unwound frames.** A deopt request targeting a frame that phase 1 or phase 2 has already popped is discarded: the frame no longer exists, and its deopt metadata is moot. The discard is recorded so the deoptimization subsystem's counters remain accurate.
+- **Handler frame.** If the handler frame itself is the target of a pending request, the request is processed at the pad: the frame's state is materialized to source level per the deoptimization subsystem's state reconstruction protocol (Deoptimization document, §6.6), and the handler executes in the lower tier. The in-flight exception object is part of the thread state carried into the reconstructed lower-tier state, so the handler still receives it.
+- **Throw inside deopt.** A throw raised while a deopt transfer is in progress for this thread follows the normal throw path. The unwinder requires no cooperation from the transfer: the in-progress transfer for the frames being unwound is abandoned (the transfer's reconstruction state is per-request and discarded with it; surviving frames can be re-requested fresh), and the unwind proceeds.
+
+### 6.9 FFI Boundary Rules
+
+- **Guest to foreign.** Guest exceptions do not propagate through foreign frames. At the boundary trampoline (UGB FFI_CALL lowering), guest code runs inside a top-level catch-all: a guest exception escaping into foreign code is converted to an error status (the FFI model's error channel) with the exception object retained in a thread-local pending slot; foreign code observes the error and may query it. Re-entering guest code re-raises the pending object.
+- **Foreign to guest.** A foreign unwinding entering a guest frame converts the foreign error to a guest exception wrapper object at the boundary, which then follows the normal throw path (class: the front-end's foreign-error wrapper class).
+- **Capability attenuation.** Exception objects crossing the boundary carry no capabilities; the pending slot stores the object reference only. This is consistent with the capability model's exclusion of cross-context capability transfer (Capability System document).
+
+### 6.10 Validity Invariants
+
+Valid_EH(E) holds iff all of the following hold:
+
+**1. Lookup totality.** For every function f with handlers and every PC p in f's throwing regions, cs(f) lookup returns an entry or the no-entry result; no PC falls between entries incorrectly (sorted, non-overlapping ranges).
+
+**2. Phase-1 purity.** Phase 1 executes no guest code, mutates no guest-visible state, and allocates nothing; it only reads tables and CFI.
+
+**3. Single cleanup execution.** For any unwind, each frame's cleanup runs at most once, enforced by the progress token recorded at pad entry.
+
+**4. Unwinder purity.** After the exception object is allocated, the unwinder's own operations perform no heap operations; guest cleanup and handler bodies are outside this invariant.
+
+**5. Safepoint compliance.** Every landing pad polls before touching guest state; GC priority over deopt is preserved (GC Interaction arbitration).
+
+**6. Recovery totality.** Every frame kind has a defined recovery method; mixed-stack traversal selects the correct method for every frame.
+
+**7. Exception rootedness.** The exception object remains reachable from rooted locations for the entire unwind.
+
+**8. Deopt discard correctness.** Deopt requests targeting unwound frames are discarded exactly once and never applied to live frames; requests on the handler frame are applied before the handler resumes.
+
+**9. State reconstruction.** The handler's state Phis receive the exceptional predecessor's state tokens; the exception Phi receives the exception object; no other value flows from unwound frames into the handler.
+
+**10. Observational equivalence.** The guest-observable sequence (exception raised, cleanups run in innermost-first order, handler executes) matches the ET-SoN exception-edge semantics of the source program.
+
+### 6.11 Representation and Cost Model
+
+**Table layout.** EHTs are emitted into a dedicated read-only section, referenced from FDE augmentation data. Layout order: EHT headers, call-site tables, action records, shared type tables per compilation unit. Delta encoding keeps the call-site entry at 12 bytes worst case (8 with common range lengths).
+
+**Throw cost.** Phase 1 per frame: O(log |cs|) binary search (functions without handlers: O(1) via has_handlers) plus O(|callee-saved|) CFI evaluation. Phase 2 repeats the walk with landing pad execution. Total: O(F · (log |cs| + |act| + |callee-saved|)). The repeated-throw memo (last handler per return PC) shortens repeated throws from the same site to O(1) for the search step; the memo is keyed by (return PC, code version) and invalidated when the code at that PC is replaced or patched to a different target.
+
+**Table emit cost.** O(|cs| + |act|) per function with shared action chains, executed by the emitter at code-generation time; compaction reduces the per-unit type-table cost to O(|types|) shared.
+
+**Memory complexity.** O(Σ_f (|cs_f| · 12 + |act_f| · 8) + |types| · 4) bytes per compilation unit. Functions without handlers contribute a 1-byte header.
+
+**Hot-path cost.** No-exception cost per compiled function: one has_handlers check per throw-relevant call site is avoided entirely; call sites carry no inline EH data. The cost is the FDE augmentation pointer at load time.
+
+---
+
+
+# T1: Baseline Copy-and-Patch JIT — Complete Design Document (v1)
+
+## 0. Document Control and Design Scope
+
+**Component:** T1 Tier — Baseline Copy-and-Patch JIT
+
+**Version:** 1.0
+
+**Role:** Compiles Universal Guest Bytecode to native code by copying pre-compiled stencil templates and patching their holes. Provides fast startup compilation with no optimization passes, collects profiling data for higher tiers, supports inline caches, and hands off to T2+ per the tiered compilation policy.
+
+**Design Status:** Complete specification.
+
+**Scope:** This document defines the stencil model, the compilation pipeline, the register and frame model, inline cache and specialization policy, profiling infrastructure, deoptimization integration, and tier transition interfaces. It does not define:
+- The UGB instruction set and capability model it compiles (UGB document)
+- The T0 interpreter that feeds it bytecode and profiling data (T0 document)
+- The tier transition policy and thresholds (Tiered Compilation System document, T2 through T5)
+- The deoptimization transfer mechanism (Deoptimization Subsystem document)
+- Stencil generation from target tables (Target Machine Description Subsystem document; the Code Emission Subsystem produces the stencil bytes)
+
+**Normative References:**
+- Brunthaler, S. "Inline Caching Meets Quickening" (ECOOP 2010) (inline cache state machines in compiled code)
+- Standard template-JIT literature on stenciling and copy-and-patch compilation
+- Itanium C++ ABI (frame layout conventions for CFI-compatible frames)
+- UGB document §6.3-6.4 (instruction encoding, capability checking)
+
+**Known Limitations:**
+- Fixed register window: no register allocation beyond the fixed assignment; long live ranges spill at stencil boundaries, increasing memory traffic relative to T2+.
+- No cross-instruction scheduling, no redundant-load elimination, no specialization beyond type guards and inline caches.
+- Stencil bank memory footprint scales with target feature sets; each active feature set holds one bank.
+- Jump threading, trace selection (catalogue optimization 203/204), and bytecode-level peephole specialization are deferred to higher tiers.
+
+---
+
+## 1. Goals, Non-Goals, and Constraints
+
+### Goals
+
+1. Compile a UGB function to native code in O(|bytecodes|) with a target of ~10 µs per function, per the tier taxonomy's T1 definition.
+2. Produce code with fixed frame layout and complete frame maps: every UGB register is recoverable at every instruction boundary, enabling T1-to-T0 deoptimization without liveness analysis.
+3. Preserve UGB capability semantics in compiled code: every instruction's required capabilities are checked exactly as UGB check_capabilities specifies.
+4. Collect the same profiling data categories as T0 (execution counts, type feedback, branch outcomes, IC statistics, call-site statistics) with the same sampling discipline, flowing into tier transitions and T2+ compilation.
+5. Support inline caches with in-place patching and bounded escalation to generic stubs.
+6. Provide on-stack replacement (OSR) entry stubs for T0-to-T1 loop transitions and clean entry points for call transitions.
+
+### Non-Goals
+
+1. Optimization passes of any tier T2+ kind (no dataflow, no redundancy elimination, no scheduling).
+2. Speculation beyond profile-derived type guards and inline cache state (per the deoptimization subsystem's T1 fallback rule).
+3. Register allocation quality (fixed assignment only).
+4. Compiling anything other than UGB bytecode (no IR input; T2+ consume ET-SoN, T1 consumes UGB directly).
+
+### Constraints
+
+- Compilation cost: O(|bytecodes|) with per-instruction constant c_t1 ≈ 30-100 ns (stencil copy plus patching); the 10 µs target covers functions up to ~165 bytecodes at the 60 ns nominal rate.
+- Every compiled function must carry a complete frame map at every safepoint; incomplete maps are a validity violation.
+- All fixups are intra-function or resolved through the emitter's relocation model against runtime symbols; no unapplied patches at install time.
+- Compiled code must respect GC load/write barriers at the same points T0 does (heap accesses go through the same barrier stencils).
+- Install is atomic: compiled code becomes visible via a single pointer swap per the tiered system's installation rule.
+
+---
+
+## 6. T1: Baseline Copy-and-Patch JIT
+
+### 6.1 Purpose and Domain
+
+T1 is the first compiled tier. Its purpose is to remove interpreter dispatch overhead for warm code while keeping compilation nearly free. The copy-and-patch method achieves this: for each UGB opcode, pre-compiled machine-code stencils (produced offline from target tables) are concatenated into the function's code buffer; their holes (constants, branch targets, IC state, capability masks, frame offsets) are patched with the function's specific values.
+
+T1 occupies the tier between the T0 interpreter and the T2 O(1)-pass tier. It receives UGB plus T0's accumulated ProfileData; it emits native code plus frame maps, profiling counters, and deopt metadata; it installs via the tiered system's code table.
+
+### 6.2 Mathematical Specification
+
+| Requirement | Specification |
+|---|---|
+| **Domain** | UGB function B (validated canonical bytecode with capability environment; canonical means pre-rewriting, see §6.3), ProfileData P from T0, stencil bank S for the active feature set F_active. |
+| **Codomain** | Compiled code C_1: native instruction sequence with frame map, profile counters, deopt metadata, and entry/OSR stubs. |
+| **Definitions** | Stencil: pre-compiled byte sequence with typed patch sites. Patch: assignment of a concrete value to a site. Frame map: (UGB register → frame slot) at every safepoint. |
+| **Preconditions** | B passes UGB validation; S covers every opcode of B (including generic fallbacks); P is well-formed or absent. |
+| **Postconditions** | C_1 satisfies Valid_T1 (§6.10); ⟦C_1⟧ = ⟦B⟧ under the UGB capability environment. |
+| **Invariants** | Stencil totality, patch completeness, frame-map completeness, capability-check equivalence, barrier compliance, observational equivalence, install atomicity. |
+| **Relations** | Bytecode-to-stencil selection (→_sel), patch application (→_patch), profile flow (→_profile), deopt fallback (→_deopt). |
+| **Failure behavior** | Compilation failure (unsupported opcode with no generic stencil, patch out of range, OOM): the function remains at T0 and the request is re-queued per the tiered system's fallback rule. No partial installs. |
+| **Complexity** | Compile: O(|B|) time, O(|B| · s̄) code size where s̄ is mean stencil size. Install: O(1) pointer swap. Deopt to T0: O(|frame|) per the deoptimization subsystem. |
+| **Correctness** | For all inputs, executing C_1 produces the same observable behavior as interpreting B (including capability violations, exceptions via the EH subsystem, and GC-visible state at safepoints). |
+
+### 6.3 Stencil Model
+
+**Stencil bank.** For each target feature set F (TMD document, §6.8), the stencil bank S_F is generated offline at image build time:
+
+```
+struct Stencil {
+    code:        &[u8],        // Machine code bytes
+    patches:     &[PatchSite], // Typed holes
+    frame_delta: i32,          // Stack adjustment of this stencil
+    safepoint:   bool,         // Stencil boundary is a safepoint (calls, loops, allocs)
+}
+
+struct PatchSite {
+    offset: u32,
+    kind:   PatchKind,   // Imm32 | Rel32 | RegHint | ICState | CapMask | FrameOff
+}
+```
+
+- Stencils are produced by the Code Emission Subsystem from Machine IR snippets built against the TMD; each stencil is relocation-clean (intra-stencil fixups resolved at generation).
+- Every UGB opcode has at least: a generic stencil (no specialization) and, where profile-derived specialization applies (arithmetic on tagged values, TYPE_CHECK, property access), specialized variants keyed by the specialization class.
+- Stencils are indexed by the canonical (pre-rewriting) UGB opcode set: T0's runtime opcode rewriting and super byte codes (T0 document, §6.6-§6.7) are interpreter-local and never appear in compiled input; T1 compiles the canonical image, and profiling counters reference canonical bytecode indices.
+- Specialization classes are fixed by the bank: SpecClass(op, key) where key ∈ {IntTag, FloatTag, None} for arithmetic, {Monomorphic(cache_id), Generic} for property access, {Predicted(tag), Unconditional} for TYPE_CHECK.
+
+**Selection rule.** compile selects for each UGB instruction i: stencil = S_F[op(i), key(P, i)], where key(P, i) derives the specialization class from T0's profiling data (type feedback, IC state). A missing specialized stencil selects the generic one; selection never fails.
+
+### 6.4 Compilation Pipeline
+
+1. **Scan.** Single linear pass over B. Compute per-instruction stencil selections and the frame slot assignment (§6.5). Cost O(|B|).
+2. **Emit.** Copy stencil bytes into the code buffer in bytecode order; emit the prologue stencil (frame setup, CFI-compatible layout) and epilogue stencil (restore, return). Inter-function references (runtime stubs, raise stubs, GC barriers) are emitted as relocations against runtime symbols per the emitter's relocation model.
+3. **Patch.** Apply each patch site:
+   - Imm32/FrameOff: constants and frame offsets from the slot assignment.
+   - Rel32: intra-function branch targets (patch = target offset − site offset − 4); out-of-range patches reject compilation and fall back to T0 (no branch islands at T1).
+   - ICState: offset of the site's entry in the function's IC table (§6.6).
+   - CapMask: the capability mask required by the instruction's UGB capability list.
+   - RegHint: register preference hints recorded but never required (the fixed assignment is stencil-static).
+4. **Metadata.** Attach the frame map, the per-function IC table (§6.6), the safepoint table (stencil boundaries with safepoint = true), deopt metadata (§6.8), profiling counter addresses (§6.7), and the EHT reference if the function has handlers (Exception Handling and Stack Unwinding Subsystem document, §6.3).
+5. **Install.** Register entry and OSR entry points; make the code visible by the tiered system's atomic installation step.
+
+### 6.5 Register and Frame Model
+
+**Register window.** The bank defines a fixed window W of caller-saved machine registers (size per TMD; typically 6-10). UGB virtual registers map to frame slots; the window holds the working set of the current stencil boundary: operands are loaded from slots, computed in W, and stored back per stencil. No liveness analysis is performed; each stencil declares its loads and stores.
+
+**Frame layout.** Fixed-shape prologue:
+
+```
+Frame layout (T1):
+  [return address]            // pushed by call
+  [callee-saved registers]    // per ABI, saved by prologue stencil
+  [frame header]              // frame-kind tag, function id, caller fp, safepoint base
+  [UGB register slots]        // one slot per UGB register, fixed offsets
+  [spill/scratch]             // stencil scratch area
+```
+
+- The layout is CFI-compatible: the prologue stencil's FDE frame instructions are static per bank, so T1 frames unwind via CFI (Exception Handling and Stack Unwinding Subsystem document, §6.5) with no per-function CFI generation.
+- **Frame map.** Because every UGB register has a fixed slot, the frame map is a constant table per function (register i → offset o_i). Safepoint completeness (invariant 3) is structural: all slots are scannable (tagged values through the GC's tagging rules), and the map is identical at every safepoint.
+- **Barrier compliance.** Load stencils targeting reference values embed the GC's load barrier sequence and store stencils targeting reference fields embed the GC's write barrier sequence (GC document, §6.10 load barriers, §6.7 write barriers); the GC document mandates barriers for all reference accesses at T1. Barrier elision (catalogue optimizations 160-161) is a T2+ optimizer capability over ET-SoN with alias facts; T1 performs none.
+
+### 6.6 Inline Caches and Specialization
+
+**IC model.** Each cached UGB site (property access, call) owns an entry in the function's IC table, stored in the code metadata block, not in the activation frame: one entry per cached site, at a static offset known at compile time. The entry holds (key_id, target, state word), where key_id is a u32 index into the runtime's resolved-key table. The resolved-key table is a rooted runtime structure scanned by the GC; IC entries themselves contain no heap references, so code metadata is pointer-free and requires no scanning or relocation updates (liveness of the metadata block is governed by the GC Interaction document's metadata rules). The stencil's ICState patch site is filled at emit time with the entry's offset. Stencils implement the T0 IC state machine in native code, matching T0's per-function side-table precedent (T0 document, §6.12): monomorphic fast path (compare key, hit target), miss path (call the runtime IC machinery, which updates the entry in place), megamorphic path (generic call stencil).
+
+- **In-place patching.** The runtime updates IC table entries and Rel32 call targets in installed code (catalogue optimization 240), bounded by the patch slots the stencil declares. Patching is atomic per site (word-sized store) and never changes stencil boundaries, so safepoint tables and frame maps stay valid. Because IC state persists across activations, a patched monomorphic fast path serves every subsequent activation, not just the patching one.
+- **Escalation policy.** T1 does not recompile itself. When an IC escalates past its stencil's path capacity, the site settles on the generic stencil permanently (for that installation). Escalation is recorded in ProfileData and taken into account by T2+.
+- **Type-guard speculation.** TYPE_CHECK with SpecClass Predicted(tag) emits a guard: compare the value tag; on mismatch, deoptimize to T0 (§6.8). This is T1's only speculation, and it is driven by T0's type feedback. Unconditional TYPE_CHECK stencils raise the guest exception (TypeViolation) instead, per UGB semantics.
+
+### 6.7 Profiling Infrastructure
+
+T1 collects the same ProfileData categories as T0 (T0 document, §6.8), at compiled speed:
+
+- Execution counts: loop-header stencils increment the loop counter; call-site stencils increment the site counter. Only these two categories increment per execution.
+- Branch outcomes: conditional-branch stencils increment (taken, not_taken) counters, sampled per the same sampling discipline as T0 (every Nth execution for expensive-to-collect categories).
+- IC statistics and call-site statistics: updated by the IC machinery on miss paths (hits are counted at transition time from the same counters T0 uses).
+
+Counters are atomically incremented (T0 §6.8 concurrency rule); profile flows to tier transitions and T2+ compilation through the tiered system's profile-preservation mechanism. T1 profiling overhead target: ≤ 2% of interpreted time for the same function. Straight-line execution counts are derived at transition time (hotness weighting per the Tiered Compilation System document, §6.6).
+
+### 6.8 Deoptimization Integration
+
+**Triggers.** T1 deoptimizes to T0 when: (a) a type-guard stencil fails (profile-derived speculation violated); (b) the runtime invalidates the function (class or shape redefinition, breakpoint installation); (c) a capability environment revocation (CAP_REVOKE) makes a patched assumption stale; (d) the deoptimization subsystem's park flag is raised at a T1 safepoint with a request targeting this function.
+
+**Transfer.** The frame map (constant per function) converts frame slots to T0 interpreter state: every UGB register is in a known slot; the PC maps per instruction boundary (the safepoint table's boundaries are bytecode-aligned because each stencil corresponds to exactly one bytecode). The deoptimization subsystem performs the transfer (Deoptimization document, §6.6); T1 supplies only the metadata. The in-flight exception object, when one exists, is carried into the reconstructed state per the EH subsystem's contract (Exception Handling and Stack Unwinding Subsystem document, §6.8).
+
+**Speculation hygiene.** Per the deoptimization subsystem's correctness rule, no T1 speculation carries over to T0: the failing guard's assumption is recorded in ProfileData, and the corresponding specialization key is disabled for future T1 installations of that function (recompilation selects the generic stencil).
+
+### 6.9 Tier Transition Interfaces
+
+- **T0 → T1 (calls).** The tiered system's transition triggers (execution-count and loop-iteration thresholds, T0 document §6.10) enqueue a T1 request. T1 compiles from B plus P; install replaces the function's entry; existing T0 frames continue or are deoptimized per the tiered system's frame policy.
+- **T0 → T1 (OSR entry).** For hot loops, T1 provides an OSR entry stub: the stub takes the T0 register file and PC, stores them into the T1 frame layout's slots (the layouts are register-aligned by construction: UGB register i has one slot in both), and jumps to the loop-header stencil. The stub is per loop header and is emitted at compile time. The state transfer and frame replacement are owned by the deoptimization machinery; the stub is T1's interface to it.
+- **T1 → T2+.** On promotion, the tiered system enqueues compilation from the merged profile; T1 code remains installed until T2+ code installs atomically. T1 provides no interfaces to T2+ other than the profile data and the frame maps for any frames that must deoptimize during T2+ installation.
+
+### 6.10 Validity Invariants
+
+Valid_T1(C_1, B) holds iff all of the following hold:
+
+**1. Stencil totality.** Every bytecode of B selected a stencil (specialized or generic); no opcode lacks coverage in the active bank.
+
+**2. Patch completeness.** Every patch site of every selected stencil is patched exactly once before install; all Rel32 values are in range; no unapplied holes remain in installed code.
+
+**3. Frame-map completeness.** The frame map covers every UGB register at every safepoint of C_1; safepoint boundaries are bytecode-aligned; all slots are scannable per the GC's tagging rules.
+
+**4. Capability equivalence.** For every instruction with a non-empty capability list, C_1 performs a check semantically equal to UGB check_capabilities for that instruction; a failed check raises CapabilityViolation through the EH raise path.
+
+**5. Barrier compliance.** Every reference load and store in C_1 passes through the GC barrier sequences (GC document, §6.10 and §6.7); T1 performs no barrier elision.
+
+**6. Observational equivalence.** ⟦C_1⟧ = ⟦B⟧: same values, same exceptions (via the EH subsystem), same capability violations, same GC-visible state at safepoints, same profiling-visible behavior categories.
+
+**7. Install atomicity.** Installed code is complete (all patches applied, metadata attached) before the entry pointer is published; no thread observes partial code.
+
+**8. Speculation hygiene.** All speculation in C_1 is profile-derived (type guards, IC state); every guard failure records its assumption and disables the corresponding specialization for recompilation.
+
+**9. Metadata correctness.** Deopt metadata maps every frame slot to the correct UGB register per instruction boundary; IC table entries carry valid initial state; EHT references point to valid tables; counter addresses point to the function's ProfileData.
+
+**10. Fallback safety.** Any compilation failure leaves the function at T0 with no partial state: no installed code, no stale profile attributions, no half-attached metadata.
+
+### 6.11 Representation and Cost Model
+
+**Code buffer.** One buffer per compiled function: stencil bytes, then the metadata block (frame map table, per-function IC table, safepoint table, deopt metadata, counter references, EHT reference). Patch sites are addressed by offsets recorded at emit time.
+
+**Stencil bank.** Per feature set: bank header, per-opcode stencil lists (generic first, specialized by class), patch-site descriptor tables. Bank memory: O(|opcodes| · Σ_stencils); typical banks measure in the hundreds of kilobytes per feature set.
+
+**Cost accounting.**
+- Compile: O(|B|) time (selection O(1) per instruction from the bank; emit O(s̄) copy; patch O(1) per site). c_t1 ≈ 30-100 ns per bytecode: 10 µs for a ~165-bytecode function at the 60 ns nominal rate.
+- Code size: O(|B| · s̄), s̄ ≈ 10-40 bytes per stencil.
+- Install: O(1) (pointer swap). Deopt to T0: O(|frame|) per the deoptimization subsystem.
+- Profiling overhead: O(1) per counter hit, sampled for expensive categories.
+
+**Recompilation policy.** T1 never recompiles itself for optimization; recompilation occurs only after invalidation (§6.8 trigger b/c) or escalation-driven generic selection, and only through the tiered system's queue with fresh profile.
+
+---
+
