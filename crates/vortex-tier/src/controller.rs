@@ -242,29 +242,35 @@ impl Controller {
         invocations: u64,
         loop_iterations: u64,
     ) -> Option<Request> {
-        let mut inner = self.inner.lock().expect("controller lock");
-        let fs = inner.functions.entry(method).or_insert(FunctionState {
-            tier: Tier::T0,
-            invocations: 0,
-            loop_iterations: 0,
-            deopts: 0,
-        });
-        fs.invocations += invocations;
-        fs.loop_iterations += loop_iterations;
-        let hotness = fs.invocations + 10 * fs.loop_iterations;
-        let Some(next) = fs.tier.next() else {
-            return None;
+        // Phase 1: update hotness and decide the promotion under the
+        // controller lock; the tier advances here so the next promotion
+        // compares against the new threshold (monotonic taxonomy, 6.6).
+        let (hotness, seq, id, next) = {
+            let mut inner = self.inner.lock().expect("controller lock");
+            let fs = inner.functions.entry(method).or_insert(FunctionState {
+                tier: Tier::T0,
+                invocations: 0,
+                loop_iterations: 0,
+                deopts: 0,
+            });
+            fs.invocations += invocations;
+            fs.loop_iterations += loop_iterations;
+            let hotness = fs.invocations + 10 * fs.loop_iterations;
+            let next = fs.tier.next()?;
+            let base = fs.tier.threshold_to_next().unwrap_or(u64::MAX);
+            // Adaptive thresholds: backlog raises the bar (6.6).
+            let backlog = self.backlog.load(Ordering::Relaxed) as u64;
+            let effective = base.saturating_mul(1 + backlog / 1000);
+            if hotness < effective {
+                return None;
+            }
+            fs.tier = next;
+            let id = inner.next_id;
+            inner.next_id += 1;
+            inner.seq += 1;
+            (hotness, inner.seq, id, next)
         };
-        let base = fs.tier.threshold_to_next().unwrap_or(u64::MAX);
-        // Adaptive thresholds: backlog raises the bar (6.6).
-        let backlog = self.backlog.load(Ordering::Relaxed) as u64;
-        let effective = base.saturating_mul(1 + backlog / 1000);
-        if hotness < effective {
-            return None;
-        }
-        let id = inner.next_id;
-        inner.next_id += 1;
-        inner.seq += 1;
+        // Phase 2: enqueue with hotness-over-cost priority (6.8).
         let request = Request {
             id,
             method,
@@ -276,7 +282,7 @@ impl Controller {
         let priority = hotness as f64 / (request.nodes as f64).max(1.0);
         self.queue.lock().expect("queue lock").push(QueueEntry {
             priority,
-            seq: inner.seq,
+            seq,
             request: request.clone(),
         });
         self.backlog.fetch_add(1, Ordering::Relaxed);
@@ -367,7 +373,11 @@ impl Controller {
         loop {
             match request.state() {
                 ReqState::Installed | ReqState::Cancelled => return true,
-                _ => {}
+                // Queued, Compiling, CancellationRequested, Cancelling, and
+                // Completed all keep the caller waiting.
+                _ => {
+                    let _ = request.state;
+                }
             }
             if Instant::now() >= deadline {
                 return false;
@@ -412,7 +422,18 @@ fn worker_loop(
         }
         let popped = {
             let mut q = queue.lock().expect("queue lock");
-            q.pop()
+            if q.is_empty() {
+                None
+            } else {
+                // Highest hotness-over-cost first; ties by submission seq.
+                q.sort_by(|a, b| {
+                    b.priority
+                        .partial_cmp(&a.priority)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                        .then(a.seq.cmp(&b.seq))
+                });
+                Some(q.remove(0))
+            }
         };
         match popped {
             None => {

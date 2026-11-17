@@ -10,6 +10,7 @@
 // CEP:ASSUMES Inputs are UGB assembly text or method indices.
 // CEP:COST O(input) per command.
 // CEP:EVIDENCE cargo run -p vortex-cli -- demo
+//! VORTEX driver binary.
 use vortex_nv1::Value;
 use vortex_ugb::{assemble, verify, CapReq, Constant, Method, Program};
 

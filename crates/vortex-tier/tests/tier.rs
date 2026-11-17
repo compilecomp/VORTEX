@@ -180,7 +180,6 @@ fn invalidation_publishes() {
     let map = Arc::new(InvalidationMap::default());
     let snapshot = map.snapshot(7);
     let m2 = map.clone();
-    let s2 = snapshot.clone();
     let handle = std::thread::spawn(move || {
         m2.invalidate(7);
     });
