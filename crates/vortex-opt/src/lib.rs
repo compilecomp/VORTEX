@@ -30,7 +30,8 @@ pub use emit::{
     SymBind, SymType, SymVis, Symbol,
 };
 pub use link::{
-    apply_relocations, assign_addresses, resolve_symbols, Layout, LinkError, SymbolTable,
+    apply_relocations, apply_relocations_with_plt, assign_addresses, build_got_plt,
+    resolve_symbols, GotPlt, Layout, LinkError, SymbolTable,
 };
 pub use mach::{allocate_registers, select, MInstr, MOp, MachError, MachineFunction, Unit};
 pub use passes::{run_pipeline, PassStats};

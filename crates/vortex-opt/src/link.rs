@@ -176,6 +176,61 @@ pub fn assign_addresses(objects: &[Object]) -> Result<Layout, LinkError> {
     Ok(layout)
 }
 
+/// The generated dynamic-linking structures (Linker design 6.11).
+// CEP:WHAT Holds the GOT image, PLT stubs, and jump-slot metadata.
+// CEP:WHY Undefined functions bind through the PLT/GOT at load time.
+// CEP:STATUS complete
+// CEP:FAILURE Cannot fail.
+// CEP:ASSUMES Stubs are 16 bytes; slots are 8 bytes.
+// CEP:COST O(|imports|).
+// CEP:EVIDENCE cargo test -p vortex-opt gotplt
+#[derive(Debug, Clone, PartialEq)]
+pub struct GotPlt {
+    /// .got contents: one 8-byte slot per dynamic import.
+    pub got: Vec<u8>,
+    /// .plt contents: one 16-byte stub per dynamic import.
+    pub plt: Vec<u8>,
+    /// Stub address by symbol name.
+    pub stub_addrs: BTreeMap<String, u64>,
+    /// (symbol, GOT slot address) pairs in slot order.
+    pub jump_slots: Vec<(String, u64)>,
+}
+
+/// Builds the GOT and PLT for the given dynamic imports.
+// CEP:WHAT Lays PLT stubs that jump through their GOT slots.
+// CEP:WHY Calls to imported functions indirect through the GOT so the
+//        loader (and lazy binding) can redirect them.
+// CEP:STATUS complete
+// CEP:FAILURE Cannot fail.
+// CEP:ASSUMES got_base is 8-aligned and distinct from plt_base.
+// CEP:COST O(|imports|).
+// CEP:EVIDENCE cargo test -p vortex-opt gotplt
+pub fn build_got_plt(imports: &[String], plt_base: u64, got_base: u64) -> GotPlt {
+    let mut got = Vec::new();
+    let mut plt = Vec::new();
+    let mut stub_addrs = BTreeMap::new();
+    let mut jump_slots = Vec::new();
+    for (i, name) in imports.iter().enumerate() {
+        let slot_addr = got_base + 8 * i as u64;
+        let stub_addr = plt_base + 16 * i as u64;
+        // jmp *[rip + disp32]: FF 25 disp32; disp = slot - (stub + 6).
+        let disp = (slot_addr as i64 - (stub_addr + 6) as i64) as i32;
+        plt.extend_from_slice(&[0xFF, 0x25]);
+        plt.extend_from_slice(&disp.to_le_bytes());
+        // Pad the stub to 16 bytes with NOPs.
+        plt.extend(std::iter::repeat_n(0x90u8, 10));
+        got.extend_from_slice(&0u64.to_le_bytes());
+        stub_addrs.insert(name.clone(), stub_addr);
+        jump_slots.push((name.clone(), slot_addr));
+    }
+    GotPlt {
+        got,
+        plt,
+        stub_addrs,
+        jump_slots,
+    }
+}
+
 /// Applies relocations into the merged contents (6.6), returning the
 /// patched section contents.
 // CEP:WHAT Resolves each relocation (S+A or S+A-P) and patches bytes,
@@ -207,6 +262,11 @@ pub fn apply_relocations(
             let value: i64 = match r.ty {
                 RelocType::Absolute64 => s_addr as i64 + r.addend,
                 RelocType::Pc32 => s_addr as i64 + r.addend - p as i64,
+                // Without GOT/PLT structures a PLT reference binds
+                // directly to the definition.
+                RelocType::Plt32 => s_addr as i64 + r.addend - p as i64,
+                // Dynamic slot metadata: nothing to patch in .text.
+                RelocType::JumpSlot => 0,
             };
             let text = layout
                 .contents
@@ -226,13 +286,16 @@ pub fn apply_relocations(
                     }
                     let _ = v;
                 }
-                RelocType::Pc32 => {
+                RelocType::Pc32 | RelocType::Plt32 => {
                     if value < i32::MIN as i64 || value > i32::MAX as i64 {
                         return Err(LinkError::RelocationOverflow {
                             offset: r.offset,
                             value,
                         });
                     }
+                }
+                RelocType::JumpSlot => {
+                    // Dynamic metadata carries no text field.
                 }
             }
             // Patch the merged contents in place.
@@ -247,12 +310,110 @@ pub fn apply_relocations(
                 RelocType::Absolute64 => {
                     patched[r.offset..r.offset + 8].copy_from_slice(&(value as u64).to_le_bytes());
                 }
-                RelocType::Pc32 => {
+                RelocType::Pc32 | RelocType::Plt32 => {
                     patched[r.offset..r.offset + 4].copy_from_slice(&(value as i32).to_le_bytes());
+                }
+                RelocType::JumpSlot => {
+                    // Dynamic metadata carries no text field to patch.
                 }
             }
             contents_out.insert(".text".to_string(), patched);
         }
     }
+    Ok(contents_out)
+}
+
+/// Applies relocations with GOT/PLT support (6.11): Plt32 references to
+/// dynamic imports bind to their PLT stubs; defined symbols bind
+/// directly. JumpSlot entries carry no text patch.
+// CEP:WHAT Patches text with stub-aware PLT binding.
+// CEP:WHY Imported calls must reach the loader-controlled stubs.
+// CEP:STATUS complete
+// CEP:FAILURE LinkError::Unresolved for a Plt32 name with neither a
+//        definition nor a stub.
+// CEP:ASSUMES .text is the only relocated section in this model.
+// CEP:COST O(|relocs| + |text|).
+// CEP:EVIDENCE cargo test -p vortex-opt gotplt
+pub fn apply_relocations_with_plt(
+    objects: &[Object],
+    layout: &Layout,
+    symbols: &SymbolTable,
+    got_plt: &GotPlt,
+) -> Result<BTreeMap<String, Vec<u8>>, LinkError> {
+    let mut contents_out: BTreeMap<String, Vec<u8>> = BTreeMap::new();
+    let section_addr = layout.section_addresses.get(".text").copied().unwrap_or(0);
+    let text = layout
+        .contents
+        .get(".text")
+        .ok_or_else(|| LinkError::Unresolved {
+            name: ".text".to_string(),
+        })?;
+    let mut patched = text.clone();
+    for obj in objects {
+        for r in &obj.relocs {
+            match r.ty {
+                RelocType::JumpSlot => {
+                    // Dynamic metadata; the loader fills GOT slots.
+                }
+                RelocType::Plt32 => {
+                    let target = got_plt
+                        .stub_addrs
+                        .get(&r.symbol)
+                        .copied()
+                        .or_else(|| {
+                            layout
+                                .symbol_addresses
+                                .get(&r.symbol)
+                                .copied()
+                                .or_else(|| symbols.addresses.get(&r.symbol).copied())
+                        })
+                        .ok_or_else(|| LinkError::Unresolved {
+                            name: r.symbol.clone(),
+                        })?;
+                    let p = section_addr + r.offset as u64;
+                    let value = target as i64 + r.addend - p as i64;
+                    if value < i32::MIN as i64 || value > i32::MAX as i64 {
+                        return Err(LinkError::RelocationOverflow {
+                            offset: r.offset,
+                            value,
+                        });
+                    }
+                    patched[r.offset..r.offset + 4].copy_from_slice(&(value as i32).to_le_bytes());
+                }
+                _ => {
+                    let s_addr = layout
+                        .symbol_addresses
+                        .get(&r.symbol)
+                        .copied()
+                        .or_else(|| symbols.addresses.get(&r.symbol).copied())
+                        .ok_or_else(|| LinkError::Unresolved {
+                            name: r.symbol.clone(),
+                        })?;
+                    let p = section_addr + r.offset as u64;
+                    match r.ty {
+                        RelocType::Absolute64 => {
+                            patched[r.offset..r.offset + 8]
+                                .copy_from_slice(&(s_addr as i64 + r.addend).to_le_bytes());
+                        }
+                        RelocType::Pc32 => {
+                            let v = s_addr as i64 + r.addend - p as i64;
+                            if v < i32::MIN as i64 || v > i32::MAX as i64 {
+                                return Err(LinkError::RelocationOverflow {
+                                    offset: r.offset,
+                                    value: v,
+                                });
+                            }
+                            patched[r.offset..r.offset + 4]
+                                .copy_from_slice(&(v as i32).to_le_bytes());
+                        }
+                        RelocType::Plt32 | RelocType::JumpSlot => {
+                            // Handled above.
+                        }
+                    }
+                }
+            }
+        }
+    }
+    contents_out.insert(".text".to_string(), patched);
     Ok(contents_out)
 }

@@ -55,6 +55,11 @@ pub enum RelocType {
     Absolute64,
     /// 32-bit PC-relative: value = S + A - P.
     Pc32,
+    /// 32-bit PC-relative into the PLT: value = PLT(S) + A - P
+    /// (R_X86_64_PLT32); binds directly to S when S is defined.
+    Plt32,
+    /// Dynamic jump-slot metadata for a GOT entry (R_X86_64_JUMP_SLOT).
+    JumpSlot,
 }
 
 /// ELF section types used by the emitter.
@@ -306,6 +311,8 @@ pub fn emit_elf(obj: &Object) -> Elf {
             | match r.ty {
                 RelocType::Absolute64 => 1u64,
                 RelocType::Pc32 => 2u64,
+                RelocType::Plt32 => 4u64,
+                RelocType::JumpSlot => 7u64,
             };
         rela_bytes.extend_from_slice(&info.to_le_bytes());
         rela_bytes.extend_from_slice(&r.addend.to_le_bytes());
