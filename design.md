@@ -8741,3 +8741,1474 @@ Valid_T1(C_1, B) holds iff all of the following hold:
 
 ---
 
+# Part IV — Runtime and Ecosystem Subsystems (Added Set, v1)
+
+The following eight subsystem documents extend the design document. They are appended as a set and cross-reference each other (DICE ↔ Phoenix ↔ Aegis ↔ Kernelis ↔ Chronon ↔ Babel Heap ↔ CAMT ↔ Dualis); every such internal cross-reference resolves within this set. Each document also lists its **owned extensions** to pre-existing subsystem documents — an owned extension is a concrete, specified requirement on the owning document, not an assumed interface. The indicative list (each document's Scope section is authoritative): TMD memory-hierarchy tables; UGB id-preserving redefinition protocol, allocation-effect bit, and FFI effect summaries; alias-fact epochs and CompilationRequest delta fields; capability token-format mask; GC barrier undo log, evacuation-activity signal, and trigger overrides; tier-transition forcing hooks; deopt-metadata held-monitor fields and proof-reference serialization; EH execute-root trampoline, exception pool, and cancellation deadline amendment; T0/T1 profile-counter categories; scheduling anti-reorder treatment of guard nodes; GC-maintained token side tables and reader-writer monitor protocol. The set was adversarially red-teamed by four independent reviewers and then voted on by a five-member panel (the four red-team personas plus an integration editor); each document's Revision Notes section records the breaks incorporated.
+
+---
+
+# Differential and Incremental Compilation Subsystem — Complete Design Document (v1)
+
+## 0. Document Control and Design Scope
+
+**Component:** Differential and Incremental Compilation Subsystem (DICE)
+
+**Version:** 1.0
+
+**Role:** Makes recompilation a delta operation. Maintains persistent, hash-consed ET-SoN graphs across compilation runs; computes graph deltas when UGB units are redefined or profiles shift; and re-derives optimization results (GVN, LICM, and downstream analysis facts) only for the affected subgraphs via a dependency-graph-driven red-green evaluator. Target: recompilation work proportional to the delta, not the graph — microsecond-scale updates where the delta is small.
+
+**Design Status:** Complete specification.
+
+**Review:** Adversarially red-teamed (reviewer R1). Principal breaks incorporated: per-function interning replaces the global node table; UGB instruction-id anchors replace offset anchors; floating-point flag sets and trap qualifiers enter the content key; the equivalence/audit story is re-specified (differential testing + read-poisoning, not query-result diffing); alias-fact epoch stamping is defined as an owned extension; the enqueue gate is computed at event time. See Revision Notes at the end.
+
+**Scope:** This document defines the persistent node model, the anchor-key mapping from UGB redefinition events to IR deltas, the dependency graph and red-green evaluator, and the incremental variants of GVN and LICM. Cross-references to the other seven subsystem documents added in this set (CAMT, Dualis, Kernelis, Aegis, Chronon, Babel Heap, Phoenix) refer to documents appended in the same set. It does not define:
+- The ET-SoN graph semantics (ET-SoN document)
+- The full GVN and LICM algorithms whose results DICE re-derives incrementally (catalogue optimization 25 for GVN; catalogue optimization 79 for LICM); DICE preserves their semantics, not their whole-graph execution
+- The alias analysis consumed as a versioned query input (Alias Analysis Subsystem document; the fact-epoch extension DICE requires is defined in §6.8 here)
+- Guest-language class redefinition delivery semantics (UGB document; the id-preserving redefinition protocol DICE requires is defined in §6.4 here)
+
+**Normative References:**
+- Rosen, Wegman, Zadeck, "Global Value Numbers and Optimality" (congruence semantics preserved by §6.6)
+- Acar, U. A., "Self-Adjusting Computation" (changeability of dependencies)
+- Hammer et al., "Adapton: Composable, Demand-Driven Incremental Computation" (demand-driven red-green)
+- The Rust compiler's incremental compilation dependency-graph design (red-green reuse with tracked reads)
+
+**Known Limitations:**
+- Incremental mode is profitable only when the delta is small relative to the graph (§6.9 break-even model); below the threshold DICE delegates to full recompilation.
+- Pure-node deltas achieve the best reuse; deltas that touch control/effect chains re-validate larger neighborhoods, and effect-chain deltas additionally trigger a whole-function alias re-Assign (§6.8) — the honest speedup range reflects this.
+- Reuse ends at the optimized ET-SoN graph: scheduling, register allocation, and emission re-run for any function whose optimized graph changed.
+- Hidden reads are the principal soundness risk of any incremental scheme; the mitigation is instrumentation (read poisoning) plus differential testing (§6.10), not proof.
+
+---
+
+## 1. Goals, Non-Goals, and Constraints
+
+### Goals
+
+1. Recompilation latency proportional to the delta: O(|Δ| · log |G|) for pure-node deltas on a graph G with delta Δ.
+2. Structural sharing within a function: unchanged subgraphs are reused verbatim across graph versions; no re-materialization of unchanged regions.
+3. Construction-time GVN for unchanged regions: a re-parsed pure node whose content key already exists in the function's interned table joins its congruence class at O(1), without re-numbering the region.
+4. Incrementalism invisibility: for identical inputs (bytecode, profile version, alias facts), incremental and from-scratch pipelines produce observationally equivalent code (equivalence postcondition §6.2). Incremental mode changes cost, never answers.
+5. Bounded persistent memory: version overhead ≤ 2.5× the flat graph per function; version chains pruned by policy; installed code pins the versions its proofs and metadata reference.
+
+### Non-Goals
+
+1. Replacing the tiered system's cost-benefit model (DICE supplies cheaper recompilation candidates; the Tiered Compilation System document §6.9 still decides).
+2. Incremental scheduling, register allocation, or emission.
+3. Incremental whole-program interprocedural analysis at T5 (catalogue §5 passes re-run whole-function).
+4. Cross-function persistent sharing of effectful graphs (only constants and pure subgraph roots are shared across functions, §6.3).
+5. Distributed or shared compilation caches across processes.
+
+### Constraints
+
+- Interning lookup O(1) expected per node, per-function table.
+- Delta computation from a UGB unit diff: O(|B|) in the redefined unit's bytecode size.
+- Red-green overhead cap: Σ eval(red) ≤ 2 × Σ eval(full) for the affected query set; exceeding the cap falls back to full recompilation.
+- Version pruning must respect installed-code pinning (§6.3): a version referenced by installed code metadata or by an Aegis proof ledger entry is pinned.
+- Determinism: for the same (unit, profile version, alias facts) and the same session-local interning context, node identifiers and query results are identical on every run (session-relative determinism; cross-function interleaving does not affect a function's ids).
+
+---
+
+## 6. Differential and Incremental Compilation Subsystem
+
+### 6.1 Purpose and Domain
+
+Three current mechanisms force whole-function recompilation even when the change is small: class redefinition (UGB units re-delivered), profile shifts that invalidate specialization (deopt metadata records the failed assumption; the requeued compilation re-parses the entire function), and hot-swap deployments (Phoenix). For a large function at T4, full re-parsing plus re-optimization is millisecond-scale; under deopt storms or hot-swap bursts this cost dominates. DICE converts recompilation into a delta: parse the difference, re-derive only the queries whose inputs changed, and hand the tiered system a functionally identical optimized graph at microsecond cost.
+
+The subsystem exposes three services:
+1. `Persist(f, G) → version`: version a function graph; subsequent compilations start from the newest pinned-or-current version.
+2. `Delta(B_old, B_new, P_old, P_new) → NodeDelta`: anchor-based mapping from an id-preserving bytecode diff to a set of killed, added, and changed IR nodes.
+3. `Reopt(f, Δ) → G'`: red-green re-evaluation of optimization queries against the delta; output is a fresh valid graph version.
+
+### 6.2 Mathematical Specification
+
+| Requirement | Specification |
+|---|---|
+| **Domain** | Valid ET-SoN graphs G = (N, E_data, E_ctrl, E_state) with a persisted version v; id-preserving UGB unit diffs (B_old, B_new); profile versions P; alias-fact epochs A. |
+| **Codomain** | New graph version G' sharing unchanged subgraphs with G; a NodeDelta (killed, added, changed); a dependency graph D over queries; updated query results. |
+| **Definitions** | Content key κ(n) of a pure node: (opcode, type, FP flag set F, trap qualifier, κ(inputs) over canonical child ids, constant payload). Anchor key α(n) of an identity node: (UGB instruction id, role). Query q: (id, function, version, inputs, eval). Green q: all input versions unchanged since q's last evaluation. Red q: otherwise. Session: one compilation invocation for one function; interning context is session-scoped. |
+| **Preconditions** | Valid_IR(G^v); the redefined UGB unit verifies (Valid_UGB); alias facts current per their re-analysis policy; all passes of the pipeline are registered in the query registry (§6.5). |
+| **Postconditions** | ⟦G'⟧ = ⟦G_fresh⟧ where G_fresh is the graph produced by the full pipeline from scratch on the same inputs (B_new, P_new, A): same values, same exceptions, same capability checks, same GC-visible state at safepoints. Equivalence is relative to identical inputs; a profile change re-runs all profile-reading queries red on both paths. |
+| **Invariants** | Equivalence testing (1), tracked-read totality (2), sharing bound (3), pinning discipline (4), delta totality (5), overhead cap (6), session determinism (7). |
+| **Relations** | →_dep: query → input (node id, alias-fact epoch, profile version, TMD feature set, type state); ≡_κ: content congruence over pure nodes. |
+| **Failure behavior** | Poisoned-read detection, budget overrun, or unverifiable delta: discard the persisted version, recompile from scratch. Reuse is always subordinate to soundness; DICE never fails the compilation, only the reuse. |
+| **Complexity** | Intern O(1) expected; Delta O(|B|); Reopt O(red queries × their cost), bounded by the overhead cap plus the whole-function costs it triggers (alias re-Assign on effect-chain deltas). |
+| **Correctness** | Green results are reused only when every recorded input version is unchanged; tracked-read totality is enforced by construction (tracked-read API) and audited by read-poisoning instrumentation; the equivalence postcondition is validated by differential semantic testing (§6.10), not by query-result diffing. |
+
+### 6.3 Persistent Node Model
+
+**Two node classes.** Pure nodes are content-interned: the function's interned table maps κ(n) → canonical node; structurally equal pure nodes share storage and value number across versions. Effectful and control nodes are identity nodes: they carry program identity (allocation site, call site, branch) and are interned by anchor key α(n), never by content, because two syntactically identical calls are different program points with different state-token positions (ET-SoN §6.5). The FP flag set F and trap qualifiers are part of κ (invariant-relevant signature components, not payload): a strict float Add and an Add{REASSOC} never share a class.
+
+**Per-function interning.** Each function owns its interned table and version chain; compiler threads therefore never race on shared interning state. Cross-function sharing is limited to interned constants and explicitly exported pure subgraph roots (read-only, published after validation). Session-relative determinism follows: node ids depend only on the function's own inputs and session context (invariant 7), not on compiler-pool interleaving.
+
+**Versions.** A version v = (root ids, epoch, parent). Constructing G' clones only changed nodes and their transitive data users (the re-spine); unchanged subtrees are shared by pointer within the function. A version is immutable after validation; scheduling and register allocation operate on a transient projection of the newest validated version, never on the persistent graph itself.
+
+**Pinning and pruning.** Versions referenced by installed code metadata (deopt metadata, DWARF location lists), by Aegis proof ledger entries, or by live Phoenix migration maps (pins until migration residency reaches zero) are pinned. Unpinned versions are pruned at compiler-session quiescence points (the session checkpoints of the Compilation Cancellation Subsystem document §6.5 are the quiescence points — compiler threads pass through them by construction), coordinated with the code-metadata lifetime rules of the GC Interaction Subsystem document §6.6. A pruned version has no live reader: pending queries on a function hold its session lock.
+
+**Storage.** Per-function interned table: open addressing, 16-byte key digest + 8-byte node reference per slot. Per-node reference counts drive reclamation inside the session. Version chains keep K = 4 unpinned recent versions plus all pinned versions and the newest validated version.
+
+### 6.4 Anchor Mapping and Delta Computation
+
+Anchors ground IR nodes to UGB instructions through stable instruction identities, not byte offsets:
+
+```
+α(n) = (instruction_id, role)   role ∈ {def, branch, call_site, alloc_site, state_phi, guard, …}
+```
+
+**Id-preserving redefinition protocol (required UGB extension, owned here).** UGB redefinition events carry an instruction-level diff in which every preserved instruction keeps its identifier and every inserted instruction receives a fresh identifier; deleted identifiers are retired. The UGB document's verification (§6.9) is unchanged; the protocol adds the id table to the unit's metadata. For units without id tables (legacy), `Delta` returns a total kill — full re-parse, no incremental reuse.
+
+`Delta(B_old, B_new)` aligns instructions by id: retired ids are kills, fresh ids are adds, re-typed anchors are changes. For each killed identity node, its data users are marked changed; for each added node, the graph is reconstructed locally and state chains for touched region classes are re-threaded per the alias subsystem's conservative mutation policy (Alias Analysis Subsystem document §6.10: footprints may only widen). Profile shifts (P_old ≠ P_new) do not kill nodes; they mark profile-reading queries red (§6.5). Loop transformations (peeling, unrolling) duplicate identity nodes with distinct fresh ids — ambiguity cannot arise because ids, not offsets, are the keys, and LICM-driven motion of hoisted nodes does not disturb anchor identity (hoists are recorded as query results over the anchor, not as anchor rewrites).
+
+`Delta` is total: any structure it cannot match confidently is a kill (invariant 5). Kills cost recompute, never correctness.
+
+### 6.5 Dependency Graph and Red-Green Evaluator
+
+Every pass in the compilation pipeline registers queries: `gvn_class`, `licm_facts`, `iv_ranges`, `alias_snapshot`, `peel_decision`, `predication_plan`, `versioning_plan`, `schedule_ready`, and so on. **Registry totality:** every pass of the pipeline must register its queries; a pass with no registered queries forces its function red on any delta (no silent hidden reuse). A query records, through the tracked-read API, every input it reads: node ids, alias-fact epoch, profile version, TMD feature set, type state. The evaluator:
+
+1. Marks red every query reading a changed input (node in Δ, or a bumped version/epoch).
+2. Propagates red along →_dep to dependents.
+3. Evaluates red queries in →_dep topological order, re-recording inputs during evaluation.
+4. Enforces the overhead cap (§6.2 constraint): if violated, abandons incremental mode for the function and recompiles from scratch.
+
+**Hidden-read detection.** Debug and profile builds poison untracked reads: a sentinel address space is readable only through the tracked-read API; any pass reading state outside the API faults in instrumented builds, converting invariant 2 violations from silent miscompiles into loud failures. Release builds pay nothing.
+
+### 6.6 Incremental GVN
+
+For pure nodes, hash-consing is the value numbering: inserting a node with an existing κ folds it into the existing congruence class at O(1); creating a node with a fresh κ opens a new class. This is Rosen-Wegman-Zadeck congruence restricted to the structural hash discipline, preserved incrementally: unchanged regions keep their classes without re-numbering. Deltas re-validate only users of changed nodes (a user's κ changes when an input's canonical representative changes). Loop-carried φ-congruence (the non-pure residue of GVN) is re-derived only for loops containing changed nodes.
+
+### 6.7 Incremental LICM
+
+Invariance facts are keyed (loop header identity, node κ). A fact survives while its loop's body version is unchanged. For changed loops, invariance recomputes for the loop's nodes only; each re-hoisted node re-checks its side conditions: dominance of all exits and the absence of intervening same-region writes per MayAlias facts (Alias Analysis Subsystem document §6.6). Existing hoists keep their recorded proof until an input version goes red, at which point the hoist is undone by re-spine (the hoisted node returns to its anchor position in the new version) and re-derived.
+
+### 6.8 Interaction with Downstream Subsystems
+
+- **Alias facts (owned extension).** AliasFacts.assign results carry a fact_epoch stamp; every re-Assign bumps the function's epoch. DICE consumes the epoch as a query input version. This requires one field on the alias result and one bumped counter — an extension the Alias Analysis Subsystem document's §6.8 interface gains through this set (the interface contract's shape is otherwise unchanged, and its "no incremental re-analysis during mutation" rule stands: DICE requests a fresh Assign and consumes the new epoch; for effect-chain deltas that add or remove allocation sites, that re-Assign is whole-function, and the cost model accounts for it).
+- **Profile:** T0/T1 counter deltas bump the profile version; specialization-dependent queries go red — the mechanism that turns a deopt event into a microsecond re-specialization instead of a millisecond recompile.
+- **Code generation:** any function whose optimized graph version changed re-runs scheduling and emission; unchanged functions skip codegen. **Owned extension:** the CompilationRequest record gains (graph_version, delta_estimate) fields; the redefinition handler computes the delta estimate at event time (Delta runs there anyway), so the tiered system's enqueue gate (§6.9) needs no new estimation pass and the queue's priority formula (Tiered Compilation System document §6.8) is unchanged except for the optional skip-on-unchanged shortcut.
+- **Aegis:** proof ledger entries pin the graph versions their facts were derived on (§6.3 pinning), so ledger resolvability survives pruning.
+- **Phoenix:** consumes `Delta(B_old, B_new)` for migration maps; both subsystems share one anchor mapping so parse-level and migration-level diffs cannot disagree.
+
+### 6.9 Break-Even Model
+
+Incremental mode engages when (|Δ| / |G|) < θ = 0.2 and |G| ≥ N_min = 512 nodes. The gate is evaluated at event time by the redefinition handler (which has already computed Δ) and communicated through the CompilationRequest extension; below N_min the fixed bookkeeping cost dominates and full recompilation is cheaper. The overhead cap (invariant 6) is the dynamic backstop for deltas that turn out larger than predicted.
+
+### 6.10 Validity Invariants
+
+**1. Equivalence by differential testing.** For identical inputs, incremental and from-scratch pipelines produce observationally equivalent code. The acceptance mechanism is a differential semantic harness: execute both outputs on generated inputs and compare observable traces (values, exceptions, capability checks, GC-visible safepoint state). Query-result diffing against a from-scratch run is explicitly *not* the audit mechanism (profile-dependent decisions make it unsound); the harness is run in CI and in the replay-differential mode of Chronon.
+
+**2. Tracked-read totality.** Every query records every input it reads; instrumented builds poison untracked reads (§6.5). A pass reading state outside the tracked-read API fails loudly in instrumented builds.
+
+**3. Sharing bound.** Persistent version storage ≤ 2.5× the flat graph per function.
+
+**4. Pinning discipline.** Versions referenced by installed code metadata, Aegis proof entries, or Phoenix migration maps are pinned; pruning touches only unpinned versions at session quiescence points; a pruned version has no live reader.
+
+**5. Delta totality.** `Delta` is total on UGB diffs; unmatched structure (including units without id tables) is a kill, never a guess. Kills may only cost reuse, never correctness.
+
+**6. Overhead cap.** Σ eval(red) ≤ 2 × Σ eval(full) over the affected query set, including whole-function costs it triggers (alias re-Assign); violation triggers full recompilation.
+
+**7. Session determinism.** For the same inputs and session-local interning context, node ids and query results are identical on every run; compiler-pool interleaving across functions does not affect any function's ids.
+
+### 6.11 Representation and Cost Model
+
+**Storage.** Per-function interned table O(live nodes); dep-graph O(|queries| + |edges|); version chain K + pinned + current.
+
+**Cost accounting.**
+- Intern: O(1) expected per node; O(n) per parse.
+- Delta: O(|B|) per redefined unit.
+- Reopt: O(red queries), capped by invariant 6; effect-chain deltas additionally pay a whole-function alias re-Assign.
+- End-to-end design targets (not measurements): a T3 re-specialization after a deopt event on a function with ≤ 5% pure-node delta re-runs in ~50–200 µs versus ~0.8–4 ms fresh (5–15× on the favorable, common path); effect-chain deltas (call site added) achieve 1.5–3× after the alias re-Assign; the honest worst case is the overhead cap itself, after which DICE equals full recompilation plus O(|G|) bookkeeping.
+
+---
+
+## Revision Notes (post red-team)
+
+1. Per-function interning replaces the global node table (break: cross-thread determinism and prune races); session-relative determinism replaces global id determinism.
+2. Anchors key on UGB instruction ids from an id-preserving redefinition protocol (break: offset anchors die on insertion; peeling/LICM ambiguity); offset-based matching demoted to legacy kill.
+3. κ now includes FP flag sets and trap qualifiers (break: strict/relaxed float nodes could merge — miscompilation).
+4. Equivalence is tested by differential semantic execution; query-diffing removed (break: profile-dependent decisions made the diff audit self-destructing); hidden reads are caught by read-poisoning instrumentation.
+5. Query registry totality: every pass registers; unregistered passes force function-level red (break: peeling/predication/versioning decisions outside the query set).
+6. Alias-fact epochs, CompilationRequest extension fields, and version pinning for proof ledgers are specified as owned extensions rather than assumed to exist.
+7. Honest speedup ranges reduced (5–15× pure-node, 1.5–3× effect-chain) to include alias re-Assign and session bookkeeping costs.
+
+---
+
+# Cache-Aware Memory Transformation Subsystem — Complete Design Document (v1)
+
+## 0. Document Control and Design Scope
+
+**Component:** Cache-Aware Memory Transformation Subsystem (CAMT)
+
+**Version:** 1.0
+
+**Role:** Three cooperating transformations that turn alias-analysis facts, profile data, and a memory-hierarchy cost model into cache-efficient memory access: (a) Gather/Scatter Coalescing — legalizes scattered vector accesses into wide or deinterleaved contiguous accesses when bounds proofs, region classes, strides, and alignment proofs permit; (b) Stride-Predicted Software Prefetch — inserts prefetches (catalogue optimizations 114, 157, 158) driven by runtime stride profiles, gated by alias facts, trip-count proofs, hardware-prefetcher coverage, and a bandwidth budget; (c) Data-Structure Layout Optimization (DSLO) — static, type-level field packing, hot/cold splitting, and false-sharing elimination, extending catalogue optimizations 154 and 156 under statically decidable layout-pinning rules.
+
+**Design Status:** Complete specification.
+
+**Review:** Adversarially red-teamed (reviewer R2). Principal breaks incorporated: shape well-formedness predicate and indexed-shape variant (no silent bogus recipes); static-stride-only GSC legality (profiles removed from GSC); bounds-proof-driven coalescing replaces fault-driven recovery as the default; GC barrier discipline restricts coalescing to primitive element types; prefetch distance derived from the modulo schedule with trip-count bucket versioning; the Memory Hierarchy Extension to TMD is defined here instead of assumed; DSLO is static type-level with descriptor-held layout versions (no object-header changes, no runtime re-layout, no runtime registry); the DSLO profile counters are defined here as owned T0/T1 extensions with a static-only fallback mode; SOA uses a single array-of-planes object. See Revision Notes at the end.
+
+**Scope:** This document defines the MemoryShape algebra, the legalization matrix, the prefetch insertion conditions, the DSLO legality and transformation model, and the TMD Memory Hierarchy Extension tables that this subsystem requires. Cross-references to the other seven subsystem documents added in this set refer to documents appended in the same set. It does not define:
+- The region classes, MayAlias, and field-sensitive facts consumed (Alias Analysis Subsystem document; CAMT is a consumer per its §6.8 interface contract)
+- The vector loop legality and versioning skeleton (Vectorization Analysis Subsystem document §6.5, §6.6; CAMT supplies the coalescing recipes on top and is bound by its invariant that masked lanes perform no memory access)
+- The lane bounds proofs consumed (catalogue optimization 100 machinery and the vectorizer's §6.5 legality tests)
+- The GC object kinds consumed (GC Subsystem document §6.3; the array-of-planes object kind CAMT requires is specified in §6.5 as an owned GC extension)
+
+**Normative References:**
+- Intel 64 and IA-32 Architectures Software Developer's Manual, Vol. 1 (gather/scatter instruction semantics, suppressed-fault forms, prefetch hints, non-temporal hints)
+- ARM Architecture Reference Manual (PRFM non-faulting prefetch semantics)
+- Allen, R. and Kennedy, K., "Optimizing Compilers for Modern Architectures" (dependence-based transformations)
+- MySQL/Go/Rust layout-engineering practice for static structure packing (`@Contended`-class annotations, repr attributes)
+
+**Known Limitations:**
+- No static analysis can know whether data is already resident in L1/L2. The design approximates "do not prefetch what is already cached" by skipping patterns the hardware-prefetcher table covers, by deduplication within the prefetch distance window, and by the bandwidth budget — an approximation, not a guarantee.
+- Software prefetch is a pure hint: it can never be required for correctness and can be counterproductive; the dynamic requalification guard (§6.4) is the mitigation.
+- GSC applies to primitive element types only in v1; coalescing of reference-element vectors requires per-lane barrier sequences (§6.3) and is disabled by default.
+- DSLO is static: already-allocated objects never change layout; mixed-version windows are guarded by descriptor-version compares until Phoenix retires old-layout objects (its layout-unspeculating rule); DSLO cannot help build-time-initialized heaps whose snapshot objects keep their build layout.
+- Profile-driven DSLO (false-sharing terms, dynamic hotness) requires the owned profiling extensions of §6.5; without them, DSLO falls back to static-only mode and false-sharing elimination is disabled.
+
+---
+
+## 1. Goals, Non-Goals, and Constraints
+
+### Goals
+
+1. Coalesce scattered vector accesses into wider contiguous accesses wherever lane bounds proofs, region classes, strides, and alignment proofs permit — with masked-lane access discipline and GC barrier laws preserved.
+2. Insert software prefetches only when profile, alias facts, trip-count proofs, hardware-prefetcher coverage, and bandwidth budget all agree the prefetch is profitable; withdraw them dynamically when the profile disproves the stride.
+3. Reorder, split, and cluster structure fields to pack hot fields into shared cache lines, using statically decidable legality and type-level transformations only.
+4. Every transformation carries a machine-checkable legality certificate; profitability is decided by the Memory Hierarchy Extension tables (§6.2), never by heuristics alone.
+
+### Non-Goals
+
+1. General dependence analysis for loop restructuring (Vectorization Analysis Subsystem document §6.5 owns legality of loop transforms; CAMT consumes its versioning skeleton).
+2. TLB optimization (catalogue optimization 159) and non-temporal store policy (catalogue optimizations 177, 178): consumed as Memory Hierarchy Extension variants.
+3. Cross-object false sharing (adjacent TLAB allocations from different threads): untouched by DSLO; allocation-scheme work is the GC document's territory.
+4. Runtime re-layout of existing objects.
+5. Reference-element vector coalescing by default (§6.3).
+
+### Constraints
+
+- MemoryShape computation must be class 1 at T3 (O(n log n) per loop nest) and at most class 2 at T4 (Tiered Compilation System document §6.4 classification).
+- All exception semantics must be exact: a transformed access raises exactly the exceptions of the original access, attributable to the same element; masked lanes perform no memory access (Vectorization Analysis Subsystem document, validity invariant 2).
+- Prefetch instructions must be semantically pure: no observable effect on values, exceptions, or GC state.
+- DSLO legality must be statically decidable at type level; under-decided cases are pinned (conservative).
+- Region-class soundness is inherited: coalescing may reorder memory operations only within region classes pairwise unrelated by MayAlias, or across a versioning check supplied by the vectorization skeleton.
+- GC barrier law: no transformation may elide a load or store barrier (T1 document validity invariant 5 discipline); coalescing of reference-element accesses is therefore restricted per §6.3.
+
+---
+
+## 6. Cache-Aware Memory Transformation Subsystem
+
+### 6.1 Purpose and Domain
+
+The vector pipeline produces scattered accesses the hardware executes slowly (gather/scatter units are throughput-poor), loops whose misses the hardware prefetcher cannot follow (pointer-chasing, large strides), and structures whose fields straddle cache lines and share them across threads. Each of these is a transformation opportunity with a legality half (may the compiler change this access pattern?) and a profitability half (should it?). The Alias Analysis Subsystem supplies legality facts (region classes, MayAlias, field-sensitive footprints); the Memory Hierarchy Extension (§6.2) supplies the cost model (gather/scatter unit throughput, memory latency classes, bandwidth headroom, hardware-prefetcher coverage, line geometry); runtime profile supplies the stride distributions. CAMT is the subsystem that joins all three and performs the transformations.
+
+### 6.2 Mathematical Specification and the Memory Hierarchy Extension
+
+**Specification.**
+
+| Requirement | Specification |
+|---|---|
+| **Domain** | ET-SoN graphs at T3/T4 (or AOT whole-program graphs) with vector memory operations, loops with IV analysis results and lane bounds proofs, alias facts at the tier's level, stride profiles from T0/T1, and a Memory Hierarchy Extension instance. |
+| **Codomain** | Transformed graphs: coalesced vector accesses (bounds-proven wide/deinterleaved forms with optional fault-suppress variants), inserted prefetch operations, and type-level layout transformations carried in type descriptors. |
+| **Definitions** | AffineShape m = (region r, invariant base b, stride σ, element size e, mask class, alignment a), well-formed iff b is loop-invariant, the index is affine in one IV, and σ is a concrete constant. IndexedShape x = (region r, index-vector descriptor (source of idx[i]), element size e, mask class, base provenance). MaskClass ∈ {trailing, interior}. Rejection rule: any vector memory operation whose shape is neither well-formed affine nor a valid indexed shape is left untouched — an unrepresentable access is never transformed, never guessed. |
+| **Preconditions** | Valid_IR; alias facts current; lane bounds proofs available for widening decisions; profiles available (profiles absent → prefetch and profile-driven DSLO disabled; static-gain DSLO still legal). |
+| **Postconditions** | Observational equivalence: same values, same exceptions attributed to the same source elements, same GC-visible state (barrier per element or per documented vector sequence), same capability checks; performance is the only free dimension. |
+| **Invariants** | Bounds-proof discipline (1), masked-lane discipline (2), alias-safety of reordering (3), prefetch purity (4), pinning totality (5), version coherence (6), budget compliance (7). |
+| **Relations** | σ from IV analysis (slope of the induction variable); w(f_i, f_j) DSLO affinity weights from static effect tracking and optional profile counters. |
+| **Failure behavior** | Any missing Memory Hierarchy Extension entry disables the corresponding transformation and falls back to the original access pattern; CAMT degrades, never fails compilation. |
+| **Complexity** | Shape: O(1) per vector memory op. Coalescing decision: O(1) per shape after table lookup. Prefetch analysis: O(ops) per loop. DSLO affinity: O(F²) per struct (F fields), packing O(F log F). |
+| **Correctness** | Each transformation's legality certificate is a conjunction of facts from the alias subsystem, lane bounds proofs, and the static pinning rules; the pipeline's verifier re-checks the certificate markers before emission. |
+
+**Owned TMD extension — the Memory Hierarchy Model.** The Target Machine Description Subsystem document's known limitations state that memory-hierarchy geometry is not modeled; CAMT owns the extension that removes this gap. The TMD gains a Memory Hierarchy section with these tables (all fields concrete, per feature set):
+
+| Table | Fields |
+|---|---|
+| Cache geometry | line size, L1/L2/L3 sizes and latencies, TLB reach |
+| Gather/scatter unit | throughput λ (elements/cycle), latency, port sharing, per-element fallback cost |
+| Hardware prefetcher coverage | pattern classes (unit-stride sequential, constant stride ≤ k, pointer-chase: none) × working-set ranges → covered y/n |
+| Bandwidth model | sustained bandwidth, prefetch headroom fraction (default 25%), GC-evacuation contention signal source |
+| Line/geometry constants | padding granularity, replication coherence thresholds |
+
+These tables are requirements on the TMD; until they exist for a target, the corresponding transformations are disabled on that target.
+
+### 6.3 Gather/Scatter Coalescing (GSC)
+
+**Shape extraction.** For every vector load/store, extract an AffineShape or IndexedShape per §6.2; unrepresentable accesses are rejected (never transformed). For well-formed affine shapes, σ comes from the induction-variable slope (after strength reduction, catalogue optimization 82), the region from the alias subsystem's field-sensitive region assignment, alignment from alignment inference (catalogue optimization 176).
+
+**Legality — bounds-proof driven (default).** A widening recipe (wide load, deinterleave, broadcast) is emitted only when the widened byte range is proven in-bounds for *all lanes under the mask* by the lane bounds proofs (catalogue optimization 100 machinery; Vectorization Analysis Subsystem document §6.5 trap-freedom discipline). This preserves masked-lane discipline (invariant 2): interior-mask loops widen only when the proven range covers the padded lanes; trailing-mask shapes widen the proved prefix and blend the tail.
+
+**Optional fault-suppress variants.** On targets whose gather/scatter or wide load forms suppress faults (AVX-512-class), widening may exceed the proven range *only* with (a) a post-instruction mask/fault-flag test for interior masks and (b) a recovery path that re-executes the original access element-by-element in the original program order (this reproduces scalar fault identity exactly — the attribution requirement of invariant-grade exception semantics). Recovery spills the original address/index/mask operands; the cost model prices them. Targets without fault-suppress forms never widen past a proven bound.
+
+**Recipe matrix** (Memory Hierarchy tables per target, selected by cost):
+
+| Shape | Recipe | Legality |
+|---|---|---|
+| σ = e (unit) | Wide contiguous load/store (catalogue optimization 181) | bounds-proof over widened range; a ≥ e; trailing mask or proven interior range |
+| σ = k·e, k ∈ {2,3,4} | Deinterleave: k wide loads + lane-select shuffles | bounds-proof over widened range; TMD table entry exists; a ≥ e |
+| σ = 0 (splat) | Broadcast load | bounds-proof; a ≥ e |
+| indexed (a[i] = b[idx[i]]) | Gather/scatter retained, or vectorized compare-and-select recipes where TMD models them favorable | IndexedShape valid; primitive elements |
+| any other | unchanged | rejection rule |
+
+**GC barrier law.** Reference-element coalescing elides per-lane load barriers (GC Subsystem document §6.10) and per-lane SATB/card work (§6.7) — unsound without vector barrier sequences. v1 therefore restricts GSC to primitive element types; reference-lane coalescing requires the vector barrier sequence extension (per-lane color checks folded into lane-select recipes) and is disabled until that extension is specified and priced. Wide stores of references are likewise out of scope in v1 (invariant-grade GC-visible-state postcondition).
+
+**Scatter ordering.** Coalescing a scatter into a wide store reorders element writes; legality requires all target elements in one region class unrelated by MayAlias to everything reordered across (invariant 3), or the vectorization skeleton's versioning check. Faulting wide stores replay the original program order for exact attribution. Scatters over FFI-exposed or capability-pinned raw memory are never coalesced (foreign observers could see reordered stores; the static pinning rules of §6.5 identify such memory).
+
+### 6.4 Stride-Predicted Software Prefetch (SPP)
+
+**Profile input.** Per-memory-op stride histograms from T0/T1 profiling (Tiered Compilation System document §6.7 profile data flow). A stride σ_dom is stable when P(σ_dom) ≥ 0.9 and consistent with static IV analysis where available; profile alone (pointer-chasing with profiled offsets) may also establish stability. Profiles inform SPP only — GSC legality (§6.3) is static-stride-only, so a profile/stride mismatch can never produce wrong lanes.
+
+**Distance from the schedule.** The prefetch distance d is the prologue length of the actual modulo schedule (catalogue optimizations 93/95 — the scheduler computes a resource-correct initiation interval by construction), not a ⌈latency/II⌉ guess. For loops that are not modulo-scheduled, d comes from the Memory Hierarchy latency tables with the scheduler's nominal II. Trip-count-sensitive cases compile two distance variants selected by one trip-count compare (the multi-versioning pattern the vectorizer already emits), so a loop whose trip count varies by orders of magnitude gets a sane distance either way.
+
+**Insertion conditions** — all must hold; any failure disables insertion for that op:
+1. **Region discipline:** the prefetch target and the load share a region class; stores to that region inside the loop are MayAlias-checked against the prefetch window (prefetch is read-only; the concern is wasted bandwidth, not correctness — invariant 4).
+2. **Trip-count feasibility:** trip count ≥ d + 2 by IV proof, or the loop is predicated/versioned accordingly (catalogue optimizations 104, 105).
+3. **Hardware coverage test:** the hardware-prefetcher coverage table is consulted; unit-stride sequential patterns the hardware already covers are skipped. This is the honest approximation of "data not already in L1/L2": static analysis cannot know residency, so SPP refuses to duplicate hardware behavior and defers to the bandwidth budget.
+4. **Deduplication:** no other prefetch for the same region within d·σ lanes.
+5. **Bandwidth budget:** predicted prefetch traffic ≤ the headroom fraction of sustained bandwidth (Memory Hierarchy tables), estimated over the trip-count bucket; a runtime GC-activity guard halves the effective budget while evacuation is active, because concurrent evacuation competes for the same bandwidth — the guard consumes an evacuation-activity signal exposed by the collection policy (GC Subsystem document §6.13), an owned GC extension (one flag/counter); without it the budget runs unguarded and the profile-guard path remains the fallback.
+
+**Variant selection.** Memory Hierarchy feature sets map reuse-distance estimates to prefetch variants (T0/T1/T2/NTA); streaming tails combine with non-temporal stores (catalogue optimizations 177, 178) without double-hinting the same lines.
+
+**Dynamic requalification.** Each prefetch family carries one stride-guard counter (speculation hygiene, mirroring the T1 document's validity invariant 8): a stride change trips the guard, raises a deopt event, and the requeued compilation — cheap under DICE — drops the prefetch for that op.
+
+### 6.5 Data-Structure Layout Optimization (DSLO)
+
+**Static affinity analysis.** Nodes = fields of one type; edge weight w(f_i, f_j) from static co-access (fields touched within one basic-block window or loop body per ET-SoN effect tracking over field-sensitive L2 footprints) plus, when available, profile counters. Ties and absent profiles degrade gracefully: static-only mode still reorders by static co-access and alignment.
+
+**Owned profiling extensions.** Profile-driven DSLO requires two counters the current profiling infrastructure does not collect; CAMT owns their addition to T0 §6.8 and T1 §6.7 categories: (a) field co-access counters (pairs of field offsets touched in the same loop iteration), (b) writer-thread capture (per-field last-writer thread id, sampled). Without the extensions, the false-sharing term is absent and false-sharing elimination is disabled (Known Limitations).
+
+**Transformations (all static, type-level).**
+1. **Field reordering (catalogue optimization 154):** greedy cache-line packing in affinity order, respecting natural alignment, atomic-field alignment, GC header offset, and pinning (below). Padding granularity from the Memory Hierarchy line-size table.
+2. **Hot/cold splitting:** performed as a compiler rewrite at the type level — the object's allocation site allocates the hot record and the cold record together (allocation-time, not lazy): no new allocation point inside loops (preserving vector legality and exception attribution), one allocation site, both records traced as one GC subgraph (cold record referenced from a descriptor-level slot; jointly specified with the GC Subsystem document §6.3 as a two-cell object kind).
+3. **False-sharing elimination (intra-object):** per-line writer clustering with padding to the line boundary; read-mostly field replication per thread only for fields that are (a) relaxed-semantics primitives (non-reference, no ordering requirements — the type/semantics restriction, not a write-rate heuristic) and (b) read-dominant. Replication coherence uses per-thread epoch counters (no shared epoch word — the epoch word itself must not become a false-sharing point).
+4. **SOA conversion:** arrays-of-struct with uniform field-subset access in vector loops convert to a single **array-of-planes object**: one GC object with one header and F plane bases computed from a stride table (owned GC extension specified here; primitive element types only). This keeps GC costs flat (one header, one barrier domain, one relocation unit, planes co-relocated) and turns σ = k·e shapes into σ = e, feeding GSC §6.3 and the vectorizer's unit-stride paths. Legality: no pinned layout, no live interior raw pointers (static rule below), and a Dualis ledger assumption `no_new_uses(type)` guarding open-world re-compilation against later loads touching the old type.
+
+**Layout pinning (legality — static rules only).** A layout is pinned iff any of: explicit-layout declaration; FFI descriptor exposure (UGB document §6.7) — including types *reachable from* FFI-exposed signatures (reference-passing exposes fields, not just aggregates); a raw-pointer or unsafe surface in the type's transitive uses; an atomic or capability-token field with offset assumptions (Capability System Implementation document §6.3); a GC descriptor offset dependency. The rules are decidable at type level; there is no runtime registry, no TOCTOU window, and no false-negative class (invariant 5). Pinned layouts are never transformed.
+
+**Layout versioning.** Every applied transformation bumps the type descriptor's layout version — the version lives in the **type descriptor**, not the object header (no GC header change is required; an object's layout follows its descriptor). Mixed-version access sites guard by descriptor-version compare during transitional windows, and Phoenix owns the retirement of old-layout traffic (its layout-unspeculating rule, §6.7 there). Build-time-initialized heaps keep their build layout for snapshot objects; DSLO applies to new allocations only.
+
+### 6.6 Validity Invariants
+
+**1. Bounds-proof discipline.** Every widening recipe is backed by a lane bounds proof over the widened range, or by a fault-suppress variant with mask test and original-order recovery; unprovable widening is not emitted.
+
+**2. Masked-lane discipline.** Masked lanes perform no memory access except through the fault-suppress variant's proven-equivalent recovery contract (Vectorization Analysis Subsystem document invariant 2 honored).
+
+**3. Alias-safety of reordering.** Memory operations reordered by GSC or SOA conversion lie in region classes pairwise unrelated by MayAlias, or are guarded by the vectorization skeleton's versioning check; region-class soundness is inherited, never strengthened here.
+
+**4. Prefetch purity.** Prefetch instructions have no observable effect on values, exceptions, GC state, or capability checks; faulting prefetch targets are excluded by the Memory Hierarchy tables.
+
+**5. Pinning totality.** No pinned layout is transformed; the pinning predicate is total and static (under-decided = pinned).
+
+**6. Version coherence.** Layout versions live in type descriptors; no accessor code executes against a descriptor version it does not expect without a guard; old-layout objects are never mutated in place.
+
+**7. Budget compliance.** Analyses stay within their tier's complexity class; prefetch traffic stays within the headroom budget (with the GC-activity guard applied). Overruns disable the transformation, not the compilation.
+
+### 6.7 Representation and Cost Model
+
+**Storage.** Shape records: O(V) for vector memory ops. Stride histograms: one bucketed histogram per profiled op. Affinity graphs: O(F²) per struct during the pass. Layout versions: one field per type descriptor. DSLO profile counters: two new T0/T1 categories (§6.5).
+
+**Cost accounting.**
+- GSC: shape O(1) per op; decision O(1) per shape after table lookup; recipe emission O(k) loads/shuffles.
+- SPP: O(ops) analysis per loop; O(1) emission per prefetch; +1 compare per trip-count-bucket versioned family; guard overhead O(1) per family.
+- DSLO: O(F² + F log F) per type; descriptor-version guards only in transitional windows.
+- Runtime overhead: stride guards 1 counter per prefetch family; GC-activity guard 1 counter read per loop entry.
+
+**Honest performance statement.** All gains are target- and workload-dependent by nature (cache behavior); CAMT's contribution is the decision machinery — every transformation is gated by a certificate and a cost model, expected value is non-negative modulo model error, and the dynamic requalification path bounds the downside of profile staleness. The bounds-proof default trades some coalescing coverage (page-crossing tails without fault-suppress forms keep their gather form) for the elimination of the fault-recovery cliff.
+
+---
+
+## Revision Notes (post red-team)
+
+1. Shape well-formedness predicate + indexed-shape variant + explicit rejection rule (break: bogus shapes on loaded bases, indexed addressing, symbolic strides would miscompile).
+2. GSC legality is static-stride-only; profiles are SPP-only (break: ambiguous profile/stride readings could emit wrong-lane recipes).
+3. Bounds-proof-driven coalescing replaces fault-driven recovery as the default; fault-suppress variants are optional and priced (break: masked-lane violation, benign-fault cliff, unmodeled recovery spills).
+4. Reference-element coalescing disabled in v1 pending vector barrier sequences (break: load-barrier/SATB elision unsound under concurrent evacuation).
+5. Prefetch distance from the modulo schedule's prologue length; trip-count bucket versioning; GC-activity runtime guard (break: ⌈L/II⌉ guess, single distance, static bandwidth budget).
+6. Memory Hierarchy Extension defined here as owned TMD tables (break: TMD formally disclaims memory-hierarchy modeling — the phantom-interface problem).
+7. DSLO is static type-level: descriptor-held layout versions (no header change), allocation-time hot/cold split, replication restricted by type semantics with per-thread epochs, static pinning rules, no runtime registry (breaks: header space, TOCTOU/false-negative registry, lazy-allocation exception points, write-rate replication criterion).
+8. DSLO profile counters defined as owned T0/T1 extensions with static-only fallback (break: phantom profile producers); SOA converted to a single array-of-planes GC object (break: F headers/barriers/relocation sites) with a `no_new_uses` Dualis ledger assumption (break: open-world reconciliation).
+
+---
+
+# AOT/JIT Duality Subsystem — Complete Design Document (v1)
+
+## 0. Document Control and Design Scope
+
+**Component:** AOT/JIT Duality Subsystem (Dualis)
+
+**Version:** 1.0
+
+**Role:** Defines the single-binary duality in which one standalone native executable contains a build-time-initialized AOT image (AOT Native Image Subsystem document) plus the embedded tiered compilers and the UGB machinery, so the program starts executing optimized AOT code immediately and the JIT activates lazily only when dynamic edge cases demand it (eval, dynamic FFI, newly loaded plugins, deoptimization fallback). Introduces the Speculation Ledger as a build-time-checked assumption registry, guarded-everywhere dispatch for profile-dependent sites, and the tier TA *mode* of the existing tiered system.
+
+**Design Status:** Complete specification.
+
+**Review:** Adversarially red-teamed (reviewer R2). Principal breaks incorporated: "sealed" now covers only closed-world-provable world facts — profile-biased devirtualizations are always guarded (the unsound closed-world speculation hole is closed); one guarded code body per function in both modes (dual variants and the page-unmap mechanism deleted); inline epoch checks for cheaply-checkable kinds plus a build-time assumption-kind registry (unregistered assumption = build error); boot-time validation of ledger entries against image state; TA modeled as a mode with logical tier T1-equivalent, provenance-tagged decayed profile, stepwise promotion, and Dualis-owned TA OSR stubs; single-word patch slots (portable atomics); W^X corrected for the boot relocation phase and platform variants. See Revision Notes at the end.
+
+**Scope:** This document defines the dual-mode executable layout, the Speculation Ledger and its kind registry, the patch-table model, the TA mode and its integration with the tiered system, JIT lazy activation, and open/closed-world modes. Cross-references to the other seven subsystem documents added in this set refer to documents appended in the same set. It does not define:
+- Image construction, snapshot protocol, BTI, PGO-AOT, or the image format itself (AOT Native Image Subsystem document §6.3–§6.11; Dualis extends that image with new sections, §6.3 here)
+- Region-based deoptimization mechanics (Deoptimization and Concurrent Deoptimization Subsystem documents; guarded-site failures are standard deopts)
+- UGB loading and verification (UGB document)
+
+**Normative References:**
+- Wimmer, C. et al., "Initialize Once, Start Fast: Application Initialization at Build Time" (Oopsla 2019 — snapshot model Dualis builds upon)
+- Würthinger, T. et al., "One VM to Rule Them All" (assumption-based invalidation, the conceptual ancestor of the Speculation Ledger)
+- W^X and dual-mapping code-cache practice (Linux memfd dual-map; macOS MAP_JIT + per-thread write-protect flips; Windows section-object dual mapping)
+
+**Known Limitations:**
+- Peak-throughput parity for a function whose AOT specialization later proves wrong requires recompilation; the Ledger makes it safe and the tiered cost-benefit model makes it profitable, but it is a second compilation of that function.
+- Profile-guarded dispatch costs one compare per site in both modes; the "zero-overhead" path exists only for closed-world-provable world facts. The former "sealed zero-overhead" claim is retracted to this scope (the broader claim was unsound — profile bias is not a world fact).
+- Embedded compilers cost binary size: T1 bank + T2–T4 pipelines are megabytes of text; an AOT-only build configuration strips them and loses JIT fallback (documented, supported tradeoff).
+- AOT and JIT compiled bodies of the same function coexist transiently; epoch-based code-metadata reclamation (GC Interaction Subsystem document §6.6) bounds but does not eliminate duplicate residency.
+- An open-world boot of a sealed-bearing image pays a boot recompilation of the sealed ranges (the re-qualification of §6.5); deployments wanting zero boot recompile pin the world mode at build time.
+- Invalidating a target whose sites are guarded requires the guarded sites to fail naturally (epoch compare); recompilation is queued per the tiered system — there is no synchronous global invalidation pause.
+
+---
+
+## 1. Goals, Non-Goals, and Constraints
+
+### Goals
+
+1. Instant startup: first executed instruction is AOT code from the loaded image; JIT initialization is lazy and never on the startup path.
+2. Seamless fallback: every dynamic edge case (eval, new class load, dynamic FFI, plugin code) routes through one uniform mechanism — epoch bump or Ledger event → guarded-site failure or range invalidation → region deopt → interpreter/T0 → tiered recompilation — with no special cases at the AOT boundary.
+3. Zero overhead for world-sealed assumptions only: assumptions provable from the closed-world class hierarchy (no dynamic loading admitted) emit no runtime checks; every profile-dependent dispatch carries an inline guard in both modes.
+4. One binary, one code shape: the same image runs closed-world or open-world, selected at boot, without dual code variants; an open-world boot of a sealed-bearing image re-qualifies sealed assumptions before first execution (§6.5).
+5. Soundness by construction: no assumption exists without either an inline runtime check or a world-mode proof of its impossibility; the assumption-kind registry is closed at build time.
+
+### Non-Goals
+
+1. Replacing the AOT Native Image Subsystem document's snapshot, relocation, or BTI mechanisms (Dualis consumes them; §6.5 adds the boot validation and re-qualification pass).
+2. Hot code swapping at runtime (Phoenix; the Ledger's invalidation reuses region deopt machinery but deployment-level swap is out of scope here).
+3. Multi-image process composition (the AOT document's Deferred Subsystems item 2, "Cross-Image Object Sharing").
+4. Distributing or updating the JIT portion separately from the image.
+
+### Constraints
+
+- Ledger/event dispatch on runtime events must be O(dependent entries), not O(total entries): per-kind hash indexes.
+- Guarded sites pay one epoch load + compare; sealed sites pay zero (verifiable by construction: no guard nodes emitted for sealed kinds).
+- TA integrates with the tiered system as a *mode*: functions in TA hold a logical tier of T1-equivalent in the tier lattice, so thresholds, monotonicity, and the cost-benefit model (Tiered Compilation System document §6.6, §6.9) apply without modification; all TA-specific policy is defined here and owned here.
+- The executable must remain valid under W^X: a boot-only writable alias performs relocations and is re-protected before first execution; patch slots and the JIT code cache use platform-appropriate dual-mapping (§6.6).
+- AOT code contains deopt points wired to the same Region machinery and metadata format as JIT code (Deoptimization Subsystem document §6.6; DWARF document §6.8).
+
+---
+
+## 6. AOT/JIT Duality Subsystem
+
+### 6.1 Purpose and Domain
+
+The AOT Native Image Subsystem produces an executable whose code was compiled without runtime facts; its correctness under an open world depends on assumptions (no new subclasses, no overrides, no redefinition) that are simply false the moment the program evaluates a string, loads a plugin, or attaches a dynamic FFI handler. Two failure modes exist in such designs: the image forbids dynamism (closed world, no JIT), or every dynamic operation aborts. Dualis rejects both: the image admits dynamism through guarded dispatch and the Speculation Ledger, and the embedded JIT reclaims peak performance after every violation. The result is a Rust-like startup with Java-like dynamism in one file.
+
+### 6.2 Mathematical Specification
+
+| Requirement | Specification |
+|---|---|
+| **Domain** | A valid AOT image (Valid_Image, AOT Native Image Subsystem document §6.12) extended with ledger, patch-table, and JIT-config sections; a runtime event stream (class load, redefine, method registration, capability change, eval, reflection, polyglot subclassing, FFI handler registration); the embedded tiered compilers. |
+| **Codomain** | A running process executing TA-mode code with a live Ledger, patch table, and tiered system above it. |
+| **Definitions** | Assumption kind k ∈ K (closed registry, §6.4). Ledger entry e = (kind k, predicate ref, dependent code ranges R(e), validation event v_k, action). World-sealed assumption: an assumption whose validation event is impossible in the current world mode (provable from the closed-world class hierarchy). Profile-biased assumption: an assumption derived from PGO training data — never sealable, always guarded. Guarded site: a dispatch/access site carrying an inline epoch compare (class-hierarchy epoch, shape epoch, capability epoch, redefine epoch) or an inline-cache guard. Epoch: a global counter per assumption family; violation = bump. Patch slot: a single-word indirection cell holding an index into the runtime target table. TA mode: image functions execute pre-compiled code while holding logical tier T1-equivalent in the tier lattice with a provenance-tagged external profile. |
+| **Preconditions** | Image verified; boot validation and re-qualification (§6.5) passed; world mode fixed at boot (closed or open; open-world boot triggers sealed-assumption re-qualification); JIT feature set compiled in unless the build stripped it. |
+| **Postconditions** | Execution after any event sequence equals execution of a from-scratch tiered run on the same loaded program: same values, same exceptions, same GC-visible state (duality transparency). |
+| **Invariants** | Registry closure (1), guarded-entry totality (2), sealed-impossibility (3), fallback totality (4), W^X compliance (5), duality transparency (6). |
+| **Relations** | R(e) maps entries to code ranges via code metadata; TA functions promote stepwise through the tier lattice (logical T1-equivalent → T2 → T3 → T4 → T5) with the PGO profile injected as a provenance-tagged prior; TA functions deopt to T0 on guard failure or Ledger-driven invalidation. |
+| **Failure behavior** | JIT initialization failure (OOM, unsupported feature set): process continues in TA mode with T0 fallback for demoted functions; JIT absence degrades peak performance, never correctness or startup. Closed-world dynamic-load attempt: a defined refusal raise (CapabilityViolation-class, catchable), never a process abort. |
+| **Complexity** | Ledger consult O(1) per event via per-kind index; epoch checks O(1) per guarded site; violation handling O(|R(e)| + deopt scope) per the deopt machinery. |
+| **Correctness** | Every AOT assumption is either world-sealed (event impossible by closed-world proof) or guarded (inline check fails on violation) or registry-tracked (event invalidates R(e) before any dependent *unguarded* code runs; by invariant 2 there is no unguarded code for non-sealed kinds). |
+
+### 6.3 Executable Layout
+
+The image gains three sections alongside the AOT Native Image Subsystem document's layout:
+
+```
+.vortex.image    — heap snapshot, metadata (existing, unchanged)
+.vortex.code     — AOT code, RX after boot re-protection (existing)
+.vortex.patch    — patch slots: one aligned word each (index into the runtime target table), RW dual-mapped
+.vortex.ledger   — serialized ledger entries + per-kind indexes (read-only template)
+.vortex.jitcfg   — embedded compiler config: enabled tiers, budgets, feature sets
+```
+
+**Patch slots.** A slot is one aligned word (32/40-bit index into a runtime-managed target array); mutation is a single aligned store — portable atomicity on x86-64, ARM64, and RISC-V with no 128-bit CAS dependency and no torn-read class. Guarded sites compare the slot's index (or a packed tag+index word) against the expected value. Slots exist only for targets the build marked mutable (open-world candidates per the sealed-impossibility test of §6.4); world-sealed targets call directly with no slot.
+
+**Ledger residency.** The image's `.vortex.ledger` section is a read-only template; at boot the entries are loaded into an RW shadow table where fired entries are consumed and indexes are maintained. The image section is never mutated.
+
+### 6.4 The Speculation Ledger and the Assumption Kind Registry
+
+**Kind registry (closure by construction).** The set K of assumption kinds is a closed registry defined at AOT build time. The AOT compiler refuses to emit an assumption outside K (build-time error) — completeness of the Ledger is a *construction rule*, not an aspiration: no code exists with an unregistered assumption. The registry comprises:
+
+| Kind | Validation event | Runtime treatment |
+|---|---|---|
+| no_override(target) | override registration, redefine | inline class-hierarchy epoch check at guarded sites; event also invalidates R(e) for recompilation |
+| no_subclass(class) | subclass registration, eval, reflection, polyglot subclassing | inline class-hierarchy epoch check |
+| class_initialized(class) | first active use | boot validation + Ledger event |
+| const_field(field) | reflection write, redefine | boot validation + Ledger event; guarded load where reflection is enabled |
+| shape_stable(shape) | shape transition | inline shape epoch check |
+| no_redefine(unit) | redefinition event | Ledger event; invalidates dependent code and DICE graph versions |
+| capability_family_stable(family) | GCT growth/attenuation affecting token identity | inline capability epoch check |
+| no_new_handler(unit) | dynamic FFI handler registration | Ledger event |
+| vtable_layout_stable(layout) | member addition changing vtable offsets | inline layout epoch check |
+| no_new_uses(type) | new UGB load touching the type | Ledger event (consumed by CAMT's SOA legality) |
+| bti_reconstruction(obj) | BTI unserializable-object replacement | boot validation (§6.5) |
+
+**Runtime treatment.** Cheaply-checkable kinds (epoch-comparable) are guarded inline at every site; their violations are epoch bumps — immediate, correct, no stop-the-world per event, and the Ledger retains only per-entry range metadata for the recompilation queue. Non-epoch-comparable kinds (no_new_handler, no_new_uses, no_redefine) are Ledger events: the event source consults the per-kind index and invalidates R(e) via region deopt before any dependent code runs; by invariant 2 and the §6.5 re-qualification, no unguarded dependent code exists at execution time.
+
+**Sealing test.** An assumption is world-sealed iff its validation event is impossible in the closed-world mode: closed world admits no dynamic loading, no eval, no reflection-driven mutation, no polyglot subclassing (attempts raise the defined refusal). World-sealed assumptions emit zero checks (invariant 3). Profile-biased assumptions are never sealed: a 95%/5% training bias is not a world fact, and the 5% receiver must observe correct dispatch — hence guarded in both modes (the correction of the unsound closed-world speculation case).
+
+**Mode re-qualification.** Sealing is sound only under the world mode it was proven for. When the build pins the world mode (a supported build configuration), sealing is sound by construction in that mode. When the image ships with both modes enabled and boots **open-world**, every world-sealed entry is unsealed at boot: its dependent ranges are invalidated and recompiled with guards (via the §6.5 boot queue at maximal priority) before first user instruction. The sealed fast path is therefore only ever *executed* under a world mode whose events cannot violate it — invariant 2's "in either world mode" is preserved by re-qualification, not assumed.
+
+### 6.5 Boot Validation and Re-qualification
+
+The AOT document's snapshot machinery legitimately mutates semantics at boot (unserializable objects' references replaced with null, reconstruction hooks, lazy materialization). Dualis adds one boot pass before first user instruction: (a) for every ledger entry whose predicate depends on image state (class_initialized, const_field, shape_stable, bti_reconstruction), evaluate the predicate against the post-load image; failures invalidate the entry's dependent ranges; (b) on an open-world boot, unseal every world-sealed entry (§6.4 mode re-qualification). Both invalidation classes recompile their dependent ranges at maximal priority before first execution, so no user instruction executes against a stale assumption or a sealed fast path under the wrong mode. This closes the boot-time transparency hole from both directions: transparency holds from t = 0, in both world modes.
+
+### 6.6 TA Mode, Tier Integration, and W^X
+
+**TA as a mode, not a seventh tier.** The tiered system's taxonomy is fixed at T0–T5 (its non-goals); Dualis introduces no seventh tier. Image functions install with a logical tier of T1-equivalent in the tier lattice; their TierState carries a provenance-tagged profile: the PGO profile is injected with provenance "external" and decayed-from-zero weighting, so the tiered system's merge and decay semantics (Tiered Compilation System document §6.7) apply unchanged. Hotness is computed from fresh counters only — no double counting. Promotion follows the normal stepwise ladder (TA/T1-equivalent → T2 → T3 → T4 → T5) with unchanged thresholds and cost-benefit logic; the PGO prior seeds specialization decisions, and the claim that early promotions beat cold-JIT outcomes holds *only* when the production workload matches the training workload (stated conditionally).
+
+**TA OSR (owned machinery).** The tiered system's known limitations exclude OSR into T2+ code; Dualis owns the TA-specific fix: AOT builds emit TA OSR stubs at loop headers (emitted at AOT build time, standard frame format shared with deopt metadata), so a hot loop inside a long-running TA frame migrates to the promoted tier mid-loop. The stub consumes the TA frame state (frame-map format identical to deopt metadata's) and produces the T2+ frame layout; this is Dualis-owned machinery, specified here as the AOT counterpart of the T1 document's loop-header OSR stubs (§6.9 there).
+
+**Demotion paths.** TA functions deopt to T0 on guarded-site failure or Ledger-driven invalidation (standard deopts, invariant-1-compatible). "Budget fallback" is *not* a demotion path — TA code never demotes for budget reasons (the tiered system's monotonicity is preserved; a budget-starved promotion simply does not happen).
+
+**W^X.** Boot phase: relocations (AOT document §6.5) patch the image under a temporary writable alias; the alias is removed and the code is re-protected RX before first execution — the "RX once, never written" property holds from first instruction onward, not during boot. Patch slots and the JIT code cache use platform-appropriate dual-mapping: Linux memfd dual-map; macOS MAP_JIT with per-thread write-protect flips (compiler threads serialize on flips — a documented throughput cost); Windows section-object dual mapping. JIT code cache participates in epoch-based code-metadata reclamation (GC Interaction Subsystem document §6.6).
+
+### 6.7 Failure Behavior and Fallback Totality
+
+Every AOT function has a T0 entry (interpreter) reachable by deopt; every AOT deopt point's metadata reconstructs T0 state per the Deoptimization Subsystem document §6.6. If the build stripped the JIT (AOT-only configuration), promotion is refused and functions stay in TA mode; dynamic edge cases still execute via T0 (invariant 4): a stripped-JIT binary is slower on dynamic code, but never incorrect and never aborts.
+
+### 6.8 Validity Invariants
+
+**1. Registry closure.** Every AOT assumption belongs to a kind in the closed registry K; the AOT compiler rejects unregistered assumptions at build time. No assumption exists without a runtime treatment.
+
+**2. Guarded-entry totality.** Every site whose correctness depends on a non-sealed assumption carries an inline guard (epoch compare or IC guard); no unguarded code path depends on a falsifiable assumption in either world mode — sealed code executes only under a mode whose events cannot violate it, preserved by the §6.5 re-qualification on open-world boots.
+
+**3. Sealed impossibility.** A world-sealed assumption's validation event is impossible by the closed-world mode's definition (dynamic loading, eval, reflective mutation, polyglot subclassing are refused); sealed sites emit zero checks, verifiable by construction.
+
+**4. Fallback totality.** Every AOT function has a T0 continuation; every violation path terminates in valid T0 state per the deopt metadata; no event sequence can strand a frame without a valid continuation.
+
+**5. W^X compliance.** From first user instruction, no executor mapping is writable and no writer mapping is executable; boot relocation completes before re-protection; patch-slot and JIT-cache writes follow the platform dual-map protocol.
+
+**6. Duality transparency.** For any event sequence — including boot-time snapshot surgery — observable process behavior equals a from-scratch tiered run on the same program: the duality is a performance arrangement, not a semantic one.
+
+### 6.9 Representation and Cost Model
+
+**Binary size.** Ledger entries O(assumptions), ~24 bytes each + indexes; patch slots one word per mutable target; no dual code variants (one guarded body per function). Embedded compilers: T1 bank hundreds of KB; T2–T4 pipelines multiple MB, strippable. TA OSR stubs: one per loop header of hot loops, standard stub size.
+
+**Runtime costs.**
+- World-sealed path: zero.
+- Guarded dispatch: one epoch load + compare per site (L1-resident counter, ~0.5–1 cycle; measured-noise class in guarded-dispatch systems).
+- Ledger consult: O(1) hash per non-epoch event; violation: O(|R(e)|) recompilation queueing + deopt scope per the deopt machinery — bounded by the region model.
+- Boot validation and re-qualification: O(ledger entries), before first instruction; an open-world boot of a sealed-bearing image additionally recompiles the sealed ranges with guards before first execution (bounded by the sealed range set; a pinned-world build pays none of this).
+- Promotion: unchanged tiered costs; profile injection makes early compiles *better* than cold-JIT only when the workload matches training (conditional claim).
+
+**Startup.** Image load + relocation + boot validation only; no JIT init, no Ledger replay beyond the validation pass.
+
+---
+
+## Revision Notes (post red-team)
+
+1. Profile-biased devirtualizations are always guarded; "sealed" restricted to closed-world-provable world facts (break: 95%/5% bias sealed unguarded in closed world dispatches wrongly — silent unsoundness; the zero-overhead claim retracted to its sound scope).
+2. One guarded code body per function in both modes; dual variants and the page-granular unmap mechanism deleted (break: shared-page hazard and munmap-refault no-op; halves world-dependent code size).
+3. Inline epoch checks for cheaply-checkable kinds; Ledger repositions as registry + recompilation metadata (break: STW-per-violating-event requirement and the unguarded invalidation window).
+4. Assumption-kind registry closed at build time with the extended kind list (eval, reflection, polyglot, FFI handlers, vtable layout, capability growth, BTI reconstruction, no_new_uses) (break: asserted-total completeness over a provably incomplete kind list).
+5. Boot validation pass added (break: BTI snapshot surgery bypassed the Ledger — transparency violated at t=0).
+6. TA modeled as a mode with logical tier T1-equivalent, provenance-tagged decayed profile, fresh-counter-only hotness, stepwise promotion, Dualis-owned TA OSR stubs (breaks: seventh-tier taxonomy violation, skip-promotion thresholds, profile double counting, cost-benefit model rejecting TA promotions, hot loops never migrating).
+7. Patch slots are single-word indexes into a runtime target table (break: 128-bit atomic swap not portable to ARM64/RISC-V; torn reads on guarded dispatch).
+8. W^X corrected for the boot relocation phase; macOS/Windows platform notes added (break: "RX once, never written" false during relocation; memfd-only coverage).
+9. Closed-world dynamic-load behavior defined (refusal raise); ledger entries live in an RW shadow table, image section stays RO (breaks: unspecified closed-world refusal; fired-entry mutation of a read-only mapping).
+
+**Round 2 (vote-round fixes).** 10. Open-world boot of a sealed-bearing image re-qualifies sealed assumptions: unseal at boot, recompile dependent ranges with guards at maximal priority before first execution; build-time world pinning offered as the zero-cost alternative (closes the sealed-fast-path-under-open-world hole — the earlier invariant-2 argument was false for sealed entries); scope self-pointer fixed to §6.5; boot recompile cost stated in the cost model and Known Limitations.
+
+---
+
+# Embeddable JIT Interface Subsystem — Complete Design Document (v1)
+
+## 0. Document Control and Design Scope
+
+**Component:** Embeddable JIT Interface Subsystem (Kernelis)
+
+**Version:** 1.0
+
+**Role:** Exposes the VORTEX execution engine as an embeddable C-ABI library — `env_create` / `compile` / `execute` — for hosts such as game engines, databases, and browsers. Guarantees bounded, budgeted compilation (default 1 ms wall clock, T1+T2 default pipeline), pause-free execution modes (heapless and arena), containment of all guest faults at the FFI boundary, and per-environment isolation with an explicit capability surface.
+
+**Design Status:** Complete specification.
+
+**Review:** Adversarially red-teamed (reviewer R3). Principal breaks incorporated: heapless verification re-grounded in an explicit UGB allocation-effect bit (no dependence on interprocedural alias summaries or an ET-SoN graph at T1) plus a preallocated exception pool so the throw path is allocation-free; the execute-root trampoline and EH amendments are specified as owned extensions; code lifetime is ownership-based with a quiescent-state grace protocol (fixes the free-vs-execute UAF and the retired-metadata leak in heapless/arena modes); the budget contract gains a deadline check inside the cancellation checkpoints and install-time arbitration; `vortex_value` becomes opaque with typed accessors and leased object handles; nested execute is defined; the status table is completed; the capability-format extension (32-bit permission mask) is owned here. See Revision Notes at the end.
+
+**Scope:** This document defines the C ABI surface, environment model, memory modes, execution contract, error model, threading model, code-lifetime protocol, and ABI stability policy. Cross-references to the other seven subsystem documents added in this set refer to documents appended in the same set. It does not define:
+- Compilation pipeline internals (T0–T5 documents, Tiered Compilation System document; Kernelis pins which tiers an environment may use, nothing more)
+- GC design (GC Subsystem document; the managed mode embeds it, heapless/arena modes avoid it)
+- EH and unwinding mechanics (EH Subsystem document; Kernelis requires its FFI boundary rules §6.9 and owns the execute-root extensions of §6.5 here)
+- The capability system's internals (Capability System Implementation document; Kernelis owns the token-format extension of §6.8 and instantiates one table per environment)
+- Deterministic replay (Chronon; Kernelis exposes the hook its determinism flag feeds)
+
+**Normative References:**
+- C11 §7.13 (setjmp/longjmp prohibition across JIT frames)
+- System V AMD64 ABI / AAPCS64 (the C boundary conventions honored at vortex_execute entries)
+- Rust FFI practice: panic=unwind with catch_unwind at the boundary (abort mode configurable); panic=abort documented as process-terminating by contract
+
+**Known Limitations:**
+- `vortex_compile` and `vortex_env_create` allocate: they are not async-signal-safe; hosts must not call them from signal handlers. `vortex_execute` polls cancel callbacks and parks at safepoints and is likewise not async-signal-safe.
+- Guest code that longjmps out of `vortex_execute` is undefined behavior; the boundary contract is documentation-enforced, with an optional frame-verification debug mode.
+- The < 1 ms compilation target holds for the default pipeline (T1+T2) and typical function sizes; T3/T4 opt-in is budgeted but can exceed 1 ms by explicit request — the budget knob is the contract, not a fixed number.
+- Heapless mode rejects allocation-touching programs at compile time via the allocation-effect bit; the bit is a front-end declaration verified statically — its soundness rests on the front-end's honesty plus the verifier's unit-level check, not on interprocedural pointer analysis.
+- Arena-mode object results are leased handles valid until the next execute on the environment (or explicitly pinned); hosts holding results across executes must pin.
+
+---
+
+## 1. Goals, Non-Goals, and Constraints
+
+### Goals
+
+1. Three-call integration: create an environment, compile UGB, execute — no other mandatory API; everything else is configuration.
+2. Bounded compile latency: default pipeline (T1+T2) with a wall-clock budget (default 1 ms); budget overrun returns a defined status, never installs silently, with the interpreter-execution option available, per the Compilation Cancellation Subsystem document.
+3. Pause-free execution modes: heapless (no allocation in guest code, verified at compile time via the allocation-effect bit, throw path allocation-free) and arena (per-execute arena, wholesale reset) — no GC pauses by construction in either.
+4. Total containment: guest exceptions, capability violations, traps, and deopt events never escape `vortex_execute`; every failure is a status code plus a structured diagnostic.
+5. Environment isolation: two environments share no mutable state; code caches, capability tables, and heaps are per-environment; compiler-fault containment is per-session.
+
+### Non-Goals
+
+1. Language runtime hosting (no Python/JS runtime is embedded here; polyglot heaps are the Babel Heap document's domain, composable with Kernelis environments but not required).
+2. Cross-process or network compilation APIs.
+3. Embedder-visible IR or compiler internals (UGB in, native code out).
+4. Long-lived managed heaps inside the library (managed mode exists for completeness; embedders wanting GC services usually host the full runtime instead).
+
+### Constraints
+
+- The C ABI is the stability boundary: opaque handles, versioned config structs (size field first), values accessed only through typed accessors; symbol versioning per platform convention.
+- `vortex_execute` is reentrant per environment only under the nested-execute contract (§6.6); thread-affine environments reject cross-thread calls with a defined status.
+- Every guest-visible fault at the boundary maps to exactly one status code; the mapping table (§6.5) is normative and closed per major version.
+- Compilation runs under the cancellation subsystem's interruption protocol with the environment's budget as the trigger; the deadline check is evaluated inside the interruption checkpoints themselves (§6.7, owned amendment).
+- Deopt during execute is invisible to the host unless the host subscribes to the diagnostic callback (§6.7); tier demotion and recompilation happen inside the call.
+
+---
+
+## 6. Embeddable JIT Interface Subsystem
+
+### 6.1 Purpose and Domain
+
+A game engine needs a patchable rule system that never stutters; a database needs a query plan compiled to native code with bounded latency; a browser needs sandboxed evaluation of foreign bytecode. All three want the same shape: a JIT behind a C API with hard latency bounds, no surprise pauses, and no fault leakage. Kernelis is that shape. It composes existing subsystems under one contract: T1+T2 by default (fast, cheap), budgeted escalation to T3/T4 on request; heapless/arena execution for pause-freedom; the capability system per environment for isolation; the EH subsystem's FFI rules for containment.
+
+### 6.2 Mathematical Specification
+
+| Requirement | Specification |
+|---|---|
+| **Domain** | UGB units (Valid_UGB, UGB document §6.9) with per-function allocation-effect declarations + configuration (tier set, memory mode, budgets, capability grants) + host-provided callbacks (diagnostics, cancel flag, allocator). |
+| **Codomain** | Executable code handles with ownership-based lifetimes; execution results as opaque values accessed via typed accessors; status codes with structured diagnostics. |
+| **Definitions** | Environment E = (tier set T_E ⊆ {T1..T4}, memory mode m_E ∈ {heapless, arena, managed}, budget b_E, capability table C_E, code cache, profile state, quiescent-state counter q_E). Execute run r: one vortex_execute call. Lease: an object-result handle valid until the next execute on E unless pinned. Grace period: the interval between a code's retirement request and its reclamation, bounded by q_E (§6.6). |
+| **Preconditions** | E created; UGB verified; for heapless: every function reachable from the entry set carries the no-alloc effect declaration and the unit's static allocation check passes (§6.4); grants for all capabilities the UGB requires exist in C_E. |
+| **Postconditions** | On VORTEX_OK: guest effects applied exactly as source semantics dictate; no host-visible fault. On error status: guest effects are those applied up to the fault point, the fault is fully described in the diagnostic, and the environment remains usable (no poisoned state). |
+| **Invariants** | Containment (1), budget compliance (2), environment isolation (3), mode soundness (4), ABI stability (5), cancellation responsiveness (6), lifetime safety (7). |
+| **Relations** | Status codes ↔ fault kinds (§6.5 normative table); budget b_E → cancellation triggers with deadline evaluation at checkpoints (§6.7). |
+| **Failure behavior** | Compilation failure: VORTEX_ERR_COMPILE + diagnostics (UGB offset, phase, reason). Budget overrun: VORTEX_ERR_TIMEOUT; the expired compilation is quarantined (not installed) unless the host opted into install-on-timeout. Capability violation: VORTEX_ERR_CAPABILITY. Allocation deny (runtime escape hatches): VORTEX_ERR_ALLOC_DENIED. Cancel: VORTEX_ERR_CANCELLED at the next checkpoint/safepoint. |
+| **Complexity** | Compile: O(|B|) at T1+T2 (T1 document cost model: ~10 µs typical function). Execute: guest semantics + O(1) boundary overhead (argument unboxing into the UGB calling convention) + O(1) quiescent-state accounting (two atomic ops per boundary). |
+| **Correctness** | The boundary is total: every guest outcome maps to a status/result per the normative table; the environment never transitions to an unusable state (invariant 1, verified by the state machine of §6.7). |
+
+### 6.3 API Surface (C ABI)
+
+```
+typedef struct vortex_env_cfg { uint32_t struct_size;   // ABI stability: size-first
+                                uint32_t tier_mask;      // which of T1..T4 may run
+                                uint32_t mem_mode;       // heapless | arena | managed
+                                uint64_t compile_budget_ns;   // default 1,000,000
+                                uint64_t arena_cap_bytes;
+                                vortex_alloc_cb alloc;   // optional host allocator
+                                vortex_diag_cb diag;     // optional diagnostics sink
+                                vortex_cancel_cb cancel; // optional cancel flag source
+                              } vortex_env_cfg;
+
+vortex_status vortex_env_create   (const vortex_env_cfg*, vortex_env**);
+vortex_status vortex_compile      (vortex_env*, const vortex_ugb_unit*, vortex_code**);
+vortex_status vortex_execute      (vortex_env*, vortex_code*, const vortex_value* args, uint32_t n, vortex_value* ret);
+vortex_status vortex_value_kind   (vortex_env*, const vortex_value*, uint32_t* kind);
+vortex_status vortex_value_get_i64/f64/… (vortex_env*, const vortex_value*, T* out);
+vortex_status vortex_value_pin    (vortex_env*, vortex_value*, vortex_pin*);   // extend leased handle lifetime
+vortex_status vortex_code_retire  (vortex_env*, vortex_code*);                 // enqueue retirement
+vortex_status vortex_env_destroy  (vortex_env*);
+```
+
+All handles are opaque; `vortex_value` is an opaque token — its internal tag union is not ABI (kind + typed accessors instead, so value kinds can evolve without `_v2` churn). Object-valued results are **leases** valid until the next execute on the environment unless pinned (arena mode: the lease dies with the arena; pinned values are copied out under the pin contract). `vortex_code_free` is replaced by `vortex_code_retire`: reclamation happens at grace expiry (§6.6), never eagerly. The compile entry returns the code handle only after full install (T1 document install atomicity, validity invariant 7 — reused verbatim).
+
+### 6.4 Memory Modes
+
+| Mode | Guest allocation | Pauses | Determinism | Use |
+|---|---|---|---|---|
+| heapless | rejected at compile time (allocation-effect bit check) for static units; runtime deny (VORTEX_ERR_ALLOC_DENIED) only for units explicitly approved with runtime-checked dynamic sites | none, by construction | exact for value semantics | game engines' per-frame rules, query predicates |
+| arena | per-execute arena; wholesale O(1) reset at execute end; cap enforced with VORTEX_ERR_ARENA_EXHAUSTED | none (no concurrent collector in the loop) | value-exact; addresses pinned per run | browsers' sandboxed evaluation, batch query plans |
+| managed | full GC Subsystem embedding | GC pauses documented by the GC document | no | completeness; hosts wanting runtime services |
+
+**Allocation-effect bit (owned UGB extension).** Every UGB function carries a declared allocation effect: `no_alloc` or `may_alloc`. The front-end declares it; the compile-time check verifies statically over the unit: a function is `no_alloc`-sound iff (a) it contains no allocating opcode (no boxing, string concat, closure creation, growable structures, Throw sites — see the EH pool below), (b) every call target it references is itself `no_alloc` (within the unit or in another unit whose export table declares it), and (c) it contains no always-tainting dynamic opcodes (DYN_CALL, EVAL, REFLECT, LANG_SWITCH, FFI_CALL with marshaling that boxes). Call targets the verifier cannot resolve statically (register-indirect calls) classify as dynamic sites: the function is either rejected in strict heapless mode or admitted to the runtime-deny path (mode table above). The check is O(|B|) per unit with the export tables consulted cross-unit — no interprocedural pointer analysis, no ET-SoN graph at T1, no alias-summary dependency (the alias subsystem's mod/ref summaries carry region sets only and are *not* part of this check — the earlier draft's dependence on them was wrong and is removed).
+
+**Preallocated exception pool (owned EH amendment).** The EH Subsystem document's throw path allocates the exception object (its §6.4 step 1). In heapless mode each environment preallocates a bounded pool of exception objects and message buffers at env creation; the throw path draws from the pool, and pool exhaustion converts to VORTEX_ERR_ALLOC_DENIED at the boundary (a defined runtime outcome). Caught exceptions therefore work in heapless mode; the compile-time rule (b) above is correspondingly *not* violated by Throw sites — the static check treats pool-backed Throw as non-allocating.
+
+### 6.5 Containment and the Normative Status Table
+
+Guest faults never cross the boundary (invariant 1). The EH subsystem's FFI boundary rules (EH Subsystem document §6.9) stop unwinding at FFI trampolines; Kernelis owns the host→guest **execute-root trampoline** extension: a root frame with a catch-all landing pad and thread-local pending-slot semantics (stacked for nested execute), inserted at every `vortex_execute` entry. The EH document's "no handler in stack → terminate the thread" rule (§6.2) applies to threads *without* a Kernelis root; with a root, uncaught guest faults materialize at the root as status codes. The root trampoline and the pending-slot stack are owned EH extensions specified here.
+
+| Guest outcome | Status | Diagnostic payload |
+|---|---|---|
+| Normal return | VORTEX_OK | result value (opaque; leased if object) |
+| Guest exception (uncaught at root) | VORTEX_ERR_GUEST_EXC | exception kind id, UGB offset, message buffer |
+| Capability violation | VORTEX_ERR_CAPABILITY | required capability id, UGB offset |
+| Bounds/type trap (uncaught) | VORTEX_ERR_TRAP | trap kind, UGB offset |
+| Allocation deny (heapless dynamic site) | VORTEX_ERR_ALLOC_DENIED | allocating site offset |
+| Arena exhaustion | VORTEX_ERR_ARENA_EXHAUSTED | arena watermark |
+| Host allocator OOM | VORTEX_ERR_OOM | subsystem, request size |
+| Stack overflow | VORTEX_ERR_STACK_OVERFLOW | frame depth limit |
+| Runtime internal error | VORTEX_ERR_INTERNAL | error class (never a process abort from guest activity) |
+| Deopt-driven demotion (transparent) | VORTEX_OK | diag callback only, if subscribed |
+| Cancel flag set | VORTEX_ERR_CANCELLED | phase at cancel |
+| Compile failures/budget | VORTEX_ERR_COMPILE / VORTEX_ERR_TIMEOUT | per §6.2 |
+
+Diagnostics are written to a host-provided buffer (no allocation on the error path); the message buffer is truncated, never unbounded. Rust shim: the boundary runs under panic=unwind with catch_unwind mapping panics to VORTEX_ERR_INTERNAL (panic=abort is a build configuration whose contract is process termination — stated, not hidden).
+
+### 6.6 Threading, Nested Execute, and Code Lifetime
+
+**Threading.** Environments are thread-affine by default: cross-thread calls return VORTEX_ERR_ENV. `vortex_env_make_shared` upgrades an environment for multi-threaded execute: code installs switch under RCU (readers never block; the install atomicity pattern of the T1 document governs swaps), profile counters are sharded per thread, and capability revocations follow the Capability System Implementation document's eager generation-counter mechanism (§6.6 there — O(|descendants|) worklist, designed for rare revocation; not "epoch-ordered read-mostly", which the cited section does not specify).
+
+**Nested execute (defined).** A guest FFI callback on the same thread re-entering `vortex_execute` on the same environment is the defined reentrancy form: inner execute runs on a sub-arena of the outer arena (inner reset frees only the sub-arena; objects the outer frame references never live in the sub-arena — the compile-time allocation check enforces no-outer-refs-into-sub-arena at the callback boundary); the cancel flag is polled at the innermost active execute; the EH pending-slot stack handles unwinding to the correct root. The state machine gains the nested state explicitly.
+
+**Code lifetime (ownership-based).** `vortex_code_retire` enqueues retirement; reclamation occurs at grace expiry under the environment's quiescent-state protocol: q_E advances when all executing threads have passed an execute boundary (enter/exit accounting, two atomic ops per boundary); retired code metadata is freed two quiet q_E epochs after retirement — the epoch-based reclamation discipline of the GC Interaction Subsystem document §6.6, re-based onto execute-boundary quiescence because heapless/arena modes do not run GC safepoints. A thread with frames in retired-but-unreclaimed code is safe (grace not expired); reclamation never precedes grace expiry (invariant 7). `env_destroy` joins the same protocol: it waits for grace expiry on its resident codes, then frees.
+
+### 6.7 Budget, Cancellation, and Environment State Machine
+
+**Deadline check at checkpoints (owned cancellation amendment).** The interruption protocol's checkpoint function itself evaluates the compile deadline (one clock read per checkpoint, cached with a coarse-grained slack); worst-case overshoot is one checkpoint quantum, and the quantum is capped so that quantum × B_k ≤ 10% of b_E. A compilation whose deadline expired before COMPLETED is quarantined (not installed) unless the host opted into install-on-timeout — removing the "timeout but installed" ambiguity of the cancellation document's §6.7 race 1 for embedding contexts. The background hotness monitor's 10 ms cadence is unaffected (it is a promotion mechanism, not the budget mechanism).
+
+**State machine.** `created → compiling ⇄ executing → destroyed`, with the nested-executing state for reentrancy, and the invariant that every error path returns to a usable state: compile failure leaves no partial installs (T1 fallback-safety invariant, validity invariant 10, reused); quarantined installs leave no code handle; execute faults leave profile state and code caches consistent; destroy is safe from any state after grace expiry. A debug-mode validator checks env version stamps at every entry.
+
+### 6.8 Capability Surface and the Token-Format Extension
+
+Every environment instantiates its own capability table (per-environment isolation, invariant 3). The UGB document's permission set (Capability System Implementation document §6.3, 16-bit permission mask, fully allocated) cannot express raw-pointer access; Kernelis owns the **token-format extension**: the permission mask widens to 32 bits, with the new flags allocated as: `PERM_FOREIGN_RAW` (raw pointer values usable in vortex_value accessors), and — reserved for Babel Heap's use — `PERM_FOREIGN_EXPOSE`, `PERM_FOREIGN_ROOT`, `PERM_POLYGLOT_EXPORT`. Tokens with the extended flags are invalid on runtimes compiled without the extension (declared feature-set check at unit verification). The concrete repacking is part of the owned format change: token width stays 64-bit, the widened mask is accommodated by narrowing the token's index field by the added flag bits, and feature-set gating ensures the old and new formats never coexist in one process. The extension is a concrete format change specified here; the capability system's check semantics (O(1) pointer compare) are unchanged.
+
+### 6.9 Validity Invariants
+
+**1. Containment.** No guest fault escapes `vortex_execute`; every guest outcome maps to exactly one normative status; the execute-root trampoline stops unwinding per §6.5.
+
+**2. Budget compliance.** Compilation observes the environment budget via deadline-checking checkpoints; overruns return VORTEX_ERR_TIMEOUT with quarantine semantics; worst-case overshoot ≤ one capped checkpoint quantum.
+
+**3. Environment isolation.** Two environments share no mutable state; compilation faults are contained per session (owned cancellation amendment: cleanup failure aborts the *session*, not the process — the process-abort rule of the cancellation document applies to runtime-global failures only); a fault or OOM in one environment leaves the others logically unaffected (shared-memory pressure is a resource, not a fault — documented).
+
+**4. Mode soundness.** Heapless mode executes no allocation outside the approved-deny sites; the static check's soundness rests on the front-end declaration plus the unit-level verifier (cross-unit exports are part of the check); arena mode leaks nothing past execute return; object results are leases with explicit pinning.
+
+**5. ABI stability.** Config structs size-fielded and append-only; handles opaque; `vortex_value` opaque with typed accessors; status codes append-only.
+
+**6. Cancellation responsiveness.** A set cancel flag is observed within one compilation checkpoint interval and one guest safepoint interval, respectively — bounded response, with the checkpoint quantum capped.
+
+**7. Lifetime safety.** Retired code is reclaimed only after grace expiry under the quiescent-state protocol; a frame executing retired-but-unreclaimed code is safe; `env_destroy` joins the grace protocol.
+
+### 6.10 Representation and Cost Model
+
+**Costs.** Compile (T1+T2): O(|B|), ~10 µs typical function (T1 document §6.11); T3/T4 opt-in per the tier budget constants (Tiered Compilation System document §6.5). Execute boundary: O(1) argument unboxing + one status table switch on exit + two atomic ops for quiescent-state accounting (the honest amendment to the "O(1) boundary overhead" claim). Arena reset: O(1). Environment create: O(capability table + code cache init + exception pool).
+
+**Footprint.** T1 bank per environment: hundreds of KB; T2+ pipelines shared read-only across environments in a process (one immutable pass image, per-environment profile/state only).
+
+**Honest statement on the < 1 ms target.** The default pipeline's budget is 1 ms wall clock and typical units compile in tens of microseconds; the guarantee is the budget + status contract, not a universal sub-millisecond claim — a T4-requested 50K-node function will not fit 1 ms and the API's answer is the budget knob, not a false promise.
+
+---
+
+## Revision Notes (post red-team)
+
+1. Heapless verification re-grounded in the UGB allocation-effect bit (front-end declared, unit-verified, cross-unit export tables, always-tainting dynamic opcodes) — the alias-summary/ET-SoN-at-T1 dependency removed (break: nonexistent mod/ref alloc channel; incoherent T1 pipeline; conservative rejection of all polyglot programs).
+2. Preallocated exception pool makes the throw path allocation-free (break: EH §6.4 allocates the exception object — heapless programs could not throw even caught exceptions); compile-time vs runtime-deny paths reconciled (break: the status table contradicted the compile-time soundness claim).
+3. Execute-root trampoline, thread-local pending-slot stack, and the EH termination-rule amendment specified as owned extensions (break: containment contradicted EH §6.2 thread-termination; "transparent cancel" required unmodeled forced unwinding — transparent cancel is now scoped to checkpoint/safepoint polling, and guest handlers cannot be bypassed).
+4. Ownership-based code lifetime: retire + quiescent-state grace protocol re-based onto execute boundaries (breaks: vortex_code_free UAF vs live frames; retired-metadata leak in heapless/arena where GC safepoints — the cited reclamation's driver — are disabled).
+5. Budget contract: deadline check inside checkpoints with capped quantum; install-time quarantine for expired compiles (break: 10 ms monitor vs 1 ms budget; timeout-then-install ambiguity).
+6. vortex_value made opaque with typed accessors and leased object handles (breaks: arena-reset dangling results; `vom_ref`/ForeignRaw cited outside the existing capability set).
+7. Nested execute defined (sub-arena, innermost-cancel, pending-slot stack, state-machine state) (break: undefined reentrancy).
+8. Status table completed (OOM, stack overflow, arena exhaustion, internal error); Rust shim panic=unwind + catch_unwind (break: panic=abort contradiction); signal-safety of execute stated.
+9. Capability token-format extension (32-bit mask) owned here with Babel Heap's flags reserved (break: 16/16 bits allocated — invented capability kinds inexpressible).
+10. Compiler-fault containment per session (break: cancellation doc's process-abort rule violated isolation invariant 3); capability revocation citation corrected to the eager generation-counter mechanism.
+
+---
+
+# Check Elimination Subsystem — Complete Design Document (v1)
+
+## 0. Document Control and Design Scope
+
+**Component:** Check Elimination Subsystem (Aegis)
+
+**Version:** 1.0
+
+**Role:** Proves bounds, null, type, and capability checks redundant at T3/T4 and removes them. Two elimination classes: Proven — a compile-time proof discharges the check with zero runtime residue; Speculative — one cheap dominating guard remains and deoptimizes on failure. Soundness architecture: elimination happens at the ET-SoN level where the facts and the guard nodes live; speculative guards remain explicit, barrier-flagged nodes that selection and scheduling cannot reorder; capability elimination is sound under a lease/rendezvous revocation protocol rather than per-access checks.
+
+**Design Status:** Complete specification.
+
+**Review:** Adversarially red-teamed (reviewer R1). Principal breaks incorporated: elimination point moved from Machine IR to ET-SoN (the Machine IR has no check/proof representation and no verifier rule for erasures — the cited mechanism did not exist); speculative guards carry barrier flags honored by the existing scheduling dependency model (guards cannot sink below their loads); capability fences replaced by the lease/rendezvous revocation protocol (asynchronous revocation recovery was outside the cited deopt subsystems' scope); fence coverage extended to token identity, generation, and permission narrowing via static no-attenuation preconditions; the length-cache fact chain is replaced by constant-length allocation proofs plus a guarded length-reload; the post-dominance error is corrected to dominance; ledger entries are self-contained and pin their graph versions. See Revision Notes at the end.
+
+**Scope:** This document defines the fact sources, the proof classes, the two elimination classes, the ET-SoN-level elimination and guard model, the proof ledger, and the lease/rendezvous revocation protocol. Cross-references to the other seven subsystem documents added in this set refer to documents appended in the same set. It does not define:
+- The analyses it consumes: IV/range analysis (catalogue optimization 100 machinery), GVN congruence (ET-SoN/optimizer), MayAlias and region classes (Alias Analysis Subsystem document), capability token semantics (Capability System Implementation document), trap handling (EH Subsystem document)
+- Deopt mechanics for speculative guards (Deoptimization Subsystem document; Aegis emits standard deopt points)
+- Guest-language check semantics (UGB document; Aegis eliminates only built-in checks, never language-defined check hooks)
+
+**Normative References:**
+- Würthinger, Wimmer, Mössenböck, "Array Bounds Check Elimination for the Java HotSpot Client Compiler" (the hoisting/fusion discipline of §6.4)
+- HotSpot range-check smearing and strip-mining check coarsening (JVM engineering practice — check fusion and widening)
+- Turbofan (V8) constrained new-values discipline: type refinement along branches in a Sea-of-Nodes IR (V8 engineering documentation)
+
+**Known Limitations:**
+- Elimination coverage is workload-dependent: loops with data-dependent indexes defeat static proofs and fall to speculative guards or remain checked. The design goal is that hot-loop checks on profiled workloads are dominated by one fused guard per region; no universal coverage number is claimed.
+- The proven class requires facts with must-strength; the fact table is deliberately short (§6.3) and the flagship general-object bounds pattern uses the guarded length-reload (speculative), not a must-fact the permitted sources cannot produce.
+- Capability lease/rendezvous revocation costs an O(park-protected-threads) arbitration per revocation of a leased capability, deopts parked leased-region frames to T0, and forces a check-restoring recompilation of the leased ranges — the honest cost of sound erasure; capabilities revoked at high frequency (per-request sandboxing) must not be leased — their checks are retained or generation-guarded, never erased (§6.5 policy).
+- Post-selection elimination opportunities (addressing folds that make a check trivially true) are forgone by eliminating at ET-SoN; this is the honest price for scheduling-order safety.
+- Proof-engine soundness is analytic + audited (ledger, verification mode), not formally verified.
+
+---
+
+## 1. Goals, Non-Goals, and Constraints
+
+### Goals
+
+1. Proven elimination: remove a check node from the ET-SoN graph when a conjunction of must-strength facts implies it can never fail; zero runtime residue.
+2. Speculative elimination: replace a check whose failure is profile-absent with one dominating, barrier-flagged guard + standard deopt; per-region amortization.
+3. Check fusion: one guard covers a family of accesses on the same induction variable or the same object identity; check widening: test the limit, not each access.
+4. Machine-checkable soundness: every erasure references a self-contained proof ledger entry; verification mode re-derives and diffs.
+5. Capability correctness: elimination never weakens revocation semantics (lease/rendezvous protocol; unleased capabilities keep their checks).
+
+### Non-Goals
+
+1. Eliminating language-defined check hooks or user-supplied guards (side-effect-bearing checks are never eliminated).
+2. Proving floating-point comparison subtleties beyond the fact lattice's defined relations (NaN-awareness is delegated to the type/effect lattice).
+3. Whole-program interprocedural proof discovery beyond what mod/ref and capability summaries export (Alias Analysis Subsystem document §6.7).
+4. Formal verification of the proof engine (the ledger audit is the stated mechanism).
+5. Machine-IR-level check representation or erasure (checks and guards exist only above selection; Machine IR is unchanged).
+
+### Constraints
+
+- All integer range reasoning is over two's-complement modular arithmetic with explicit no-overflow side conditions; an unprovable side condition downgrades the elimination class, never skips it.
+- Speculative guards are Guard nodes: side-effecting, they consume and produce state tokens, so the ET-SoN state-chain discipline orders them against the accesses they protect; after lowering, guards carry the barrier flag (the `is barrier` attribute exists in the Machine IR document §6.6 for calls; extending its emission to lowered guards is an owned scheduling extension: the dependency model must treat guard nodes as ordering barriers).
+- Speculative guards use the standard deopt metadata format (Deoptimization Subsystem document §6.6; DWARF document §6.8); no new deopt machinery.
+- Speculation hygiene mirrors the T1 document's validity invariant 8: guard failures record the assumption and disable the specialization for recompilation.
+- Per-function elimination pass cost must fit the tier budget: class 1 at T3, class 2 at T4 (Tiered Compilation System document §6.4).
+
+---
+
+## 6. Check Elimination Subsystem
+
+### 6.1 Purpose and Domain
+
+A managed-language runtime executes three check families on every memory touch: bounds (index within object extent), null (reference non-null), and capability (permission for the access, per the Capability System Implementation document); type checks guard casts and field access. At C-level performance parity, these checks must vanish where provably redundant. The hazard is miscompilation: a wrong proof erases a check that can fail, corrupting memory or breaking isolation. Aegis therefore separates the *fact production* (upstream analyses, each with its own soundness story), the *proof discipline* (which conjunctions discharge which checks), and the *runtime contract* (what residue remains, and what happens when a guard fails or a capability is revoked). All of it lives at the ET-SoN level: that is where the facts are attached, where the guard nodes are explicit, and where the downstream pipeline (selection, scheduling) already honors barrier discipline.
+
+### 6.2 Mathematical Specification
+
+| Requirement | Specification |
+|---|---|
+| **Domain** | Valid ET-SoN graphs at T3/T4 with check nodes annotated (kind, object/index operands, exception target); fact inputs: IV ranges, GVN congruence, MayAlias/regions, capability facts, profile. |
+| **Codomain** | ET-SoN graphs with check nodes removed (proven), replaced by dominating barrier-flagged Guard nodes (speculative), or retained; self-contained proof ledger entries per erasure. |
+| **Definitions** | Fact f: a proposition over program states with a source analysis, a validity scope (graph version, capability lease state), and a strength (must-fact: holds on all states in scope; profile-fact: held on observed states). Proof p = (conjunction of facts, check discharged, scope). Lease: a registration (capability family, generation set, code ranges) entered in the revocation map for the lifetime of the code. |
+| **Preconditions** | Valid_IR; facts current for the graph version (DICE version discipline); for capability erasures: the lease protocol of §6.5 is in force and the static no-attenuation precondition holds syntactically for the region. |
+| **Postconditions** | ⟦transformed⟧ = ⟦original⟧ on states satisfying all fact preconditions and lease validity: same values, same exceptions (the erased check's exception is impossible under the facts), same capability enforcement (revocation cannot complete while a leased region runs), same GC-visible state. |
+| **Invariants** | Proof soundness (1), fact-scope validity (2), lease totality (3), no side-effect elimination (4), speculation hygiene (5), ledger resolvability (6). |
+| **Relations** | p ⟹ check c discharged: c's failure state is disjoint from the fact conjunction's state set (set-level soundness statement). |
+| **Failure behavior** | Verification-mode mismatch: erasure reverted, check retained, mismatch filed as a bug. Budget overrun: pass stops at tier boundary (falls back to the lower tier's residual checks). Lease protocol failure (arbitration cannot quiesce a region): revocation waits — revocation is the caller-side operation and may block; compiled code never proceeds under an invalidated lease. |
+| **Complexity** | Class 1 at T3 (per-region hoisting/fusion), class 2 at T4 (full conjunction solving over the fact lattice). |
+| **Correctness** | Invariant 1 is the soundness contract: an erased check's failure states are provably unreachable under the facts; the ledger audit re-derives each proof on demand. |
+
+### 6.3 Fact Sources
+
+| Fact | Source | Strength | Notes |
+|---|---|---|---|
+| IV range [lo, hi] with no-overflow conditions | Induction-variable analysis (catalogue optimization 100 machinery) | must | modular arithmetic; slope/bound reasoning |
+| Value ranges + comparison refinement | Constrained new-values along branches | must | Sea-of-Nodes type lattice, refined by branch outcomes |
+| Object identity (same value number) | GVN congruence over the *reference value* | must | identity is a GVN property, not an alias-analysis product — MayAlias is an over-approximation and can never certify must-identity |
+| Constant-length allocation | Allocation site with constant size, non-escaping or escaping-with-unmodified-length | must | length is a compile-time constant for the allocation; the type system forbids stores to length header words (header offsets are not store-addressable per the UGB memory model), so the constant holds for the object's lifetime; FFI-pinned types (CAMT pinning rules) are excluded from this proof |
+| Length guarded reload | One speculative dominating test `len(a) == len₀` per (loop, object) family | profile/speculative | the standard replacement for a must-fact the sources cannot produce; all other length facts in the guarded region cache against len₀ |
+| Capability grant c: family, generation set, permission set | Capability System Implementation document §6.3/§6.5; lease protocol §6.5 here | must (under lease) | covers token identity + generation + permissions, per §6.5; combined with admission (row below) and the no-attenuation precondition it re-establishes the per-access check semantics |
+| Capability admission (entry validation) | Leased-region entry check on the token values actually present | must | at region entry, every token register used by erased checks is validated once: lookup, generation ∈ lease set, permission set ⊇ check requirements; establishes the grant fact for tokens admitted via CALL — caller-side attenuation included, since the entry check validates the actual register contents |
+| Region non-aliasing with stores | Alias Analysis Subsystem document §6.6 | must-keep only | usable to *keep* checks, never to erase identity claims |
+| Profile absence of failure | T0/T1/T2 counters | profile | speculative class only |
+
+The table is deliberately short: every must-fact has a named producer with a must-strength argument. The general-object bounds pattern (arbitrary object, profiled loop) is served by the guarded length-reload, not by a circular length-cache claim: the earlier draft's "one length load + identity transfer" required a must-non-aliasing conclusion (no intervening store touches the length word) that its own permitted fact sources could not produce — the guarded reload replaces it with one explicit runtime predicate per family, which composes with Aegis's own fusion/widening machinery.
+
+### 6.4 Elimination Classes and Techniques
+
+**Proven class.** The check's failure state is provably unreachable:
+- Bounds: index ∈ [0, len) derived from IV ranges + a length fact (constant-length allocation, or a dominating earlier check on the same reference value number — dominance, not post-dominance, is the required relation) + no-overflow side conditions on address arithmetic (element scale × index must not overflow: proved, or the access uses the widened form that cannot overflow).
+- Null: reference's non-nullness derived from constrained new-values, allocation freshness, or a dominating dereference already executed on the same reference value number (a prior successful load that dominates the check).
+- Capability: grant facts + bounds within the grant + lease validity (§6.5) + the region's static no-attenuation precondition + entry admission (§6.3: every token used by an erased check is validated once at region entry; token operands must be dominated by that validation per GVN identity, and calls whose mod/ref summaries may deliver family tokens into erased-check positions mark those checks un-erasable). Together these re-establish the per-access check's semantics (identity, generation, permissions) inside the region. Erased with zero per-access residue (the entry validation is per-region); self-contained ledger entry recorded.
+- Type: cast target provably inhabited by the value's refined type (constrained new-values + class-hierarchy facts, catalogue optimization 120 machinery).
+
+**Speculative class.** Failure is profile-absent but not provably impossible: one dominating, barrier-flagged Guard node + standard deopt. Techniques:
+- **Fusion:** one guard per (IV, length) family per region — the family's tightest bound is tested once; members are erased.
+- **Widening:** test the loop-limit value instead of per-access indexes when the IV's slope/monotonicity is proved (catalogue optimization 104/105 discipline).
+- **Peeling:** first-iteration check peeling when the steady-state proof needs iteration ≥ 1 (catalogue optimization 96/97 discipline).
+- **Guarded length-reload:** one `len(a) == len₀` test per (loop, object) family; lengths cached against len₀ inside the guarded region.
+
+**Retained.** No provable or profile-supported elimination: the check stays. Coverage instrumentation (per-site outcome counters: proven/speculative/retained) is exported for tuning; the counters feed the tiered system's cost-benefit model.
+
+### 6.5 Capability Lease/Rendezvous Revocation
+
+Per-access capability checks (Capability System Implementation document §6.5.1: token lookup, generation, status, permission mask, mask intersection) enforce strictly more than any single epoch compare — they catch attenuation-created descendants, narrowed permission sets, and revoked tokens mid-region. Erasing them under one weak fence is unsound. The sound mechanism moves the synchronization to the revocation operation, where it belongs:
+
+1. **Lease registration.** At install, code whose capability checks were erased registers a lease: (capability family, generation set proven, code ranges). The lease lives in the revocation map for the code's lifetime.
+2. **Rendezvous revocation.** `revoke` on a leased capability uses the request → park → resume arbitration skeleton of the GC Interaction Subsystem document §6.3, with two Aegis-owned adaptations: parking is range-selective (threads whose PCs lie in the leased ranges), and invalidation is lease-aware (bump the capability generation, poison the lease). The resume step is not in-place: parked leased-region threads are released through coordinated synthetic region deopt requests (Concurrent Deoptimization Subsystem document §6.5 — synthetic requests are its supported mechanism, distinct from the external-trigger asynchronous deopt it excludes), landing in T0 with reconstructed state; the poisoned lease simultaneously enqueues recompilation of the leased ranges with checks restored, so all future entries into the ranges execute checked code. Revocation therefore cannot complete while any erased-check access under the old generation is in flight, and no code re-enters the erased-check form after revocation.
+3. **Static no-attenuation precondition.** A region with erased capability checks must contain no capability-mutating operation on the leased family (no CAP_ATTENUATE, no CAP_ADMIN grant) — checked syntactically on the UGB/ET-SoN region before the proof applies. Inside such a region, token identity and the permission set cannot change, so the lease's generation set + permission set fully covers the per-access check's semantics; descendant revocations propagate upward through the family tree in the revocation map (O(family depth)).
+4. **Policy for unleased capabilities.** Capabilities revoked at high frequency (per-request sandboxing patterns) must not be leased: their checks are retained, or reduced to the generation+permission guard only when profile shows no mid-region mutation (speculative class). The per-function fence-deopt counter problem of the earlier draft disappears with it: fence-driven storms do not exist because fences do not deopt — revocations rendezvous.
+
+Lease cost honesty: revocation of a leased capability costs O(park-protected-threads) — a bounded, rare, caller-side pause (the capability document's own positioning: revocation is rare). Compiled code pays zero.
+
+### 6.6 Proof Ledger and Verification Mode
+
+Every erasure appends a self-contained ledger entry: (check site, kind, fact conjunction in declarative form, scope: graph version pin + lease generation set). Entries reference node ids only for addressability, never for re-derivation — the declarative facts are sufficient to re-run each proof. Verification mode (test/profile builds): re-derive the proof per entry and diff; on mismatch, revert the erasure and file the bug. Installed code pins its graph version (DICE §6.3 pinning discipline), so entries remain resolvable for the code's lifetime; the ledger is serialized with the code metadata (DWARF document §6.8 deopt metadata integration extended with proof references) so post-mortem tooling can audit shipped code. The ledger is an audit mechanism; it is not a proof assistant and does not claim formal verification.
+
+### 6.7 Interaction with Deoptimization and the Tiered System
+
+Speculative guards emit standard deopt points: region-scoped invalidation on failure (Deoptimization Subsystem document §6.5 scope determination), failure counters, and specialization disabling (T1 invariant 8 discipline) feed recompilation — cheap under DICE (Differential and Incremental Compilation Subsystem document: profile version bump marks the relevant queries red). Deopt storms from wrong speculative guards are bounded by the counters that disable the specialization; lease-driven invalidation never produces guard storms because it is rendezvous-based (§6.5).
+
+### 6.8 Validity Invariants
+
+**1. Proof soundness.** For every erased check c with proof p: no state satisfying p's fact conjunction (and lease validity) makes c fail. Set-level statement over the fact lattice; audited via §6.6.
+
+**2. Fact-scope validity.** Every fact carries its validity scope (graph version, lease generation set, profile version); a proof is invalid outside its facts' scopes; DICE version bumps invalidate affected proofs (red queries).
+
+**3. Lease totality.** Every erased capability check lies inside a leased region whose static no-attenuation precondition holds and whose tokens are admission-validated at entry (§6.3/§6.4); every revocation path goes through the rendezvous protocol with deopt-out resume and check-restoring recompilation; no revocation completes while a leased region executes under the old generation set, and no erased-check code executes after the lease is poisoned.
+
+**4. No side-effect elimination.** Checks with language-defined hooks, ordering requirements, or observable evaluation are never eliminated; only built-in checks are candidates.
+
+**5. Speculation hygiene.** Every speculative guard's failure records the assumption and disables the specialization; recompilation observes the disablement.
+
+**6. Ledger resolvability.** Every ledger entry is self-contained and re-derivable; installed code pins its graph version; unresolved or stale entries are audit failures (the code's checks are re-expanded, never silently trusted).
+
+### 6.9 Representation and Cost Model
+
+**Storage.** Ledger: ~40 bytes per erasure (declarative facts + scope); leases: one revocation-map entry per protected region; guards: standard deopt metadata; Guard nodes: one node + one barrier flag.
+
+**Cost accounting.**
+- Elimination pass: class 1 at T3 (per-region fusion/hoisting), class 2 at T4 (conjunction solving) — within tier budgets (Tiered Compilation System document §6.5 constants).
+- Runtime residue: proven — zero; speculative — one compare per family per region; capability — zero inside leased regions, rendezvous cost paid by revocation (caller-side, rare).
+- Verification mode: O(ledger) re-derivation, test builds only.
+
+**Honest coverage statement.** Elimination coverage is a workload property, not a constant. The design guarantees: no miscompilation (invariant 1 + audit), amortized residue (fusion, guarded reloads, leases), and exported per-site outcome counters so coverage regressions are observable, rather than claiming a fixed percentage.
+
+---
+
+## Revision Notes (post red-team)
+
+1. Elimination point moved from Machine IR to ET-SoN (break: Machine IR has no check/proof representation, no §6.7 verifier rule for erasures, and DP selection + scheduling could sink guards below their loads); speculative guards are barrier-flagged Guard nodes honored by the existing dependency model; post-selection opportunities honestly forgone.
+2. Epoch-fence mechanism replaced by lease/rendezvous revocation on the revocation caller side, using the GC Interaction §6.3 arbitration protocol (breaks: asynchronous revocation recovery outside the Concurrent Deopt subsystem's scope — the fence could not satisfy its own invariant 3; one epoch compare covers strictly less than the per-access check — token identity, generation, permission narrowing, descendant revocation); static no-attenuation precondition makes the lease cover the full check semantics.
+3. Length-cache circularity removed: must-strength facts are restricted to a short table with named producers (constant-length allocations, IV ranges, GVN reference identity, dominance-based null); the general-object pattern uses the guarded length-reload (break: "same VN" over effectful loads and must-non-aliasing of stores were must-facts the sources cannot produce).
+4. Post-dominance corrected to dominance (break: the stated relation proved nothing).
+5. Ledger entries are self-contained declarative facts + pinned graph versions (break: node-referencing entries orphaned by DICE pruning made installed code unverifiable).
+6. Fence-driven deopt storms eliminated by construction (rendezvous instead of deopt); per-request revocation churn served by the unleased policy (break: capability elimination self-disabled under its core workload).
+7. All phantom citations removed (Machine IR §6.7 rule, TMD flags, Kernelis containment as a citation): TMD null-trap handling is now listed as a target-dependent proven-class *limitation* pending a TMD extension, not a cited flag.
+
+**Round 2 (vote-round fixes).** 8. Capability-admission entry validation added as a named must-fact producer with a token-dataflow precondition (GVN-dominated token operands; mod/ref-summary taint marks checks un-erasable) — closes the caller-admitted narrowed-token hole that caller-side attenuation at CALL leaves open. 9. Rendezvous resume no longer in-place: parked threads deopt to T0 via Concurrent Deopt §6.5 synthetic requests, and poisoned leases enqueue check-restoring recompilation — closes the post-revocation enforcement hole. 10. Guard-ordering re-grounded: ET-SoN state-chain discipline plus an owned scheduling extension for the barrier flag (the earlier "flag the scheduler already consumes" claim was false); GC Interaction §6.3 citation reworded as skeleton + owned adaptations; type elimination cites catalogue 120; constant-length proof excludes FFI-pinned types.
+
+---
+
+# Deterministic Execution Replay Subsystem — Complete Design Document (v1)
+
+## 0. Document Control and Design Scope
+
+**Component:** Deterministic Execution Replay Subsystem (Chronon)
+
+**Version:** 1.0
+
+**Role:** Records the non-deterministic events of a running VORTEX process into a compact replay log and reproduces execution from it — backward and forward — in two modes: Semantic Replay (program-observable results identical, for identity-independent guests) and Bit-Exact Replay (runtime-internal decisions identical, for debugging the runtime itself: JIT heuristics, GC behavior, deopt storms). Backward stepping rests on real stop-the-world quiescence snapshots plus a barrier-fed undo log — not on a misreading of the SATB snapshot property.
+
+**Design Status:** Complete specification.
+
+**Review:** Adversarially red-teamed (reviewer R3). Principal breaks incorporated: the SATB time-travel foundation is replaced (SATB preserves reachability, not state — snapshots now happen only at true quiescence points and backward stepping uses a barrier-fed undo log; the O(1) collector-provided claim is dropped); the snapshot state is enumerated completely (code cache, tier states, IC tables, profile counters, identity-hash state, TLAB, lock states, pending deopt requests); Bit-Exact replay switches from heuristic re-derivation to decision-forcing with sealed recording; the deterministic-allocator claim is replaced by forced-GC replay with recorded placements, and Semantic mode's contract is scoped to identity-independent guests; recorder-failure semantics are reconciled per mode; E4 is scoped (monitor order only; CAS counts are heuristic attribution, never replayed memory state); virtualization is bound per resource, not per syscall name, with the FFI boundary contract stated; vector clocks are replaced by per-thread sequence numbers plus a sync-point edge log. See Revision Notes at the end.
+
+**Scope:** This document defines the event taxonomy, the record format, the two replay modes, the virtualization layer, snapshot-based time travel, and the overhead contract. Cross-references to the other seven subsystem documents added in this set refer to documents appended in the same set. It does not define:
+- The ET-SoN effect lattice that classifies observability (ET-SoN document §6.4; Chronon consumes the classification)
+- The GC barrier implementation (GC Subsystem document §6.6/§6.7/§6.10; Chronon owns the undo-log append those barriers gain, §6.5 here)
+- Deopt metadata format (Deoptimization Subsystem document §6.6; DWARF document §6.8)
+- Tier-transition forcing hooks (Tiered Compilation System document; Chronon owns the forcing extensions of §6.6 here)
+- The guest languages' own nondeterminism contracts (UGB document)
+
+**Normative References:**
+- The rr record-and-replay debugger (Mozilla) — syscall-level deterministic replay via ptrace-based scheduling control; Chronon's Bit-Exact data-race fallback belongs to the hardware-watchpoint family of techniques (cited as prior art for that family, not as rr's own mechanism)
+- Lamport, L., "Time, Clocks, and the Ordering of Events in a Distributed System" (logical clocks; per-thread sequence numbers + edge log here); Fidge/Mattern vector clocks cited as the rejected heavier alternative
+- Time-travel debugging systems literature (snapshot + deterministic forward-replay as the reverse-execution substitute)
+
+**Known Limitations:**
+- Semantic mode replays program-observable results for **identity-independent guests**; guests whose semantics depend on object addresses (UGB raw-pointer semantics) require Bit-Exact mode — stated as a mode precondition, not hidden.
+- Guest data races (in languages that permit them) are not recorded in Semantic mode; Bit-Exact covers races only via the hardware-watchpoint fallback, at its (large) cost.
+- Backward granularity = quiescence-point spacing (pause-to-pause), plus the forward-replay distance; continuous reverse execution is out of scope.
+- FFI-called foreign code records at boundary granularity (returns + declared effects); foreign-internal nondeterminism is behind the boundary and out of contract.
+- Bit-Exact replay of GC timing requires forced collections at recorded triggers; its overhead is materially higher than Semantic mode (honest ranges in §6.8).
+- Cross-hardware replay requires the same TMD feature set recorded in the log header; differing feature sets refuse replay (or degrade to Semantic mode explicitly).
+
+---
+
+## 1. Goals, Non-Goals, and Constraints
+
+### Goals
+
+1. Total observability within the stated contract: every guest-observable nondeterminism class has a recorder (completeness invariant 1), with the FFI boundary and identity-dependence preconditions stated.
+2. Two replay modes with distinct contracts: Semantic (same program results, identity-independent guests) and Bit-Exact (same runtime decisions), both forward and backward (time travel at quiescence granularity).
+3. Bounded overhead with an honest range: Semantic mode target ≤ 10% typical (2–20% depending on syscall density); Bit-Exact ≤ 50% typical (up to 2× on barrier-heavy workloads).
+4. Production-safe: sampled epochs, compressed per-thread ring buffers, mmap-spillable logs; recording off by default, flag-on per process/epoch.
+5. Attribution: every event maps to a source position via deopt/DWARF metadata, so replays present as line-level timelines.
+
+### Non-Goals
+
+1. Reproducing wall-clock performance (replay reproduces decisions, not nanoseconds).
+2. Replay across different TMD feature sets (refused or degraded, §6.7).
+3. Continuous reverse execution (reverse stepping = snapshot + forward replay).
+4. Formal proof of replay determinism (the determinism contract is tested by the replay-differential harness, §6.9).
+
+### Constraints
+
+- Recording must be zero-cost when disabled: no code path changes, no metadata reads on the fast path (a static flag per compiled region gates recorder calls; DICE re-specialization keeps the flag cheap).
+- Event ordering: per-thread sequence numbers + sync-point edge log (O(1) per event amortized); no vector clocks on the record path (Fidge/Mattern vector clocks rejected as heavier — they buy causality queries the modes do not need).
+- Snapshots occur only at true quiescence points (stop-the-world pauses where all threads are parked); backward granularity is pause-to-pause plus forward-replay distance.
+- Log format is append-only, checksummed per block, self-describing (header pins tool versions: UGB version, compiler versions, TMD feature set, duality world mode).
+
+---
+
+## 6. Deterministic Execution Replay Subsystem
+
+### 6.1 Purpose and Domain
+
+Heisenbugs are production failures that vanish under debugging. Their fuel is nondeterminism: scheduling order, RNG, time, address-dependent behavior, GC timing, JIT decisions. Chronon records exactly the decisions that make two runs differ and replays them, so a production failure reproduces bit-for-bit (Bit-Exact) or result-for-result (Semantic) on a developer machine — with backward stepping to inspect state before the divergence. The design point that makes this tractable inside a managed runtime is that VORTEX already separates pure from effectful operations (the ET-SoN effect lattice), attributes positions (deopt metadata), and funnels every heap-reference write through barriers (the GC's SATB/load barriers) — Chronon joins these three instead of building a parallel observability stack, and it is honest about what each provides.
+
+### 6.2 Mathematical Specification
+
+| Requirement | Specification |
+|---|---|
+| **Domain** | A running process (or Kernelis environment) with recording enabled; event sources: guest ops, runtime decisions, host interactions. |
+| **Codomain** | A replay log L (header + per-thread event streams + sync-point edge log + snapshot index); replayed executions satisfying the mode contract. |
+| **Definitions** | Event e = (thread t, sequence number s_t, kind k, payload). Kinds: E1 scheduler (sync-point edges: grant order at monitors/locks, thread start/join), E2 environment (time reads, RNG draws, fd reads, env queries, identity-hash materializations), E3 runtime decisions (GC triggers/moves, deopts, tier promotions, code placements), E4 monitor contention order (heuristic attribution; CAS failure counts recorded for attribution only). Quiescence snapshot S: full restorable state at a stop-the-world point (enumerated in §6.5). Undo log: per-region log of pre-write heap values appended by the extended barriers. |
+| **Preconditions** | Recording flag set; log writable; TMD feature set + world mode pinned in header; guest within the supported virtualization set (else capture-invalidate per resource); Semantic mode additionally: identity-independent guest (address-dependence requires Bit-Exact). |
+| **Postconditions** | Semantic: replay's program-observable trace (values, exceptions, capability checks, guest-visible I/O) is identical to the recorded run's, for identity-independent guests. Bit-Exact: additionally, runtime-internal decision trace (GC events, tier transitions, deopt events, code addresses) is identical, with collections forced at recorded triggers. |
+| **Invariants** | Record completeness (1), replay determinism (2), zero-cost-disabled (3), attribution (4), log integrity with loud non-replayability marking (5). |
+| **Relations** | →_hb over events via per-thread sequences + sync-point edges; snapshot ordering by quiescence point. |
+| **Failure behavior** | Recorder failure in Semantic mode: degrade to sampled or stop, with a process-visible warning; the log prefix remains replayable and the log is marked truncated at the last valid block. Recorder failure in Bit-Exact mode: recording stops and the log is **marked non-replayable** loudly at the next block (Bit-Exact is a debugging tool; silent divergence is worse than loud failure). Guest execution is never blocked on recorder failure. |
+| **Complexity** | Record: O(1) amortized per event (varint payload, per-thread ring; sequence numbers O(1)). Replay: O(|L|) forward; backward = O(snapshot restore + forward-to-target). |
+| **Correctness** | Invariants 1–2 are the contract; the replay-differential harness (§6.9) tests them: run twice, record once, assert trace equality per mode. |
+
+### 6.3 Event Taxonomy and Recorders
+
+| Kind | Recorder | Mechanism |
+|---|---|---|
+| E1 scheduler | Sync-point instrumentation (monitor enter/exit, lock grants) | per-thread sequence stamp + sync-point edge log (grant order) — O(1) per stamp |
+| E2 environment | Virtualization layer: time/RNG/fd/env/identity-hash | intercept at the runtime service entries (time, RNG, fd, env — the interception mechanism stands on its own); the ET-SoN effect lattice contributes the pure-vs-effectful split (E = ∅ regions record nothing), not a per-load environment flag (the lattice defines no environment regions — this claim is corrected from the earlier draft) |
+| E2 identity | Allocation/identity-hash recorders | allocation sequence and identity-hash materialization order recorded when guest behavior depends on identity (Bit-Exact prerequisite) |
+| E3 GC | GC Subsystem hooks | trigger decisions, evacuation moves (Bit-Exact: replay forces collections at recorded triggers, §6.6) |
+| E3 JIT | Tiered system hooks | promotions, deopts, code cache placements (Bit-Exact: decision-forcing, §6.6) |
+| E4 monitors | Codegen instrumentation | contention/grant order for heuristic attribution; **not** replayed as memory state |
+
+Effect-metadata exploitation: the ET-SoN effect lattice already distinguishes observable effects (MemRead on environment regions, Call, Trap) from pure computation. Recorder calls attach only to effectful operations; pure regions replay from the log's code pointer with no events at all. Deopt metadata (DWARF document §6.8) supplies source attribution for every recorded event.
+
+### 6.4 Record Format
+
+Per-thread append-only streams: `(varint kind, varint seq_delta, payload)` with per-block checksums; dictionary compression for repeated payloads (fd paths, class names); ring buffer with mmap spill for production sampling. Log header: tool versions, UGB version, compiler versions, TMD feature set, world mode (AOT/JIT duality state — replay refuses mismatched modes since tier decisions differ), guest program hash. Crash semantics: the log is valid up to the last checksummed block; the tail is marked truncated-at-last-valid-block and consumers are told exactly how much of the failure window was lost.
+
+### 6.5 Quiescence Snapshots and the Undo Log
+
+**Snapshots at true quiescence.** The GC document's SATB property is a *reachability* abstraction (a re-gray barrier and mark bits), not a restorable heap image — the earlier draft's "O(1) collector-provided snapshot" claim was wrong and is withdrawn. Chronon takes snapshots only at stop-the-world quiescence points (the collector's initial-mark/remark pauses, or a dedicated brief quiesce when recording is enabled and no GC pause is imminent): all threads parked, so stacks, registers, TLAB state, lock states, and the heap image can be captured exactly once per snapshot. The **complete restorable state S** is enumerated: heap images (COW-mapped regions), stacks + register files via frame maps, code cache contents + per-function tier states, IC tables, profile counters (post-snapshot events replay; pre-snapshot counter state captured in S), resolved-key/identity-hash materialization state, TLAB cursors, monitor/lock states, pending deopt requests, pointer-color state reset deterministically (mark-cycle state is not restored; replay re-derives GC cycles from recorded triggers).
+
+**Barrier-fed undo log (owned GC barrier extension).** For backward stepping between snapshots, the SATB/load barrier paths (GC Subsystem document §6.6/§6.7/§6.10) gain an append of the pre-write value to a compressed per-region undo log when recording is enabled. Backward step to event e: restore the nearest quiescence snapshot S_i, then apply the inverse of the undo-log entries in reverse order up to just before e — no heap re-execution needed for reference-state rewinding (the undo log covers reference writes, the only writes the barriers see; primitive-field state rewinds via the forward-replay segment of §6.6); execution state rewinds by replaying forward deterministically from S_i to the pre-event point when control state matters. The cost is honest: undo traffic ≈ write-barrier traffic × 4–16 bytes while recording is enabled; COW (mprotect) covers cold regions if undo bandwidth dominates. Snapshots are not free and are not claimed to be.
+
+### 6.6 Replay Engine
+
+**Forward replay.** Load header; verify feature set + world mode; execute the guest under the virtualization layer: time reads return recorded values and advance the virtual clock; RNG draws replay; fd reads replay per-resource (§6.7); environment queries replay; sync points re-enforce recorded grant order (a thread whose next recorded grant is not its own blocks on a replay semaphore).
+
+**Bit-Exact decision-forcing (owned tier/GC extensions).** The E3 log is the source of truth: replay installs, deopts, moves, and collects at the recorded points via forcing hooks (the tiered system gains explicit external-trigger install/deopt entry points — the same plumbing pattern the Compilation Cancellation Subsystem document demonstrates for external triggers; GC gains trigger overrides). Recorded runs execute in **sealed mode**: adaptive thresholds frozen, resource-pressure cancellation disabled, generational sizing fixed — recording opt-in loses adaptivity, an acceptable trade for a debug tool. Heuristic re-derivation is demoted to a differential checker: replay re-derives decisions from the recorded profile stream and *compares* against the log; mismatches are harness bugs or version drift, surfaced loudly, never silently trusted.
+
+**Identity-dependent guests.** Guests whose observable behavior depends on object addresses (UGB raw-pointer semantics) require Bit-Exact mode: replay forces collections at recorded trigger points with recorded survivor placements, so address sequences reproduce. Semantic mode disclaims address-dependence as a precondition (§6.2, §6.8).
+
+### 6.7 Virtualization Layer
+
+**Per-resource binding.** Coverage binds to resources, not syscall names: each fd/object gets a recorded-state shadow (read cursor, write log, result codes); defined and capture-invalidate operations on the same object dispatch through the object's ops table, so a virtualized read and a capture-invalidate ioctl on one fd cannot interleave inconsistently; external-effect operations on virtualized objects are recorded as ordered effects re-applied at replay. Defined coverage: clock domain (wall/monotonic), RNG (per-stream state), file/fd reads, env/argv queries, identity-hash values. Capture-invalidate: undefined syscalls record the result; replay serves it from the log (serialized), preserving determinism but not the syscall's real-world reactivity. Coverage is a per-resource, header-versioned table.
+
+**The FFI boundary contract.** Foreign code called through UGB FFI executes outside the effect lattice; its internal nondeterminism cannot be recorded per-syscall without instrumenting the foreign code. The contract: FFI calls record at boundary granularity — returned values plus a side-effect summary. The summary's source is an **owned UGB extension**: the FFIDescriptor (UGB document §6.7) gains an optional `effect_summary` declaration (mod/ref over the declared argument objects, flag-gated per feature set); where the descriptor lacks one, the recorder records returns plus declared reference-pass effects only, and the determinism contract scopes accordingly. Foreign-internal nondeterminism (a foreign function that reads the clock and branches) is behind the boundary and out of contract, and guests whose correctness depends on it are out of contract. This is the honest scope of invariant 1.
+
+### 6.8 Overhead Contract
+
+| Mode | Mechanism overhead | Honest range |
+|---|---|---|
+| Disabled | none (static flag per region) | 0% |
+| Semantic | E1/E2 stamps at sync/env events; varint encode; sequence numbers O(1) | target ≤ 10% typical; 2–20% by syscall density |
+| Bit-Exact | + E3/E4 full decision recording; allocation/identity sequences; forced GC; undo log append per heap write | target ≤ 50% typical; up to 2× on barrier-heavy workloads |
+| Sampled prod | epochs sampled by policy; ring spill | proportional to sampling rate |
+
+Recorder failure never blocks execution; its replayability consequences differ per mode (§6.2 failure behavior).
+
+### 6.9 Validity Invariants
+
+**1. Record completeness (scoped).** Every guest-observable nondeterminism class within the stated contract (identity-independent guests for Semantic; FFI boundary granularity; supported virtualization set) has a recorder; a new observable source without a recorder is a specification violation (the recorder taxonomy of §6.3 makes observable classes enumerable).
+
+**2. Replay determinism.** The same log yields the same observable trace per mode on every replay, on any machine with the header's feature set and world mode.
+
+**3. Zero-cost-disabled.** With recording disabled, no fast-path code changes: the flag is a per-region static, DICE re-specialization keeps it free; the undo-log append is gated by the same flag.
+
+**4. Attribution.** Every event resolves to a source position via deopt/DWARF metadata.
+
+**5. Log integrity.** Per-block checksums; recorder failure in Bit-Exact mode marks the log non-replayable loudly; a corrupted block fails the log loudly, never silently replays divergent state.
+
+### 6.10 Representation and Cost Model
+
+**Storage.** Event record: 2–8 bytes typical (varint; dictionary compression for repeated payloads; sync-point edges carry the grant order); per-thread ring default 4 MB with mmap spill; quiescence snapshots: COW heap images + enumerated state (§6.5); undo log: 4–16 bytes per heap-reference write while recording.
+
+**Cost accounting.**
+- Record: O(1) amortized per event; sync points O(1) for sequence stamps + edge append.
+- Replay: O(|L|) forward from a snapshot; backward O(snapshot restore + undo-log inverse + forward segment).
+- Snapshot: full capture at quiescence (one pause, cost proportional to resident state); undo traffic while recording.
+
+**Replay-differential harness.** The subsystem's own test contract: record run A; replay twice (B1, B2); assert B1 = B2 (determinism invariant 2) and B1 ≈ A per mode; additionally run the Bit-Exact differential checker (§6.6) on every recorded log. This harness is the acceptance gate for every recorder addition.
+
+---
+
+## Revision Notes (post red-team)
+
+1. SATB time-travel foundation withdrawn: snapshots now occur only at true quiescence points with a fully enumerated restorable state; backward stepping uses a barrier-fed undo log (owned GC barrier extension) with honest costs (break: SATB is a reachability abstraction, not a restorable state; "O(1) collector-provided" was false).
+2. Bit-Exact replay switched from heuristic re-derivation to decision-forcing with sealed recording; re-derivation demoted to a differential checker (break: re-derivation inputs — adaptive thresholds, queue backlog, wall-clock cadence — were not in the event stream and are not reproducible).
+3. Deterministic-allocator claim replaced by forced-GC replay with recorded placements; Semantic mode scoped to identity-independent guests as an explicit precondition (break: recorded addresses are not a bump sequence after evacuation; identity-dependent guests diverged even in Semantic mode).
+4. Snapshot state enumerated completely (code cache, tier states, IC tables, profile counters, identity-hash state, TLAB, locks, pending deopts, pointer colors) (break: missing state made forward replay diverge).
+5. Recorder-failure semantics reconciled per mode with loud non-replayability marking and truncation-at-last-valid-block (break: "never a correctness participant" contradicted the Bit-Exact postcondition).
+6. E4 scoped: monitor order for attribution; CAS counts never replayed as memory state (break: faking CAS outcomes permits silent memory divergence).
+7. Virtualization bound per resource with ops tables; FFI boundary-granularity contract stated (breaks: mixed-coverage interleaving on one fd; foreign code outside the effect lattice violated completeness invariant 1 silently).
+8. Vector clocks replaced by per-thread sequence numbers + sync-point edge log, O(1) stamps; Fidge/Mattern cited as the rejected alternative; Lamport citation corrected (break: O(#threads) stamps contradicted the overhead target; vector clocks buy causality the modes do not need).
+
+**Round 2 (vote-round fixes).** 9. FFI side-effect summary declared as an owned UGB extension (FFIDescriptor gains an optional `effect_summary`; the earlier "the descriptor's mod/ref declaration" cited a field that does not exist). 10. ET-SoN "environment-observable loads" claim corrected: the lattice contributes only the pure-vs-effectful split; the environment recorder stands on runtime-service interception, and invariant 1's enumerability rests on the recorder taxonomy. 11. Undo-log rewinding scoped to reference state; primitive fields rewind via the forward-replay segment.
+
+---
+
+# Polyglot Shared Heap Subsystem — Complete Design Document (v1)
+
+## 0. Document Control and Design Scope
+
+**Component:** Polyglot Shared Heap Subsystem (Babel Heap)
+
+**Version:** 1.0
+
+**Role:** One process, one heap, many languages. Defines the Vortex Object Model (VOM) — the unified object representation over which a Rust function, a Python script, and a JS module operate with zero copying and zero marshaling — and the per-language lenses that map each language's semantics onto VOM. Cross-language calls pass raw VOM references on the UGB calling convention with capability-gated, revocable exposure; the GC Subsystem collects one heap with roots from every language. Identity is token-based, never address-based, so the moving collector is irrelevant to identity observables.
+
+**Design Status:** Complete specification.
+
+**Review:** Adversarially red-teamed (reviewer R4). Principal breaks incorporated: identity moved to a token plane (64-bit VM-unique tokens in a side table — the address-based "never a mix" forwarding guarantee the GC document does not provide is no longer load-bearing); the Rust lens is a type-level contract (scoped VomHandle, shared-only access, monitor-guarded mutation — no unrooted-by-construction handles, no aliasing UB); exposure is revocable via per-context object-table cells with generation checks at every crossing (raw pointers are no longer unrevokable); no object-header changes are required (language state lives in descriptors and side tables; monitor state uses the GC header's lock-state slot); strings are WTF-8 canonical with UTF-16/ASCII flags (lone surrogates preserved); JS numeric tag rules specified (−0 stays double; canonical-NaN boundary policy; >2⁵³ conversions defined); per-lens key stores specified; CPython refcount-observable divergences documented; the error model admits its translation layer. See Revision Notes at the end.
+
+**Scope:** This document defines the VOM object model, the lens contracts per language, the zero-copy call path (shims), rooting rules, revocable exposure, error-model unification, synchronization, and identity semantics. Cross-references to the other seven subsystem documents added in this set refer to documents appended in the same set. It does not define:
+- The collector itself (GC Subsystem document; Babel Heap requires no header changes and adds roots, not barriers)
+- Capability token mechanics (Capability System Implementation document; the 32-bit permission-mask extension Kernelis owns carries the new flags, and Babel defines their semantics)
+- INTEROP_CALL encoding (UGB document §6.8; Babel Heap defines the ABI shims beneath it)
+- The Rust-native memory outside the shared heap (owned by the guest language's own rules; Babel Heap defines only the sharing surface)
+
+**Normative References:**
+- Würthinger, T. et al., "One VM to Rule Them All" (Truffle interop model — the lens concept's ancestor)
+- Jones, Hosking, Moss, "The Garbage Collection Handbook" (multi-language rooting)
+- Python data model (CPython semantics for lens fidelity), ECMAScript specification (value semantics for the JS lens)
+- JVM/CLR practice: identity-hash side fields, sync-block index tables (the token-plane precedent), JNI local-ref tables (the exposure-cell precedent)
+
+**Known Limitations:**
+- Dynamic-language semantics are mapped, not transcoded: Python's arbitrary `__getattr__`/metaclass magic and JS prototype mutation take the lens fallback paths (property maps, IC invalidation); the fast paths cover the common cases, fallbacks are correct but slower.
+- No GIL: Python code running under Babel Heap executes concurrently; CPython-observable behaviors tied to reference counting (weakref timing, `__del__` timing for non-cyclic objects, `sys.getrefcount`) are **documented divergences**, not provided. CPython C extensions operate only on non-shared data via adapter boundaries.
+- "Zero performance tax" applies to data sharing and call transit; attribute access and dispatch inside dynamic languages cost what dynamic dispatch costs (ICs help; they do not repeal semantics).
+- Finalization ordering across languages is epoch-ordered, not language-ordered; code relying on cross-language finalizer sequencing is unsupported.
+- Per-lens key spaces are separate (Python dict keys are arbitrary objects; JS keys are strings/symbols on the same shared descriptor) — a documented semantic contract, §6.4.
+
+---
+
+## 1. Goals, Non-Goals, and Constraints
+
+### Goals
+
+1. Zero-copy sharing: a data structure created by one language is accessed directly by another — raw VOM references, no serialization, no defensive copies, no marshaling layer.
+2. One heap, one collector: the GC Subsystem collects all shared objects; every language contributes roots; no per-language heaps inside the shared space; **no object-header changes required**.
+3. Capability-gated, revocable exposure: raw pointer exchange across languages flows through per-context object-table cells with generation checks at every crossing; the audit trail records grant site and context.
+4. Semantic fidelity per lens within its documented conformance suite: identity (token-based), exceptions, truthiness, numeric behavior.
+5. Identity stability independent of the collector: token-based identity survives evacuation by construction.
+
+### Non-Goals
+
+1. Hosting foreign language implementations' C extensions (CPython C API, V8 API) inside the shared heap.
+2. Cross-process sharing (one process, many languages).
+3. Unified type system (types stay per-language; VOM is a representation and capability surface, not a type unification).
+4. CPython refcount-observable semantics (documented divergence).
+5. Real-time guarantees for dynamic-language fallback paths.
+
+### Constraints
+
+- The VOM representation must not change the GC object header (GC Subsystem document §6.3 stands unchanged): language provenance lives in type descriptors; per-object dynamic state lives in side tables keyed by identity token.
+- Cross-language call transit cost is one ABI shim trampoline (no marshaling walks); shim generation is per language pair, JIT-compiled.
+- Every boundary crossing obeys the crossing's capability check (O(1): cell generation compare); within a context, access is unchecked fast-path per that context's grants.
+- Rust guest code never roots unregistered native memory; registering a native structure as containing VOM references requires the ForeignRoot capability and a trace callback.
+- Rust mutation of shared payload acquires the object's monitor guard (RAII) — the exclusion protocol is type-level, not conventional.
+
+---
+
+## 6. Polyglot Shared Heap Subsystem
+
+### 6.1 Purpose and Domain
+
+Polyglot systems today pay at every boundary: marshaling copies, IDLs flatten types, per-language heaps force wrapping, and errors get translated twice. The UGB document's polyglot execution (§6.8) defines language contexts and INTEROP_CALL; the Capability System Implementation document defines how access rights travel. What remains is the object level: what *is* a shared object, what does each language see, who roots it, who collects it, what does identity mean. Babel Heap answers those with the VOM and the lens contracts.
+
+### 6.2 Mathematical Specification
+
+| Requirement | Specification |
+|---|---|
+| **Domain** | Shared heap H (GC-managed per the GC Subsystem document); language contexts from the UGB document §6.8; capability environments per frame; the identity token table. |
+| **Codomain** | VOM objects o ∈ H (base GC objects + descriptor-held language metadata); per-language views via lenses; cross-language call shims; revocable exposure cells; unified error objects; unified root sets. |
+| **Definitions** | Identity token τ(o): a 64-bit VM-unique value assigned lazily per object, stored in the identity side table; all identity observables (is, ===, id(), WeakMap, identity probes) are defined over τ, never over addresses. Exposure cell: a per-context table entry holding a raw pointer + generation, granted by ForeignExpose; crossing check = cell generation compare. Lens ℓ_L: per-language mapping (VOM ↔ L's values/operations). Shim s(L1, L2): JIT-compiled ABI adapter for INTEROP_CALL between contexts. Root set: JIT stack maps ∪ interpreter frame maps ∪ Rust handle scopes (type-enforced) ∪ registered foreign roots ∪ GC-maintained runtime structures (the identity token table, property maps, weakref and finalizer side tables — rooted structures maintained by the runtime, per the T1 resolved-key-table precedent). |
+| **Preconditions** | Valid_UGB units; capabilities present for every cross-language crossing; Rust guests compiled against the scoped-handle contract (§6.4). |
+| **Postconditions** | ⟦polyglot program on Babel Heap⟧ = composition of per-language semantics with the sharing contract: values traverse boundaries unconverted; each language observes its own conformance-suite semantics for the same object; identity observables agree across languages over τ. |
+| **Invariants** | Header neutrality (1), lens fidelity (2), crossing gating (3), rooting totality (4), token identity (5), error unification (6). |
+| **Relations** | VOM reference = pointer into H; τ stable across evacuation (token assigned at first identity use, never recomputed); forwarding resolution (GC Subsystem document §6.9) affects addresses only, never τ. |
+| **Failure behavior** | Missing capability at a crossing: CapabilityViolation per the EH raise path (never a process abort). Revoked cell: crossing raises CapabilityViolation; in-context references already held remain valid per the revocation contract (cells gate new crossings, not held references — the honest revocation scope). Lens fallback exhaustion (unmappable operation): a language-specific TypeError-class VOM error, attributed. |
+| **Complexity** | Crossing check O(1); shim transit O(1); lens fast paths O(1) (IC-cached); token assignment O(1) amortized; fallbacks per lens contract. |
+| **Correctness** | Invariant 2 (lens fidelity) is per-language conformance: each lens is specified against its language's observable semantics with a named conformance suite; suites are the acceptance tests. |
+
+### 6.3 The Vortex Object Model (VOM)
+
+**Representation without header changes.** A VOM object is an ordinary GC object (GC Subsystem document §6.3 unchanged); language meaning attaches through the **type descriptor**: descriptor records carry `lang_flags` (provenance + lens hints), `layout_version` (DSLO-compatible, CAMT document §6.5), and lens metadata. Per-object dynamic state lives in side tables keyed by identity token: property maps (Python attributes, JS expando properties), weak references, finalizer registrations. **Monitor state** uses the GC header's existing lock-state slot (thin/fat; GC Subsystem document §6.3 — the mark word's lock state) — Babel Heap adds no second lock word (the earlier draft's duplicate monitor word is removed).
+
+**Value types.** Machine ints, floats, and small tag-safe values stay unboxed in registers per the UGB type system; boxing happens only where a lens's semantics demand object-hood (Python's int is an object; JS number is not unless boxed).
+
+**Strings.** Canonical storage is **WTF-8** with per-string flags (ASCII / UTF-16-representable / contains-lone-surrogates): JS's lone surrogates (`'\uD800'` — the standard binary-as-string channel) are preserved exactly; Python str and JS string views read the same canonical bytes; `charCodeAt`/`length` semantics hold for surrogate-containing strings. UTF-8-only canonicalization (the earlier draft) was wrong and is replaced.
+
+### 6.4 Per-Language Lenses
+
+| Lens | Fast path | Fallback (correct, slower) | Documented divergences |
+|---|---|---|---|
+| Rust | Typed view via scoped `VomHandle<'scope, T>`; shared-only `&T` under the read protocol of this § (below); mutation via `handle.lock() → VomGuard<'obj, T>` (RAII exclusive monitor hold) | None needed; unshared Rust data never enters H | None (contract is type-level) |
+| Python | Everything-is-object: VOM refs; ints boxed (small-int cache); str/dict/list views | `__getattr__`, metaclass hooks: property-map protocol + user code invocation | refcount observables (weakref/`__del__` timing, `getrefcount`); dict iteration protection via descriptor version counters (spec: "dictionary changed size during iteration" raised on cross-language concurrent mutation) |
+| JS | Numbers f64 with SMI fast path **only for true int32 values (−0 excluded, stays double)**; prototype chains via shape descriptors; property access via ICs | Prototype mutation: IC invalidation + shape transition (standard IC machinery) | none within the suite |
+
+**Numeric boundary policy.** −0 is always a double (never collapses to SMI — `Object.is(v, -0)` and `1/v` hold across round trips). NaN crossing: the canonical NaN pattern applies at language boundaries; bit-exact NaN payloads survive only through typed views (Float64Array/byte views), documented. >2⁵³ integral values: Python int ↔ JS Number conversions are the explicit functions in the UGB InteropRules.value_conversions table (lossy-as-Number with defined rounding, or BigInt-modeled on the Python side) — never silent coercion at the zero-copy boundary.
+
+**Rust sharing contract (type-level soundness).** `VomHandle<'scope, T>` is issued only from a `HandleScope<'s>` (the v8-rs discipline): the borrow checker ties the handle's lifetime to the scope, and the scope's exit is a rooting barrier — a handle cannot be held across a safepoint outside a live scope, so invariant 4 is enforced by types, not by convention (the earlier draft's "handle-scope discipline" was a convention and was one guest bug from use-after-free). Shared payload is accessed as `&T` only; `&mut` over shared payload does not exist — mutation requires `lock()`, whose `VomGuard` acquires the object's monitor in **exclusive** mode (thin lock fast path, fat on contention).
+
+**Read-side exclusion (the `&T` protocol).** The monitor protocol is reader-writer — a Babel-owned extension of the lock-state slot discipline (thin mode gains a shared-hold count; fat monitors are restructured as reader-writer). A `&T` borrow (`handle.get_ref()`, once per borrow, not per field access) takes the monitor in **shared** mode for the borrow's lifetime; writers in every language take it exclusive. The LLVM noalias assumption on `&T` is therefore honest by construction: no exclusive holder (a Rust writer, a Python writer, a JS writer) can exist while a shared borrow is live, in any language. Descriptors may additionally carry the `frozen` lens-contract flag (immutable after initialization): frozen types skip the shared-hold (`&T` is unchecked; dynamic lenses refuse writes on frozen descriptors at the lens boundary) — the zero-cost path for Rust-shared configuration-like data. The monitor is the single exclusion point for all three languages: writers hold it exclusively, live `&T` borrows hold it shared.
+
+**Key spaces (documented contract).** One shared descriptor carries separate key stores per lens where semantics differ: Python dict keys (arbitrary objects) and JS property keys (strings/symbols) are distinct maps on the same object; cross-lens key sharing is explicit API, never implicit.
+
+### 6.5 Zero-Copy Call Path and Revocable Exposure
+
+`INTEROP_CALL` (UGB document §6.8) compiles to: crossing capability check (O(1)) → shim s(L1, L2) (one trampoline: calling-convention translation only — argument registers remapped, no data walk) → callee entry. Arguments are VOM references or unboxed values per the UGB type system; nothing is copied or converted. Return path symmetric. Exception propagation per the lens error mapping (§6.6).
+
+**Exposure cells (revocable raw pointers).** Passing a raw pointer to another language requires the `PERM_FOREIGN_EXPOSE` capability (token-format extension, Kernelis document §6.8): the grant creates a **per-context exposure cell** — a table entry holding the raw pointer plus a generation. Crossings through the cell check the generation (O(1)); revocation poisons the cell (generation bump), so *new* crossings fail immediately and loudly. The cell records the grant site and context — the audit trail's home. Honest revocation scope: references already held inside a context are not retroactively unreachable — cells gate new crossings; guests needing deep revocation use capability-attenuated accessor objects instead of raw pointers (documented pattern). This replaces the earlier draft's "revocation retracts a raw pointer" claim, which was false: token revocation cannot change memory accessibility after a pointer has crossed.
+
+### 6.6 Error Model Unification
+
+Every language's exceptional outcome maps onto one VOM error object: {language tag, kind id, payload ref, stack chain}. Kind-id spaces are partitioned: reserved ranges for language-native classes (Python BaseException-class kinds occupy a reserved range so KeyboardInterrupt-class errors are not confusable with Exception-class catches), language-defined kinds beyond. Propagation follows the EH Subsystem document's tables; per-language landing pads interpret the error per lens — the interpretation layer is Babel-owned (the EH document's §6.6 landing pads are mechanical and language-agnostic; the per-lens semantics are specified here). Rust's INTEROP boundary converts errors to a wrapper type with a downcast protocol (payload is an arbitrary VOM ref; a plain Result::Err(E) cannot carry it — the translation layer is admitted, not denied): `throw 42` arrives in Rust as a wrapper over the boxed VOM value; Rust panics (unwind policy) map to opaque VOM error objects (payload boxed, attributed); abort policy is a build configuration. Python tracebacks materialize lazily at first access.
+
+### 6.7 Synchronization and the GIL Question
+
+No GIL. Languages run concurrently over H. Python's object-level atomicity requirements (dict/list mutation visibility) are met with the GC header's lock-state slot (thin locks, fat on contention) only where the lens's semantics require synchronization; JS's single-threaded per-context execution model is preserved per context (contexts do not share event loops implicitly). Cross-language data races on explicitly shared structures behave per the shared structure's declared model (documented per descriptor type; default: sequential-consistency for descriptor-level operations, language lenses map weaker language models onto it where their semantics demand). The exclusion point for Rust-side aliasing is the monitor guard (§6.4): all three languages' mutation paths funnel through it for shared-rust-lens objects.
+
+### 6.8 Finalization
+
+One finalizer registry, epoch-ordered: finalizers of all languages run in epoch order; within an epoch, per-language ordering is unspecified (documented divergence). Resurrection semantics per GC Subsystem document reference processing.
+
+### 6.9 Validity Invariants
+
+**1. Header neutrality.** The GC object header is unchanged (GC Subsystem document §6.3 stands); all language state lives in descriptors and token-keyed side tables; monitor state uses the existing lock-state slot with defined precedence.
+
+**2. Lens fidelity.** Each language observes its conformance-suite semantics on shared objects; per-language conformance suites pass; documented divergences are enumerated, not silent.
+
+**3. Crossing gating.** Every cross-language crossing passes an O(1) check (capability or exposure-cell generation); raw-pointer exposure requires ForeignExpose with recorded grant site/context; unregistered native memory is unreachable from the GC (ForeignRoot registration is the only path).
+
+**4. Rooting totality (type-enforced).** Every live VOM reference is reachable from the root set: JIT stack maps, interpreter frame maps, Rust handle scopes (enforced by the scoped-handle borrow contract), registered foreign roots, or the GC-maintained runtime side tables (identity tokens, property maps, weakrefs, finalizers); a Rust handle cannot exist outside a live scope (compile-time guarantee).
+
+**5. Token identity.** All identity observables are defined over the 64-bit token plane; identity and identity hashes survive evacuation by construction; address forwarding never affects identity comparisons.
+
+**6. Error unification.** Every exceptional outcome is a VOM error object with a kind id in its reserved range; the Rust boundary's wrapper/downcast protocol is the specified translation layer; no boundary invents a second representation.
+
+### 6.10 Representation and Cost Model
+
+**Storage.** No header extension. Type-descriptor extension: ~16 bytes per descriptor (lang_flags, layout_version, lens metadata). Identity side table: one 8-byte token + hash entry per identity-used object (lazy; most objects never identity-hash). Exposure cells: one entry per grant. Property maps/shape descriptors: allocated on demand.
+
+**Cost accounting.**
+- Crossing check: O(1) (capability pointer compare or cell generation compare per Capability System Implementation document §6.5.1 discipline).
+- Shim transit: O(1) trampoline; design target < 20 ns per crossing (call-convention remap only) — a design target, not a measurement.
+- Lens fast paths: O(1) via ICs; fallbacks per lens contract.
+- Token assignment: O(1) amortized (side-table insert).
+- GC: one collector, one root set; handle scopes and exposure cells are roots, not barriers.
+
+**Honest statement on "zero tax".** Data sharing and call transit are zero-copy and zero-walk. Dispatch *inside* dynamic languages remains dynamic-dispatch cost (IC-served where monomorphic). The tax the system removes is the boundary tax; it does not repeal interpreter/dynamic-dispatch physics, and refcount-observable Python behaviors are divergences, not features.
+
+---
+
+## Revision Notes (post red-team)
+
+1. Token-plane identity (64-bit side-table tokens) replaces address-based identity: the "forwarding resolution never mixes" guarantee the GC document does not provide is no longer load-bearing; id() uniqueness served by 64-bit tokens (break: dict/WeakMap identity failures under concurrent evacuation; 32-bit header hash birthday bound).
+2. Rust lens made type-level sound: scoped VomHandle<'scope, T> (borrow-checker-enforced rooting), shared-only &T, monitor-guarded mutation via VomGuard (breaks: unrootable-by-construction handles; &mut aliasing UB against concurrent dynamic-language writers).
+3. Exposure via per-context revocable cells with generation checks at every crossing; honest revocation scope stated (break: "every access passes a capability check" was false after first exposure; revocation cannot retract an already-crossed raw pointer).
+4. Capability kinds (ForeignExpose/ForeignRoot/ForeignRaw) mapped onto the 32-bit mask extension Kernelis owns (break: 16/16 bits allocated — invented kinds inexpressible); attenuation citation corrected (§6.5.2, not §6.5.3).
+5. Header neutrality: no object-header changes (lang_flags/layout_version in descriptors; monitor state on the GC lock-state slot; identity/property/weakref state in token-keyed side tables) (break: header field exhaustion and the duplicate monitor/hash words).
+6. WTF-8 canonical strings with per-string flags (break: lone surrogates — valid JS — cannot round-trip UTF-8); JS numeric tag rules (−0 never SMI), canonical-NaN boundary policy, >2⁵³ conversion functions defined (break: −0/NaN/precision cliffs unspecified).
+7. Per-lens key stores documented; CPython refcount-observable divergences enumerated; dict-iteration protection via descriptor version counters (break: no-GIL fidelity gaps hidden behind "conformance suite").
+8. Error model admits its translation layer (Rust wrapper/downcast; panic unwind→VOM error, abort policy stated; BaseException kind ranges reserved) (break: "one branch" claim false; Result::Err cannot carry arbitrary payloads).
+9. Rooting totality is compile-time-enforced for Rust (scoped handles), not conventional; EH landing-pad citation corrected (EH §6.6 is mechanical; per-lens interpretation is Babel-owned).
+
+**Round 2 (vote-round fixes).** 10. Read-side exclusion specified: the monitor protocol is reader-writer (owned extension of the lock-state slot discipline); `&T` borrows take the monitor in shared mode for the borrow's lifetime (or skip it on `frozen`-flagged descriptors), making the LLVM noalias assumption honest for readers as well as writers — closes the earlier writers-only exclusion hole. 11. Identity/property/weakref/finalizer side tables declared GC-rooted runtime structures in the root set (closing the rooting-enumeration gap).
+
+---
+
+# Live Hot Code Swapping Subsystem — Complete Design Document (v1)
+
+## 0. Document Control and Design Scope
+
+**Component:** Live Hot Code Swapping Subsystem (Phoenix)
+
+**Version:** 1.0
+
+**Role:** Replaces compiled code of a function while the process runs, preserving live state. The general model is versioned-code dispatch with natural-exit migration (Erlang OTP semantics): every existing frame runs its current call to natural exit in the old code; new calls dispatch to the new code through a per-function version table. For functions whose callers opt in, Phoenix additionally offers certificate-gated optimized re-entry: region-based deoptimization materializes the active frames of the old region, and migration maps (computed from the DICE anchor diff, with per-anchor certificates) translate that state into resume stubs emitted by the new code's own compiler. No live frame ever loses state; publication is atomic; per-thread migration happens at cooperative safepoints.
+
+**Design Status:** Complete specification.
+
+**Review:** Adversarially red-teamed (reviewer R4). Principal breaks incorporated: the "generalized OSR re-entry" dependency is removed (T1 §6.9 defines loop-header T0→T1 stubs only; the tiered system excludes OSR into T2+; arbitrary-entry OSR stubs are now Phoenix-owned machinery behind a certificate gate, with materialize-to-T0 as the universal default); the inline-boundary claim is corrected (materialization reconstructs source state, but re-entry across inlined boundaries needs call-continuation reconstruction — out of v1 scope, T0 handles it naturally); migration maps carry per-anchor certificates (live-set equality + state-token compatibility) instead of trusting syntactic anchor matches; effect barriers use runtime truth (held-monitor sets from a deopt-metadata extension) rather than static annotation; monitor-holding frames defer, so monitor transfer is removed (the thin/fat monitor race cannot arise); publication-time validation is static-only with guest predicates evaluated per-frame at migration safepoints; overlapping swaps are serialized per function with a no-prune-until-residency-zero rule; residency is defined over return addresses and FFI resume slots; layout adaptation no longer runs inside GC phases. See Revision Notes at the end.
+
+**Scope:** This document defines the swap pipeline, the version-dispatch model, migration maps and certificates, the T0-default and optimized-re-entry migration paths, effect barriers, semantic validation constraints, schema/layout evolution handling, and old-code lifetime management. Cross-references to the other seven subsystem documents added in this set refer to documents appended in the same set. It does not define:
+- Deoptimization mechanics (Deoptimization Subsystem document §6.3–§6.8; Concurrent Deoptimization Subsystem document §6.4–§6.7 — Phoenix composes them; the metadata extension it requires is owned here, §6.6)
+- The anchor diff that produces migration maps (DICE — shared service; the certificates that make maps migration-safe are Phoenix-owned)
+- Layout versioning (CAMT document §6.5; Phoenix owns the retirement of old-layout traffic, §6.7 here)
+- Class redefinition delivery semantics (UGB document)
+- Tier policy (Tiered Compilation System document; Phoenix's replacement tiering delegates to it)
+
+**Normative References:**
+- Würthinger, Wimmer, Mössenböck, "Stackless On-Stack Replacement" (OOPSLA 2009 — re-entry into optimized code at mapped points)
+- Dmitriev, A., "Safe Class and Data Evolution in Long-Running Java Applications" (the state-mapping problem statement)
+- DCEVM: Dynamic Code Evolution for Java (Würthinger et al.) — live class-evolution precedent
+- Erlang/OTP code-replacement semantics — the natural-exit versioned-dispatch model's production precedent
+
+**Known Limitations:**
+- Natural-exit migration (the default model) delays the fix for frames in long-running calls: a server frame holding a request for minutes runs old code until it returns. Opt-in optimized re-entry with interruptibility points (the existing safepoint/back-edge polls) is the mitigation, per function.
+- Optimized re-entry is certificate-gated: anchors whose certificates fail (live-set mismatch, state-token incompatibility) take the T0 path; the fast path is opt-in, not universal.
+- Re-entry across inlined boundaries reconstructs a single-frame continuation only; multi-frame call-continuation reconstruction (callee mid-call inside an inlined chain) is T0 territory in v1.
+- Semantic drift is detected, not solved: version constraints + validation predicates refuse migration for affected frames; unresolvable drift means affected frames run old code to natural exit.
+- Frames blocked inside barriers for arbitrarily long (unsignaled condvars, never-returning FFI) extend old-code residency indefinitely: reclaim is residency-gated, so "old code exits" is a guest-termination assumption in disguise — documented, not hidden.
+
+---
+
+## 1. Goals, Non-Goals, and Constraints
+
+### Goals
+
+1. State preservation: no live frame loses state across a swap; every frame continues with equivalent semantics in the new code, in old code to natural exit, or materialized to T0 — each a defined outcome, never a failure.
+2. Bounded pause: publication is atomic and static-only; per-thread migration happens at cooperative safepoints under the concurrent deopt protocol — no global stop-the-world for migration.
+3. Region locality: only frames of the swapped region migrate; other functions' frames are untouched (region isolation, Deoptimization Subsystem document §6.3).
+4. Composability: migration reuses deopt materialization (frames become source-level state) rather than inventing a parallel frame-rewriting mechanism; optimized re-entry reuses the new code's own compiler for stub emission.
+5. Legacy-code exit: old code remains executable for deferred/refused frames until residency reaches zero, then is reclaimed by residency-gated epoch reclamation.
+
+### Non-Goals
+
+1. Deploying without preparation (swap requires the new UGB + compiled shadow; no "patch the binary bytes" mode).
+2. Replacing the class redefinition protocol itself (UGB document owns delivery; Phoenix owns the runtime transition).
+3. Cross-version data migration beyond layout adaptation (§6.7) — application-level data migration is guest-code territory.
+4. Rollback (a published swap is durable; compensating swaps are new swaps).
+5. Multi-frame call-continuation reconstruction in optimized re-entry (v1; T0 is the general path).
+
+### Constraints
+
+- Migration maps must be total on reachable states: every old-code safepoint's live state has a mapped continuation (mapped-with-certificate → new code; uncertified → T0 materialization) — invariant 1.
+- Publication must be atomic per the T1 install-atomicity pattern (validity invariant 7) and must not evaluate guest-expressive predicates (static checks only — invariant on the pause structure).
+- Per-thread migration cost at a safepoint: O(frame state) via deopt metadata — bounded by frame size, not heap.
+- Migration never migrates a frame holding a monitor: frames inside effect barriers (non-empty held-monitor set) defer until the set empties (runtime truth, §6.6).
+- Swaps of one function are serialized with drain: swap B for function f begins only after swap A's residency reaches zero or the maps are explicitly chained (§6.8).
+- DICE version pruning is overridden by residency: versions referenced by live migration maps are pinned until residency zero (§6.8).
+
+---
+
+## 6. Live Hot Code Swapping Subsystem
+
+### 6.1 Purpose and Domain
+
+Swapping code in a live process has two hard halves: making the *new* code available atomically (solved: install atomicity, version dispatch) and moving *live frames* from old code to new code (the hard half). Phoenix takes the hard half from the deoptimization machinery — a deopt already materializes an optimized frame into source-level state at a safepoint — and from thirty years of Erlang production practice: natural-exit versioned dispatch is the general model, and optimized re-entry is a certificate-gated opt-in, not the default. The composition is: dispatch new calls to new code (version table), let old frames run to natural exit (always correct), and offer materialize-and-re-enter for callers who need faster adoption (DICE anchors + certificates + Phoenix-owned resume stubs).
+
+### 6.2 Mathematical Specification
+
+| Requirement | Specification |
+|---|---|
+| **Domain** | Old compiled region R_old (Region model: root + inlined calls, Deoptimization Subsystem document §6.3) with live frames; new UGB unit B_new; DICE anchor diff Δ(B_old, B_new); compiled shadow code R_new. |
+| **Codomain** | Published R_new with its version-table entry; per-frame outcomes (continues in R_new at a certified anchor, continues in R_old to natural exit, materialized to T0); reclaimed R_old when residency is zero. |
+| **Definitions** | Migration map M: partial function from (old safepoint, frame state) → (new resume stub, new frame state); each entry carries a certificate: live-set equality (the old safepoint's live set equals the stub's expected live set, by name and type) ∧ state-token compatibility (region classes and effect kinds of the old state's tokens are compatible with the stub's expected tokens). Uncertified anchor: no M entry → T0 materialization. Residency(R_old) = |frames executing R_old| + |return addresses into R_old held by any region's frames| + |FFI resume slots targeting R_old|. Effect barrier: a frame whose held-monitor set (deopt metadata extension, §6.6) is non-empty. |
+| **Preconditions** | B_new verifies (Valid_UGB); R_new compiled in migration-respecting mode (§6.5) with resume stubs at certified anchors; static validation facts hold (§6.6); no swap in flight for the function (serialization, §6.8). |
+| **Postconditions** | No frame lost or duplicated; observable continuation of every frame equals the old code's continuation semantics (same values produced, same effects, same exceptions at equivalent points, per the state-equivalence invariant); other regions unaffected except return-address residency accounting; monitors never transferred (holding frames defer). |
+| **Invariants** | Migration totality (1), state equivalence (2), barrier liveness (3), publish atomicity (4), no-monitor-migration (5), region locality (6). |
+| **Relations** | M derives from DICE's anchor mapping α (DICE document §6.4) — the same alignment — plus Phoenix-owned certificates; the version table maps function ids → current code entry. |
+| **Failure behavior** | Validation predicate failure at a frame (migration-time): refuse migration for that frame (natural-exit residency), record refusal. R_new compilation failure: swap aborts before publication (no partial state, T1 fallback-safety invariant 10 discipline). Publication-time static check failure: swap aborts before publication. |
+| **Complexity** | Map construction O(|Δ|) + certificates O(|anchors| × frame-state size); per-frame migration O(frame state); publication O(patched entry points) + O(1) version-table swap. |
+| **Correctness** | Invariants 1–2 discharge the state-safety argument: totality guarantees every frame has a continuation; certificates + equivalence guarantee the continuation is semantically right. |
+
+### 6.3 The Swap Pipeline
+
+```
+1. receive B_new (redefinition event)           — UGB document delivery
+2. Δ = DICE.Delta(B_old, B_new)                 — anchor diff (shared service)
+3. M = build_migration_maps(Δ) + certificates   — §6.4 (uncertified anchors → T0 path)
+4. compile R_new in migration-respecting mode   — resume stubs at certified anchors; tier from policy with profile transfer
+5. static validation (registry facts only)      — §6.6 (O(1) checks; guest predicates are migration-time)
+6. publish: version-table swap + patch rewiring — atomic per T1 install-atomicity pattern
+7. migrate: per-thread at safepoints            — §6.5 (opt-in re-entry; default natural exit)
+8. reclaim R_old when residency = 0             — §6.8 residency-gated reclamation
+```
+
+Step 5 can abort the swap cleanly (before publication) with O(1) static checks. Steps 6–8 are the runtime transition; a failure after publication never corrupts state because every migration path is individually total (invariant 1) and old code remains valid for deferred frames.
+
+### 6.4 Migration Maps and Certificates
+
+M is computed from the anchor diff: each old anchor (instruction_id, role) maps to zero, one, or several new anchors. For each old safepoint s with live state (deopt metadata describes the frame):
+
+- **Certificate check (per anchor):** live-set equality (names and types of live variables match the new code's expectations at the mapped anchor) ∧ state-token compatibility (the region classes and effect kinds of the old state's tokens match the stub's expected tokens — no store into a region the new code assumes unobserved, no missing token the stub expects). Certified → M entry with a resume stub.
+- **Structural identity without certificate** (slot structure matches but the certificate's semantic checks were not derivable): T0 path — the state is materialized and the interpreter continues.
+- **Structural change** (removed slots, reordered loop structure, changed signatures): T0 path.
+
+M's totality is by construction: certified-mapped, uncertified-T0, or structural-T0 — no fourth outcome (invariant 1). The certificate converts the anchor diff from a compilation heuristic (its DICE purpose: bound recompute cost) into a migration oracle (its Phoenix purpose: guarantee state equivalence) — the two purposes share the alignment but not the guarantee, and Phoenix's correctness rests on the certificates, not on the diff.
+
+### 6.5 Migration Paths
+
+**Default: natural-exit versioned dispatch (Erlang OTP model).** At publication, the function's version table entry flips to R_new; all *new* calls dispatch to R_new; every *existing* frame runs its current call to natural exit in R_old. No frame migration, no state mapping, no monitor interaction, no barrier machinery — the always-correct model with bounded, honest latency (a frame in a long call delays the fix until it returns). Old-code residency drains naturally.
+
+**Opt-in: optimized re-entry.** Callers (or deployment tooling, per function) that need faster adoption enable re-entry: at each thread's next safepoint, the Concurrent Deoptimization Subsystem document's per-thread protocol (§6.4–§6.7) walks frames belonging to R_old:
+1. Materialize the frame via deopt metadata (existing machinery — source-level state, inline chains included for *materialization*).
+2. Consult M: certified → re-enter R_new at the resume stub with the mapped state (single-frame continuation; the stub was emitted by R_new's own compiler in migration-respecting mode — Phoenix owns the stub shapes for all tiers, §6.5 here, closing the "nobody owns arbitrary-entry OSR" gap). Uncertified/structural → enter T0 at the materialized state and let tiering re-escalate naturally.
+3. A materialized frame with a non-empty held-monitor set defers (barrier, §6.6).
+
+**Resume stubs (owned machinery).** For every tier that compiles R_new in migration-respecting mode, the compiler emits one resume stub per certified anchor: the stub takes the materialized frame state (deopt-metadata frame format, shared across tiers) and installs it into that tier's frame layout — the same state-transfer discipline as deopt metadata's reconstruction, inverted. Stub emission is assigned to the tier compilers as a mode, not to T1 alone.
+
+**Inline-boundary scope (honest).** Optimized re-entry maps single-frame continuations at region-root entries. A frame materialized from the *middle* of an inlined chain whose new code no longer inlines the callee becomes multiple frames in the new code — call-continuation reconstruction — which v1 routes to T0 (the interpreter rebuilds the whole stack naturally). The earlier draft's claim that deopt materialization made cross-boundary maps unnecessary was half-true (materialization yes, re-entry no) and is corrected here.
+
+### 6.6 Effect Barriers and Semantic Validation
+
+**Runtime truth for barriers.** The deopt metadata gains a `held_monitors` field (Phoenix-owned metadata extension): the set of monitors the frame holds at the safepoint, maintained by monitor acquire/release instrumentation. A frame with a non-empty held-monitor set defers migration until the set empties — runtime truth overrides any static annotation (a Python `with lock:` acquires the monitor at runtime; no static scope can know). Barrier liveness: the frame eventually empties the set by its own execution (monitors release, calls return) or by natural exit — no frame defers forever unless it is genuinely stuck (documented in Known Limitations: an unsignaled condvar or never-returning FFI extends residency; the runtime does not force-interrupt, per the EH document's no-forced-unwinding limit).
+
+**Semantic validation.** Machinery cannot fix semantic drift: new code may assume invariants old state violates. B_new carries optional version constraints. Publication-time validation is **static only** (registry facts: O(1) — descriptor versions, capability requirements, static invariants declared per type); guest-expressive validation predicates are evaluated per frame at migration safepoints (thread-local, cooperative — no stop-the-world predicate walk). Predicate failure → refuse migration for that frame (natural-exit residency) and record the refusal for deployment tooling. The refusal is a defined outcome (invariant 2's equivalence is preserved by not migrating), not an error.
+
+### 6.7 Schema and Layout Evolution
+
+Field layout changes (DSLO layout versions, CAMT document §6.5) interact with migration through descriptor versions: **R_new is compiled layout-unspeculating until the version census reports zero old-layout residency** (the default — T2+ layout speculation on a mixed population would deopt-storm); a bounded concurrent fixup pass (remap-style, mutator-context, safepoint-cooperative) is the optional accelerator for deployments that want eager convergence. Old objects adapt lazily via descriptor-version-guarded accessor thunks; GC-assisted adaptation happens *through evacuation promotion to the new layout as objects are naturally collected* — never as a GC-phase callback (adaptation callbacks execute in mutator context at safepoints, not during collector phases; the earlier draft's GC-phase callback violated allocation and safepoint discipline). Capability-protected interior offsets (Capability System Implementation document §6.3) re-register against the new layout during accessor adaptation; pinned layouts are never transformed (so no adaptation arises for them).
+
+### 6.8 Overlapping Swaps and Old-Code Lifetime
+
+**Serialization with drain.** Swaps of one function are serialized: swap B for f begins only after swap A's residency(f, B_old) reaches zero, or — for deployments that cannot wait — B's maps are explicitly chained (M_B composed over M_A's remaining entries; chaining is the opt-in, serialization the default). DICE version pruning is overridden by residency: versions referenced by live migration maps are pinned until residency zero (the DICE pinning discipline §6.3 includes Phoenix's pins).
+
+**Residency and reclamation.** Residency(R_old) counts: frames executing R_old; return addresses into R_old held by frames of *any* region (an unswapped caller's return target extends R_old's life); FFI resume slots targeting R_old (EH document §6.9 boundary rules). Reclamation is residency-gated: R_old's code, metadata, and migration maps free when residency reaches zero — this overrides the GC Interaction Subsystem document §6.6 two-quiet-epochs rule for swap-retired code (the composition is stated here as a Phoenix-owned reclamation rule; the two-epoch discipline still applies after residency zero). A frame stuck in a barrier for hours keeps R_old mapped for hours — documented, bounded by guest behavior, never by the runtime's intervention.
+
+### 6.9 Validity Invariants
+
+**1. Migration totality.** Every old-frame state has a continuation: certified-mapped, uncertified-T0, or structural-T0. No state class exists without a path (checked by construction over the anchor diff's coverage plus certificates).
+
+**2. State equivalence.** The observable continuation of every migrated frame equals the old code's continuation: same values, same effects, same exceptions at equivalent points; the guarantee rests on the certificates (§6.4) plus the deopt machinery's effect-consistency contract (Deoptimization Subsystem document §6.4), not on the syntactic anchor match alone.
+
+**3. Barrier liveness.** Held-monitor frames defer until their monitor set empties or they exit naturally; refusals are recorded, not silent; indefinitely-stuck frames are a documented guest-behavior consequence, not a correctness violation.
+
+**4. Publish atomicity.** No thread observes partially published new code (T1 install-atomicity pattern; the version-table swap is a single word; patch rewiring completes before the table flip).
+
+**5. No-monitor-migration.** Migrating frames hold no monitors (held-monitor frames defer); monitor ownership never transfers across a migration; the thin/fat monitor race class is eliminated by construction.
+
+**6. Region locality.** Frames outside the swapped region are untouched; other regions' code and state are unaffected except return-address residency accounting; dependency invalidation for callers of the swapped function follows the deopt machinery's caller-patching rules (Deoptimization Subsystem document §6.5), not the AOT Ledger (which is Dualis-scoped).
+
+### 6.10 Representation and Cost Model
+
+**Storage.** Migration maps: O(|Δ|) entries (~40 bytes with certificates) held only between publication and residency zero; escape trampolines: 5 bytes per old safepoint/return point (patched jump) for opt-in re-entry deployments; resume stubs: per certified anchor, one per tier; held_monitors: one small vector per frame (usually empty).
+
+**Cost accounting.**
+- Map construction: O(|Δ|) + certificates O(|anchors| × frame-state size); shadow compile in migration-respecting mode: standard tier costs + stub emission.
+- Publication: O(patched entries) + O(1) version-table swap, atomic.
+- Natural-exit model: zero per-frame cost (dispatch table only).
+- Per-frame re-entry: O(frame state) materialization (existing deopt cost) + O(1) map lookup + stub entry.
+- Pause structure: publication is a brief per-region barrier (entry swap + trampoline patch, bounded by patched-entry count; static checks only); migration is per-thread cooperative — no global stop-the-world.
+
+**Honest statement.** The default model's adoption latency is bounded by frame lifetimes (a minutes-long request frame delays the fix minutes); opt-in re-entry costs materialization per frame but is certificate-gated. The universal fallback (T0) costs a T0 transit per migrating frame. The design claim is no lost state and bounded pause, not zero cost or instant adoption.
+
+---
+
+## Revision Notes (post red-team)
+
+1. General model changed to natural-exit versioned dispatch (Erlang OTP semantics) with optimized re-entry as certificate-gated opt-in (break: the re-entry mechanism depended on arbitrary-entry OSR stubs for T2+ code that no cited document owns — T1 §6.9 is T0→T1 loop-header stubs only, and the tiered system excludes OSR into T2+; the tiered system's own known limitations were quoted against the design).
+2. Resume stub emission assigned to a Phoenix-owned compilation mode in all tier compilers (break: the "generalized T1 discipline" citation was false support; no emitter existed).
+3. Per-anchor certificates (live-set equality + state-token compatibility) gate the fast path; the anchor diff is a compilation heuristic, not a migration oracle (break: syntactic matches could map state into semantically different loops — silent wrong values).
+4. Inline-boundary re-entry scoped to single-frame continuations; multi-frame call-continuation reconstruction is T0 territory in v1 (break: "no cross-inline-boundary maps needed" was half-true — materialization yes, re-entry no).
+5. Effect barriers use runtime truth: held_monitors deopt-metadata extension (owned); monitor-holding frames defer, monitor transfer removed (breaks: barrier detection had no runtime mechanism; monitor transfer raced thin/fat inflation; invariant 5 was contradictory or vacuous).
+6. Publication-time validation restricted to static registry facts; guest predicates evaluated per-frame at migration safepoints (break: predicate walk over all resident frames contradicted the bounded-pause goal and was stale by construction).
+7. Overlapping swaps serialized with drain; explicit map chaining opt-in; no-prune-until-residency-zero pins DICE versions (break: M_B keyed only on R_new_A anchors while R_old frames still needed composition; pruning orphaned live maps).
+8. Layout adaptation: R_new layout-unspeculating until census zero (default), fixup pass in mutator context, GC-evacuation promotion as natural collection — never GC-phase callbacks (breaks: tenured/pinned old-layout objects never converge; callbacks during GC violate allocation/safepoint discipline).
+9. Residency defined over return addresses from any region + FFI resume slots; reclamation residency-gated, overriding the two-quiet-epochs rule for swap-retired code; indefinite residency documented (breaks: "barrier liveness" false for stuck frames; reclamation mechanism mismatch).
+
+---
+
