@@ -15,12 +15,16 @@
 #![warn(missing_docs)]
 
 pub mod caps;
+pub mod concurrent_gc;
 pub mod gc;
 pub mod heap;
 pub mod profile;
 pub mod trap;
 
 pub use caps::{CapError, Environment, Gct, Status, Token, GCT_INVALID, MAX_CAP_SLOTS};
+pub use concurrent_gc::{
+    CardTable, ConcurrentGc, GcHandle, Phase, SafepointAction, SafepointCoordinator, SafepointState,
+};
 pub use gc::{
     Collector, Colors, ForwardingCache, GcConfig, GcStats, MarkBitmap, PointerColor, SatbQueue,
 };
