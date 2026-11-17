@@ -398,6 +398,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "vortex-t2"
+version = "0.1.0"
+dependencies = [
+ "vortex-ir",
+]
+
+[[package]]
 name = "vortex-t4"
 version = "0.1.0"
 dependencies = [

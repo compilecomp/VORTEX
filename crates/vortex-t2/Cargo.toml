@@ -1,0 +1,13 @@
+[package]
+name = "vortex-t2"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "T2: O(1) passes tier — single-scan peephole, folding, DCE, specialization."
+
+[lints]
+workspace = true
+
+[dependencies]
+vortex-ir = { path = "../vortex-ir" }

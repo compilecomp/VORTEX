@@ -6,6 +6,7 @@ members = [
     "crates/vortex-ugb",
     "crates/vortex-runtime",
     "crates/vortex-ir",
+    "crates/vortex-t2",
     "crates/vortex-t0",
     "crates/vortex-t1",
     "crates/vortex-opt",
