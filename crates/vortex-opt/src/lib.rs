@@ -22,6 +22,7 @@ pub mod mach;
 pub mod passes;
 pub mod sched;
 pub mod vector;
+pub mod x64;
 
 pub use dwarf::{emit_abbrev, emit_info, sleb, uleb, Abbrev, Die, LineHeader, LineProgram};
 pub use emit::{
@@ -38,3 +39,4 @@ pub use sched::{
     Scheduled, TargetModel,
 };
 pub use vector::{Alignment, LaneOp, ReduceOp, ScalarTag, VError, VGraph, VNode, VType};
+pub use x64::{Alu, Cond, EncodeError, Encoder, Gpr, RelocKind, Shift};

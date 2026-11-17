@@ -392,6 +392,7 @@ name = "vortex-t1"
 version = "0.1.0"
 dependencies = [
  "vortex-nv1",
+ "vortex-opt",
  "vortex-runtime",
  "vortex-t0",
  "vortex-ugb",

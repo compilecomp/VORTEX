@@ -16,7 +16,9 @@
 pub mod exec;
 pub mod fallback;
 pub mod plan;
+pub mod stencil;
 
 pub use exec::{Dst, Executor};
 pub use fallback::{classify, Coverage};
 pub use plan::{plan_method, CodeObject, PatchedInstr, PlanError};
+pub use stencil::{emit_machine_code, MachineCode};

@@ -11,6 +11,7 @@ workspace = true
 
 [dependencies]
 vortex-nv1 = { path = "../vortex-nv1" }
+vortex-opt = { path = "../vortex-opt" }
 vortex-ugb = { path = "../vortex-ugb" }
 vortex-runtime = { path = "../vortex-runtime" }
 
